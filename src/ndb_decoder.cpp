@@ -874,7 +874,19 @@ std::vector<DecodeResult> DecodeNdbFromWav(const std::vector<float>& samples, in
 
   Report(progress, 0, "init");
   const int decim = std::max(1, sampleRate / std::max(1000, cfg.targetSampleRate));
-  std::vector<float> work = DecimateAverage(samples, decim);
+  const FrontEndConfig frontCfg{
+      cfg.enableBandLimit,
+      cfg.bandLowHz,
+      cfg.bandHighHz,
+      cfg.enableAutoNotch,
+      cfg.autoNotchMaxCount,
+      cfg.autoNotchSnrDb,
+      cfg.enableImpulseBlanker,
+      cfg.impulseBlankerSigma,
+      cfg.impulseBlankerHalfWindow,
+  };
+  const auto denoised = ApplyFrontEndDenoise(samples, sampleRate, frontCfg);
+  std::vector<float> work = DecimateAverage(denoised, decim);
   int workRate = sampleRate / decim;
   if (workRate <= 0) {
     work = samples;
@@ -902,7 +914,17 @@ std::vector<DecodeResult> DecodeNdbFromWav(const std::vector<float>& samples, in
   }
   Report(progress, 24, "spectrogram");
 
-  const auto candidates = DetectCandidateBinsMad(spec, cfg.madFactor, cfg.guardBins);
+  const CandidateDetectorConfig detCfg{
+      cfg.madFactor,
+      cfg.guardBins,
+      cfg.enableCfar2d,
+      cfg.cfarTrainTime,
+      cfg.cfarGuardTime,
+      cfg.cfarTrainFreq,
+      cfg.cfarGuardFreq,
+      cfg.cfarScale,
+  };
+  const auto candidates = DetectCandidateBinsMadCfar2D(spec, detCfg);
   if (stats) {
     int bins = 0;
     for (const auto& v : candidates) {
@@ -912,8 +934,12 @@ std::vector<DecodeResult> DecodeNdbFromWav(const std::vector<float>& samples, in
   }
   Report(progress, 35, "candidate-detection");
 
-  const auto tracks = TrackTonesAmtcLite(spec, candidates, cfg.maxTrackStepBins, cfg.minTrackFrames,
-                                         cfg.sustainPenalty);
+  const auto tracks =
+      cfg.useAmtcFull
+          ? TrackTonesAmtcFull(spec, candidates, cfg.maxTrackStepBins, cfg.minTrackFrames,
+                               cfg.sustainPenalty, cfg.maxTrackGapFrames)
+          : TrackTonesAmtcLite(spec, candidates, cfg.maxTrackStepBins, cfg.minTrackFrames,
+                               cfg.sustainPenalty);
   if (stats) {
     stats->trackCount = static_cast<int>(tracks.size());
   }

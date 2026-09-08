@@ -74,8 +74,30 @@ void PrintUsage() {
       << "  --max-step-bins <int>      Max track drift in bins/frame (default: 3)\n"
       << "  --min-track-frames <int>   Min frames to keep a track (default: 15)\n"
       << "  --sustain-penalty <float>  Track sustain bonus term (default: 0.02)\n"
+      << "  --amtc-lite                Use AMTC-lite greedy tracker (default)\n"
+      << "  --amtc-full                Use AMTC-full DP tracker\n"
+      << "  --max-track-gap <int>      Max gap frames for AMTC-full (default: 3)\n"
       << "  --envelope-alpha <float>   Envelope smoother alpha (default: 0.05)\n"
+      << "  --band-limit               Enable front-end band-limit\n"
+      << "  --no-band-limit            Disable front-end band-limit (default off)\n"
+      << "  --band-low-hz <float>      Front-end band-pass low cutoff (default: 90)\n"
+      << "  --band-high-hz <float>     Front-end band-pass high cutoff (default: 2200)\n"
+      << "  --auto-notch               Enable automatic notch filtering\n"
+      << "  --no-auto-notch            Disable automatic notch filtering (default off)\n"
+      << "  --auto-notch-max <int>     Max auto-notch tones (default: 3)\n"
+      << "  --auto-notch-snr-db <float> Auto-notch trigger SNR in dB (default: 8.0)\n"
+      << "  --impulse-blanker          Enable impulse blanker\n"
+      << "  --no-impulse-blanker       Disable impulse blanker (default off)\n"
+      << "  --impulse-sigma <float>    Impulse blanker sigma threshold (default: 6.0)\n"
+      << "  --impulse-window <int>     Impulse blanker half-window (default: 3)\n"
       << "  --threshold-k <float>      MAD K for OOK threshold (default: 2.5)\n"
+      << "  --cfar2d                   Enable 2D-CFAR candidate gating\n"
+      << "  --no-cfar2d                Disable 2D-CFAR candidate gating (default off)\n"
+      << "  --cfar-train-time <int>    2D-CFAR train cells in time (default: 4)\n"
+      << "  --cfar-guard-time <int>    2D-CFAR guard cells in time (default: 1)\n"
+      << "  --cfar-train-freq <int>    2D-CFAR train cells in freq (default: 6)\n"
+      << "  --cfar-guard-freq <int>    2D-CFAR guard cells in freq (default: 1)\n"
+      << "  --cfar-scale <float>       2D-CFAR noise scaling (default: 2.8)\n"
       << "  --min-dot-ms <int>         Min dot length ms (default: 40)\n"
       << "  --max-dot-ms <int>         Max dot length ms (default: 220)\n"
       << "  --target-sr <int>          Target sample rate after decimation (default: 8000)\n"
@@ -314,6 +336,22 @@ bool ParseArgs(int argc, char** argv, CliArgs* out, std::string* error) {
       }
       continue;
     }
+    if (token == "--amtc-lite") {
+      out->cfg.useAmtcFull = false;
+      continue;
+    }
+    if (token == "--amtc-full") {
+      out->cfg.useAmtcFull = true;
+      continue;
+    }
+    if (token == "--max-track-gap") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseInt(value, &out->cfg.maxTrackGapFrames)) {
+        *error = "Invalid integer for --max-track-gap";
+        return false;
+      }
+      continue;
+    }
     if (token == "--envelope-alpha") {
       std::string value;
       if (!parseOptionValue(token, &value) || !ParseFloat(value, &out->cfg.envelopeAlpha)) {
@@ -322,10 +360,130 @@ bool ParseArgs(int argc, char** argv, CliArgs* out, std::string* error) {
       }
       continue;
     }
+    if (token == "--no-band-limit") {
+      out->cfg.enableBandLimit = false;
+      continue;
+    }
+    if (token == "--band-limit") {
+      out->cfg.enableBandLimit = true;
+      continue;
+    }
+    if (token == "--band-low-hz") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseFloat(value, &out->cfg.bandLowHz)) {
+        *error = "Invalid float for --band-low-hz";
+        return false;
+      }
+      continue;
+    }
+    if (token == "--band-high-hz") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseFloat(value, &out->cfg.bandHighHz)) {
+        *error = "Invalid float for --band-high-hz";
+        return false;
+      }
+      continue;
+    }
+    if (token == "--no-auto-notch") {
+      out->cfg.enableAutoNotch = false;
+      continue;
+    }
+    if (token == "--auto-notch") {
+      out->cfg.enableAutoNotch = true;
+      continue;
+    }
+    if (token == "--auto-notch-max") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseInt(value, &out->cfg.autoNotchMaxCount)) {
+        *error = "Invalid integer for --auto-notch-max";
+        return false;
+      }
+      continue;
+    }
+    if (token == "--auto-notch-snr-db") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseFloat(value, &out->cfg.autoNotchSnrDb)) {
+        *error = "Invalid float for --auto-notch-snr-db";
+        return false;
+      }
+      continue;
+    }
+    if (token == "--no-impulse-blanker") {
+      out->cfg.enableImpulseBlanker = false;
+      continue;
+    }
+    if (token == "--impulse-blanker") {
+      out->cfg.enableImpulseBlanker = true;
+      continue;
+    }
+    if (token == "--impulse-sigma") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseFloat(value, &out->cfg.impulseBlankerSigma)) {
+        *error = "Invalid float for --impulse-sigma";
+        return false;
+      }
+      continue;
+    }
+    if (token == "--impulse-window") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseInt(value, &out->cfg.impulseBlankerHalfWindow)) {
+        *error = "Invalid integer for --impulse-window";
+        return false;
+      }
+      continue;
+    }
     if (token == "--threshold-k") {
       std::string value;
       if (!parseOptionValue(token, &value) || !ParseFloat(value, &out->cfg.thresholdK)) {
         *error = "Invalid float for --threshold-k";
+        return false;
+      }
+      continue;
+    }
+    if (token == "--no-cfar2d") {
+      out->cfg.enableCfar2d = false;
+      continue;
+    }
+    if (token == "--cfar2d") {
+      out->cfg.enableCfar2d = true;
+      continue;
+    }
+    if (token == "--cfar-train-time") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseInt(value, &out->cfg.cfarTrainTime)) {
+        *error = "Invalid integer for --cfar-train-time";
+        return false;
+      }
+      continue;
+    }
+    if (token == "--cfar-guard-time") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseInt(value, &out->cfg.cfarGuardTime)) {
+        *error = "Invalid integer for --cfar-guard-time";
+        return false;
+      }
+      continue;
+    }
+    if (token == "--cfar-train-freq") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseInt(value, &out->cfg.cfarTrainFreq)) {
+        *error = "Invalid integer for --cfar-train-freq";
+        return false;
+      }
+      continue;
+    }
+    if (token == "--cfar-guard-freq") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseInt(value, &out->cfg.cfarGuardFreq)) {
+        *error = "Invalid integer for --cfar-guard-freq";
+        return false;
+      }
+      continue;
+    }
+    if (token == "--cfar-scale") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseFloat(value, &out->cfg.cfarScale)) {
+        *error = "Invalid float for --cfar-scale";
         return false;
       }
       continue;

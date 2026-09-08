@@ -31,14 +31,45 @@ struct Spectrogram {
   }
 };
 
+struct FrontEndConfig {
+  bool enableBandLimit = true;
+  float bandLowHz = 90.0f;
+  float bandHighHz = 2200.0f;
+  bool enableAutoNotch = true;
+  int autoNotchMaxCount = 3;
+  float autoNotchSnrDb = 8.0f;
+  bool enableImpulseBlanker = true;
+  float impulseBlankerSigma = 6.0f;
+  int impulseBlankerHalfWindow = 3;
+};
+
+struct CandidateDetectorConfig {
+  float madFactor = 4.0f;
+  int guardBins = 2;
+  bool enableCfar2d = true;
+  int cfarTrainTime = 4;
+  int cfarGuardTime = 1;
+  int cfarTrainFreq = 6;
+  int cfarGuardFreq = 1;
+  float cfarScale = 2.8f;
+};
+
 Spectrogram ComputeSpectrogram(const std::vector<float>& samples, int sampleRate, int fftSize,
                                int hopSize);
+std::vector<float> ApplyFrontEndDenoise(const std::vector<float>& samples, int sampleRate,
+                                        const FrontEndConfig& cfg);
 std::vector<std::vector<int>> DetectCandidateBinsMad(const Spectrogram& spec, float madFactor,
                                                       int guardBins);
+std::vector<std::vector<int>> DetectCandidateBinsMadCfar2D(const Spectrogram& spec,
+                                                            const CandidateDetectorConfig& cfg);
 std::vector<Track> TrackTonesAmtcLite(const Spectrogram& spec,
                                       const std::vector<std::vector<int>>& candidates,
                                       int maxStepBins, int minTrackLengthFrames,
                                       float sustainPenalty);
+std::vector<Track> TrackTonesAmtcFull(const Spectrogram& spec,
+                                      const std::vector<std::vector<int>>& candidates,
+                                      int maxStepBins, int minTrackLengthFrames,
+                                      float sustainPenalty, int maxGapFrames);
 std::vector<std::complex<float>> MixDown(const std::vector<float>& x, int sampleRate,
                                          float freqHz);
 std::vector<float> DecimateAverage(const std::vector<float>& x, int factor);

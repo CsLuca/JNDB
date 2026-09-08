@@ -35,6 +35,8 @@ struct DecoderConfig {
   int maxTrackStepBins = 3;
   int minTrackFrames = 15;
   float sustainPenalty = 0.02f;
+  bool useAmtcFull = false;
+  int maxTrackGapFrames = 3;
   float envelopeAlpha = 0.05f;
   float thresholdK = 2.5f;
   int minDotMs = 40;
@@ -76,6 +78,21 @@ struct DecoderConfig {
   float hsmmSigmaOffWord = 1.45f;
   float hsmmDurationTailMix = 0.18f;
   float hsmmTimeTransitionGain = 0.55f;
+  bool enableBandLimit = false;
+  float bandLowHz = 90.0f;
+  float bandHighHz = 2200.0f;
+  bool enableAutoNotch = false;
+  int autoNotchMaxCount = 3;
+  float autoNotchSnrDb = 8.0f;
+  bool enableImpulseBlanker = false;
+  float impulseBlankerSigma = 6.0f;
+  int impulseBlankerHalfWindow = 3;
+  bool enableCfar2d = false;
+  int cfarTrainTime = 4;
+  int cfarGuardTime = 1;
+  int cfarTrainFreq = 6;
+  int cfarGuardFreq = 1;
+  float cfarScale = 2.8f;
 };
 
 struct DecodeStats {

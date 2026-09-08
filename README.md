@@ -12,6 +12,9 @@ It is designed for weak-signal workflows and includes robust thresholding, multi
 - AMTC-lite multi-track continuity tracking
 - Envelope, boxcar integration, adaptive dot-length estimation
 - CSV export for downstream review and filtering
+- FFT acceleration path: FFTW3f auto-detected in CMake, with internal FFT/DFT fallback
+- Phase 3 DSP blocks available: band-limit, auto-notch, impulse blanker, 2D-CFAR
+- AMTC full DP tracker available via CLI (`--amtc-full`)
 
 ## Algorithmic notes (paper-inspired)
 
@@ -130,6 +133,18 @@ Note: inside MSYS2 bash, arguments starting with `/` can be path-converted by th
 - `--plausible-id-min <float>`: plausible ID minimum score (default `0.30`)
 - `--strict-beacon`: require repeated beacon observations before output
 - `--strict-min-repeats <int>`: minimum `hit_count` in strict mode (default `3`)
+- `--amtc-lite` / `--amtc-full`: select greedy tracker or DP multi-trace tracker
+- `--max-track-gap <int>`: max gap (frames) allowed by AMTC-full linking
+- `--band-limit` / `--no-band-limit`: enable/disable front-end band-limiting
+- `--band-low-hz <float>` / `--band-high-hz <float>`: front-end band-pass cutoffs
+- `--auto-notch` / `--no-auto-notch`: enable/disable automatic notch filtering
+- `--auto-notch-max <int>` / `--auto-notch-snr-db <float>`: auto-notch controls
+- `--impulse-blanker` / `--no-impulse-blanker`: enable/disable impulse blanker
+- `--impulse-sigma <float>` / `--impulse-window <int>`: impulse blanker controls
+- `--cfar2d` / `--no-cfar2d`: enable/disable 2D-CFAR candidate gating
+- `--cfar-train-time <int>` / `--cfar-guard-time <int>`: 2D-CFAR time windows
+- `--cfar-train-freq <int>` / `--cfar-guard-freq <int>`: 2D-CFAR frequency windows
+- `--cfar-scale <float>`: 2D-CFAR threshold scale
 - `--decoder-model <name>`: sequence decoder model (`auto`, `hmm`, `hsmm`)
 - `--hmm-on-intra <float>` / `--hmm-on-char <float>` / `--hmm-on-word <float>`: ON->OFF HMM transition weights (default `0.70/0.25/0.05`)
 - `--hmm-off-dot <float>` / `--hmm-off-dash <float>`: OFF->ON HMM transition weights (default `0.75/0.25`)
@@ -322,3 +337,9 @@ This tracks the requested metrics over time:
 - ID latency
 - runtime x real-time
 - plus mean `quality_score`
+
+## FFT backend notes
+
+- CMake now tries to find FFTW3f (`fftw3.h` and `fftw3f` library).
+- If found, STFT uses FFTW3f backend.
+- If not found, decoder uses internal radix-2 FFT when possible and DFT fallback otherwise.
