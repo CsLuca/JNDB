@@ -3,6 +3,7 @@
 #include "dsp.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <numeric>
 #include <sstream>
@@ -133,48 +134,178 @@ float ComputeIdLikeTokenRatio(const std::vector<DecodeResult>& results) {
   return static_cast<float>(good) / static_cast<float>(total);
 }
 
-std::pair<std::string, float> DecodeMorseLikeHmm(const std::vector<Run>& runs, int dotSamples) {
+float GaussianLike(float x, float mu, float sigma) {
+  const float s = std::max(0.05f, sigma);
+  const float d = (x - mu) / s;
+  return std::exp(-0.5f * d * d);
+}
+
+std::vector<float> AdaptiveDotPerRun(const std::vector<Run>& runs, float baseDot) {
+  std::vector<float> dots(runs.size(), baseDot);
+  std::vector<float> onLens;
+  onLens.reserve(runs.size());
+  for (std::size_t i = 0; i < runs.size(); ++i) {
+    if (runs[i].value == 1) {
+      onLens.push_back(static_cast<float>(runs[i].length));
+    }
+    if (onLens.size() >= 4) {
+      std::vector<float> tmp = onLens;
+      std::sort(tmp.begin(), tmp.end());
+      const std::size_t q = tmp.size() / 4;
+      float local = tmp[q];
+      local = std::max(0.6f * baseDot, std::min(1.6f * baseDot, local));
+      dots[i] = 0.85f * dots[std::max<std::size_t>(1, i) - 1] + 0.15f * local;
+    } else if (i > 0) {
+      dots[i] = dots[i - 1];
+    }
+  }
+  return dots;
+}
+
+std::pair<std::string, float> DecodeMorseViterbiHmm(const std::vector<Run>& runs, int dotSamples) {
   if (runs.empty() || dotSamples <= 0) {
     return {"", 0.0f};
   }
+
+  enum State { kOnDot = 0, kOnDash = 1, kOffIntra = 2, kOffChar = 3, kOffWord = 4, kN = 5 };
+  const float kNeg = -1e30f;
+
+  auto allowed = [](int runValue, int st) {
+    if (runValue == 1) {
+      return st == kOnDot || st == kOnDash;
+    }
+    return st == kOffIntra || st == kOffChar || st == kOffWord;
+  };
+
+  float trans[kN][kN];
+  for (int a = 0; a < kN; ++a) {
+    for (int b = 0; b < kN; ++b) {
+      trans[a][b] = -8.0f;
+    }
+  }
+  trans[kOnDot][kOffIntra] = std::log(0.70f);
+  trans[kOnDot][kOffChar] = std::log(0.25f);
+  trans[kOnDot][kOffWord] = std::log(0.05f);
+  trans[kOnDash][kOffIntra] = std::log(0.70f);
+  trans[kOnDash][kOffChar] = std::log(0.25f);
+  trans[kOnDash][kOffWord] = std::log(0.05f);
+  trans[kOffIntra][kOnDot] = std::log(0.75f);
+  trans[kOffIntra][kOnDash] = std::log(0.25f);
+  trans[kOffChar][kOnDot] = std::log(0.75f);
+  trans[kOffChar][kOnDash] = std::log(0.25f);
+  trans[kOffWord][kOnDot] = std::log(0.75f);
+  trans[kOffWord][kOnDash] = std::log(0.25f);
+
+  const auto dotVec = AdaptiveDotPerRun(runs, static_cast<float>(dotSamples));
+  const std::size_t T = runs.size();
+  std::vector<std::array<float, kN>> dp(T);
+  std::vector<std::array<int, kN>> prev(T);
+  for (std::size_t t = 0; t < T; ++t) {
+    for (int s = 0; s < kN; ++s) {
+      dp[t][s] = kNeg;
+      prev[t][s] = -1;
+    }
+  }
+
+  auto emission = [&](std::size_t t, int s) {
+    const float dot = std::max(1.0f, dotVec[t]);
+    const float u = static_cast<float>(runs[t].length) / dot;
+    if (s == kOnDot) return std::log(std::max(1e-6f, GaussianLike(u, 1.0f, 0.40f)));
+    if (s == kOnDash) return std::log(std::max(1e-6f, GaussianLike(u, 3.0f, 0.75f)));
+    if (s == kOffIntra) return std::log(std::max(1e-6f, GaussianLike(u, 1.0f, 0.45f)));
+    if (s == kOffChar) return std::log(std::max(1e-6f, GaussianLike(u, 3.0f, 0.90f)));
+    return std::log(std::max(1e-6f, GaussianLike(u, 7.0f, 1.60f)));
+  };
+
+  for (int s = 0; s < kN; ++s) {
+    if (allowed(runs[0].value, s)) {
+      dp[0][s] = emission(0, s);
+    }
+  }
+
+  for (std::size_t t = 1; t < T; ++t) {
+    for (int s = 0; s < kN; ++s) {
+      if (!allowed(runs[t].value, s)) {
+        continue;
+      }
+      const float em = emission(t, s);
+      float best = kNeg;
+      int bestPrev = -1;
+      for (int p = 0; p < kN; ++p) {
+        if (dp[t - 1][p] <= kNeg / 2) {
+          continue;
+        }
+        const float cand = dp[t - 1][p] + trans[p][s] + em;
+        if (cand > best) {
+          best = cand;
+          bestPrev = p;
+        }
+      }
+      dp[t][s] = best;
+      prev[t][s] = bestPrev;
+    }
+  }
+
+  int bestState = 0;
+  float bestScore = kNeg;
+  for (int s = 0; s < kN; ++s) {
+    if (dp[T - 1][s] > bestScore) {
+      bestScore = dp[T - 1][s];
+      bestState = s;
+    }
+  }
+
+  std::vector<int> path(T, 0);
+  path[T - 1] = bestState;
+  for (std::size_t ti = T - 1; ti > 0; --ti) {
+    const int p = prev[ti][path[ti]];
+    path[ti - 1] = (p >= 0 ? p : path[ti]);
+  }
+
   std::string text;
   std::string current;
-  int symbols = 0;
-  int valid = 0;
-  const float dot = static_cast<float>(dotSamples);
+  float confAcc = 0.0f;
+  int confN = 0;
 
-  for (const auto& r : runs) {
-    const float units = static_cast<float>(r.length) / dot;
-    if (r.value == 1) {
-      ++symbols;
-      if (units < 2.0f) {
+  for (std::size_t t = 0; t < T; ++t) {
+    const int st = path[t];
+    const float dot = std::max(1.0f, dotVec[t]);
+    const float u = static_cast<float>(runs[t].length) / dot;
+    if (st == kOnDot || st == kOnDash) {
+      const float pDot = GaussianLike(u, 1.0f, 0.40f);
+      const float pDash = GaussianLike(u, 3.0f, 0.75f);
+      const float z = pDot + pDash + 1e-9f;
+      const float postDot = pDot / z;
+      const float postDash = pDash / z;
+      if (st == kOnDot) {
         current.push_back('.');
-        ++valid;
+        confAcc += postDot;
       } else {
         current.push_back('-');
-        ++valid;
+        confAcc += postDash;
       }
-    } else {
-      if (units >= 2.5f) {
-        if (!current.empty()) {
-          const auto it = MorseTable().find(current);
-          text.push_back(it == MorseTable().end() ? '?' : it->second);
-          current.clear();
-        }
-        if (units >= 6.0f) {
-          text.push_back(' ');
-        }
+      ++confN;
+    } else if (st == kOffChar || st == kOffWord) {
+      if (!current.empty()) {
+        const auto it = MorseTable().find(current);
+        text.push_back(it == MorseTable().end() ? '?' : it->second);
+        current.clear();
+      }
+      if (st == kOffWord) {
+        text.push_back(' ');
       }
     }
   }
+
   if (!current.empty()) {
     const auto it = MorseTable().find(current);
     text.push_back(it == MorseTable().end() ? '?' : it->second);
   }
+
   while (!text.empty() && text.back() == ' ') {
     text.pop_back();
   }
-  const float conf = symbols > 0 ? static_cast<float>(valid) / symbols : 0.0f;
+  const float conf = confN > 0 ? confAcc / static_cast<float>(confN) : 0.0f;
   return {text, conf};
 }
 
@@ -557,7 +688,7 @@ std::vector<DecodeResult> DecodeNdbFromWav(const std::vector<float>& samples, in
     const float thr = RobustMadThreshold(boxed, cfg.thresholdK);
     const auto bits = BinaryByThreshold(boxed, thr);
     const auto runs = RunLengthEncode(bits);
-    const auto decodedText = DecodeMorseLikeHmm(runs, dotSamples);
+    const auto decodedText = DecodeMorseViterbiHmm(runs, dotSamples);
     if (decodedText.first.empty()) {
       ++done;
       Report(progress, 58 + (28 * done) / total, "decode-clusters");

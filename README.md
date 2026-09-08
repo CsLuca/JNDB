@@ -228,6 +228,15 @@ Phase 1 detection cleanup now includes:
   - keying periodicity
 - realistic range gate for RF NDB or audio-domain processing
 
+## Phase 2 robust Morse decoder
+
+The decoder now uses a Viterbi/HMM style sequence model instead of hard threshold symbol splitting.
+
+- States model ON/OFF durations around dot/dash/intra-char/char-gap/word-gap
+- Adaptive timing recovery: local dot estimate changes over time (fading/drift aware)
+- Probabilistic dot/dash classification via posterior-like likelihoods
+- Strong post-decoding grammar prior via plausible NDB ID extraction and cyclic repetition scoring
+
 Quality score formula:
 
 - `100 * (0.45*mean_confidence + 0.25*median_confidence + 0.20*decode_ratio + 0.10*id_like_token_ratio)`
