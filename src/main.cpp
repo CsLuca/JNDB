@@ -55,7 +55,33 @@ bool ApplyModePreset(const std::string& mode, ndb::DecoderConfig* cfg, std::stri
     cfg->thresholdK = 2.2f;
     return true;
   }
-  *error = "Invalid value for --mode (use: default, strict-dx, relaxed)";
+  if (mode == "phase3-balanced") {
+    cfg->enableBandLimit = true;
+    cfg->bandLowHz = 110.0f;
+    cfg->bandHighHz = 2000.0f;
+    cfg->enableAutoNotch = false;
+    cfg->enableImpulseBlanker = false;
+    cfg->enableCfar2d = false;
+    cfg->useAmtcFull = false;
+    return true;
+  }
+  if (mode == "phase3-selective") {
+    cfg->enableBandLimit = true;
+    cfg->bandLowHz = 110.0f;
+    cfg->bandHighHz = 2000.0f;
+    cfg->enableAutoNotch = false;
+    cfg->enableImpulseBlanker = false;
+    cfg->enableCfar2d = true;
+    cfg->cfarTrainTime = 3;
+    cfg->cfarGuardTime = 1;
+    cfg->cfarTrainFreq = 4;
+    cfg->cfarGuardFreq = 1;
+    cfg->cfarScale = 1.35f;
+    cfg->useAmtcFull = false;
+    return true;
+  }
+  *error =
+      "Invalid value for --mode (use: default, strict-dx, relaxed, phase3-balanced, phase3-selective)";
   return false;
 }
 
@@ -138,7 +164,7 @@ void PrintUsage() {
       << "  --hsmm-sigma-word <float>  HSMM sigma for word gap (default: 1.45)\n"
       << "  --hsmm-tail-mix <float>    HSMM duration heavy-tail mix (default: 0.18)\n"
       << "  --hsmm-time-gain <float>   HSMM time-dependent transition gain (default: 0.55)\n"
-      << "  --mode <preset>            Preset: default | strict-dx | relaxed\n"
+      << "  --mode <preset>            Preset: default | strict-dx | relaxed | phase3-balanced | phase3-selective\n"
       << "  --min-confidence <float>   Keep only rows with confidence >= value\n"
       << "  --metrics <path.json>      Write quality metrics JSON\n"
       << "  --no-progress              Disable progress output\n"
@@ -150,7 +176,8 @@ void PrintUsage() {
       << "  ndb_decode capture.wav out.csv --max-seconds 180 --target-sr 12000\n"
       << "  ndb_decode capture.wav --min-confidence 0.7 --mad-factor 3.5\n"
       << "  ndb_decode capture.wav out.csv --metrics run_metrics.json\n"
-      << "  ndb_decode capture.wav out.csv --mode strict-dx\n";
+      << "  ndb_decode capture.wav out.csv --mode strict-dx\n"
+      << "  ndb_decode capture.wav out.csv --mode phase3-balanced\n";
 }
 
 bool WriteCsv(const std::string& path, const std::vector<ndb::DecodeResult>& results,

@@ -157,6 +157,7 @@ Note: inside MSYS2 bash, arguments starting with `/` can be path-converted by th
 - `--hsmm-tail-mix <float>`: heavy-tail mix for explicit duration distribution
 - `--hsmm-time-gain <float>`: strength of time-dependent transition adaptation
 - `--mode <preset>`: preset profile (`default`, `strict-dx`, `relaxed`)
+- `--mode <preset>`: preset profile (`default`, `strict-dx`, `relaxed`, `phase3-balanced`, `phase3-selective`)
 - `--min-confidence <float>`: output filter; keep rows with confidence >= value
 - `--metrics <path.json>`: write run quality metrics JSON for trend tracking
 - `--no-progress`: disable progress output
@@ -206,6 +207,22 @@ ndb_decode capture.wav results.csv --mode strict-dx
 - strict beacon mode enabled (`strict_min_repeats = 3`)
 - tighter cluster/dedup tolerances
 - slightly stricter thresholding
+
+### Phase 3 presets
+
+- `phase3-balanced`
+  - enables only front-end band-limit (110..2000 Hz)
+  - keeps AMTC-lite and disables CFAR/notch/blanker for robust behavior
+- `phase3-selective`
+  - enables front-end band-limit + soft 2D-CFAR
+  - more selective than balanced in noisy files
+
+Examples:
+
+```bash
+ndb_decode capture.wav out.csv --mode phase3-balanced
+ndb_decode capture.wav out.csv --mode phase3-selective
+```
 
 ### Save quality metrics for comparison between versions
 
