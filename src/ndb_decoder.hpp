@@ -52,6 +52,16 @@ struct DecoderConfig {
   float plausibleIdMinScore = 0.30f;
   bool strictBeaconMode = false;
   int strictMinRepeats = 3;
+  float hmmTransOnToIntra = 0.73f;
+  float hmmTransOnToChar = 0.20f;
+  float hmmTransOnToWord = 0.07f;
+  float hmmTransOffToDot = 0.80f;
+  float hmmTransOffToDash = 0.20f;
+  float hmmSigmaOnDot = 0.35f;
+  float hmmSigmaOnDash = 0.65f;
+  float hmmSigmaOffIntra = 0.40f;
+  float hmmSigmaOffChar = 0.80f;
+  float hmmSigmaOffWord = 1.35f;
 };
 
 struct DecodeStats {

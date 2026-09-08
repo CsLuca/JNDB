@@ -93,6 +93,16 @@ void PrintUsage() {
       << "  --plausible-id-min <float> Plausible ID score threshold (default: 0.30)\n"
       << "  --strict-beacon            Require repeated ID hits before emitting\n"
       << "  --strict-min-repeats <int> Minimum hit_count for strict mode (default: 3)\n"
+      << "  --hmm-on-intra <float>     HMM P(on->intra) base weight (default: 0.73)\n"
+      << "  --hmm-on-char <float>      HMM P(on->char-gap) base weight (default: 0.20)\n"
+      << "  --hmm-on-word <float>      HMM P(on->word-gap) base weight (default: 0.07)\n"
+      << "  --hmm-off-dot <float>      HMM P(off->dot) base weight (default: 0.80)\n"
+      << "  --hmm-off-dash <float>     HMM P(off->dash) base weight (default: 0.20)\n"
+      << "  --hmm-sigma-dot <float>    HMM sigma for dot duration (default: 0.35)\n"
+      << "  --hmm-sigma-dash <float>   HMM sigma for dash duration (default: 0.65)\n"
+      << "  --hmm-sigma-intra <float>  HMM sigma for intra gap (default: 0.40)\n"
+      << "  --hmm-sigma-char <float>   HMM sigma for char gap (default: 0.80)\n"
+      << "  --hmm-sigma-word <float>   HMM sigma for word gap (default: 1.35)\n"
       << "  --mode <preset>            Preset: default | strict-dx | relaxed\n"
       << "  --min-confidence <float>   Keep only rows with confidence >= value\n"
       << "  --metrics <path.json>      Write quality metrics JSON\n"
@@ -422,6 +432,86 @@ bool ParseArgs(int argc, char** argv, CliArgs* out, std::string* error) {
       std::string value;
       if (!parseOptionValue(token, &value) || !ParseInt(value, &out->cfg.strictMinRepeats)) {
         *error = "Invalid integer for --strict-min-repeats";
+        return false;
+      }
+      continue;
+    }
+    if (token == "--hmm-on-intra") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseFloat(value, &out->cfg.hmmTransOnToIntra)) {
+        *error = "Invalid float for --hmm-on-intra";
+        return false;
+      }
+      continue;
+    }
+    if (token == "--hmm-on-char") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseFloat(value, &out->cfg.hmmTransOnToChar)) {
+        *error = "Invalid float for --hmm-on-char";
+        return false;
+      }
+      continue;
+    }
+    if (token == "--hmm-on-word") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseFloat(value, &out->cfg.hmmTransOnToWord)) {
+        *error = "Invalid float for --hmm-on-word";
+        return false;
+      }
+      continue;
+    }
+    if (token == "--hmm-off-dot") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseFloat(value, &out->cfg.hmmTransOffToDot)) {
+        *error = "Invalid float for --hmm-off-dot";
+        return false;
+      }
+      continue;
+    }
+    if (token == "--hmm-off-dash") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseFloat(value, &out->cfg.hmmTransOffToDash)) {
+        *error = "Invalid float for --hmm-off-dash";
+        return false;
+      }
+      continue;
+    }
+    if (token == "--hmm-sigma-dot") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseFloat(value, &out->cfg.hmmSigmaOnDot)) {
+        *error = "Invalid float for --hmm-sigma-dot";
+        return false;
+      }
+      continue;
+    }
+    if (token == "--hmm-sigma-dash") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseFloat(value, &out->cfg.hmmSigmaOnDash)) {
+        *error = "Invalid float for --hmm-sigma-dash";
+        return false;
+      }
+      continue;
+    }
+    if (token == "--hmm-sigma-intra") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseFloat(value, &out->cfg.hmmSigmaOffIntra)) {
+        *error = "Invalid float for --hmm-sigma-intra";
+        return false;
+      }
+      continue;
+    }
+    if (token == "--hmm-sigma-char") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseFloat(value, &out->cfg.hmmSigmaOffChar)) {
+        *error = "Invalid float for --hmm-sigma-char";
+        return false;
+      }
+      continue;
+    }
+    if (token == "--hmm-sigma-word") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseFloat(value, &out->cfg.hmmSigmaOffWord)) {
+        *error = "Invalid float for --hmm-sigma-word";
         return false;
       }
       continue;

@@ -130,6 +130,10 @@ Note: inside MSYS2 bash, arguments starting with `/` can be path-converted by th
 - `--plausible-id-min <float>`: plausible ID minimum score (default `0.30`)
 - `--strict-beacon`: require repeated beacon observations before output
 - `--strict-min-repeats <int>`: minimum `hit_count` in strict mode (default `3`)
+- `--hmm-on-intra <float>` / `--hmm-on-char <float>` / `--hmm-on-word <float>`: ON->OFF HMM transition weights (default `0.70/0.25/0.05`)
+- `--hmm-off-dot <float>` / `--hmm-off-dash <float>`: OFF->ON HMM transition weights (default `0.75/0.25`)
+- `--hmm-sigma-dot <float>` / `--hmm-sigma-dash <float>`: ON-state duration sigmas (default `0.40/0.75`)
+- `--hmm-sigma-intra <float>` / `--hmm-sigma-char <float>` / `--hmm-sigma-word <float>`: OFF-state duration sigmas (default `0.45/0.90/1.60`)
 - `--mode <preset>`: preset profile (`default`, `strict-dx`, `relaxed`)
 - `--min-confidence <float>`: output filter; keep rows with confidence >= value
 - `--metrics <path.json>`: write run quality metrics JSON for trend tracking
@@ -227,6 +231,28 @@ Phase 1 detection cleanup now includes:
   - frequency stability
   - keying periodicity
 - realistic range gate for RF NDB or audio-domain processing
+
+### Rapid HMM calibration helper
+
+- Script: `tools/calibrate_hmm_phase0.py`
+- Purpose: quick grid search for HMM transitions/sigmas on the Phase0 benchmark manifest.
+- Output artifacts:
+  - best config JSON (`--best-config-out`)
+  - optional candidate scoreboard CSV (`--results-csv`)
+
+Example:
+
+```bash
+python tools/calibrate_hmm_phase0.py \
+  --decoder build_ucrt64/ndb_decode.exe \
+  --manifest benchmarks/phase0/gold_dataset_manifest.local.json \
+  --base-config benchmarks/phase0/frozen_config.json \
+  --msys-bash C:/msys64/usr/bin/bash.exe \
+  --only-annotated \
+  --max-candidates 18 \
+  --results-csv benchmarks/phase0/calibration/hmm_calibration_results.csv \
+  --best-config-out benchmarks/phase0/frozen_config_hmm_calibrated.json
+```
 
 ## Phase 2 robust Morse decoder
 

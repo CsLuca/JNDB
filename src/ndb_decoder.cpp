@@ -162,7 +162,8 @@ std::vector<float> AdaptiveDotPerRun(const std::vector<Run>& runs, float baseDot
   return dots;
 }
 
-std::pair<std::string, float> DecodeMorseViterbiHmm(const std::vector<Run>& runs, int dotSamples) {
+std::pair<std::string, float> DecodeMorseViterbiHmm(const std::vector<Run>& runs, int dotSamples,
+                                                    const DecoderConfig& cfg) {
   if (runs.empty() || dotSamples <= 0) {
     return {"", 0.0f};
   }
@@ -183,18 +184,27 @@ std::pair<std::string, float> DecodeMorseViterbiHmm(const std::vector<Run>& runs
       trans[a][b] = -8.0f;
     }
   }
-  trans[kOnDot][kOffIntra] = std::log(0.70f);
-  trans[kOnDot][kOffChar] = std::log(0.25f);
-  trans[kOnDot][kOffWord] = std::log(0.05f);
-  trans[kOnDash][kOffIntra] = std::log(0.70f);
-  trans[kOnDash][kOffChar] = std::log(0.25f);
-  trans[kOnDash][kOffWord] = std::log(0.05f);
-  trans[kOffIntra][kOnDot] = std::log(0.75f);
-  trans[kOffIntra][kOnDash] = std::log(0.25f);
-  trans[kOffChar][kOnDot] = std::log(0.75f);
-  trans[kOffChar][kOnDash] = std::log(0.25f);
-  trans[kOffWord][kOnDot] = std::log(0.75f);
-  trans[kOffWord][kOnDash] = std::log(0.25f);
+  const float onToIntra = std::max(1e-4f, cfg.hmmTransOnToIntra);
+  const float onToChar = std::max(1e-4f, cfg.hmmTransOnToChar);
+  const float onToWord = std::max(1e-4f, cfg.hmmTransOnToWord);
+  const float onNorm = onToIntra + onToChar + onToWord;
+
+  const float offToDot = std::max(1e-4f, cfg.hmmTransOffToDot);
+  const float offToDash = std::max(1e-4f, cfg.hmmTransOffToDash);
+  const float offNorm = offToDot + offToDash;
+
+  trans[kOnDot][kOffIntra] = std::log(onToIntra / onNorm);
+  trans[kOnDot][kOffChar] = std::log(onToChar / onNorm);
+  trans[kOnDot][kOffWord] = std::log(onToWord / onNorm);
+  trans[kOnDash][kOffIntra] = std::log(onToIntra / onNorm);
+  trans[kOnDash][kOffChar] = std::log(onToChar / onNorm);
+  trans[kOnDash][kOffWord] = std::log(onToWord / onNorm);
+  trans[kOffIntra][kOnDot] = std::log(offToDot / offNorm);
+  trans[kOffIntra][kOnDash] = std::log(offToDash / offNorm);
+  trans[kOffChar][kOnDot] = std::log(offToDot / offNorm);
+  trans[kOffChar][kOnDash] = std::log(offToDash / offNorm);
+  trans[kOffWord][kOnDot] = std::log(offToDot / offNorm);
+  trans[kOffWord][kOnDash] = std::log(offToDash / offNorm);
 
   const auto dotVec = AdaptiveDotPerRun(runs, static_cast<float>(dotSamples));
   const std::size_t T = runs.size();
@@ -210,11 +220,17 @@ std::pair<std::string, float> DecodeMorseViterbiHmm(const std::vector<Run>& runs
   auto emission = [&](std::size_t t, int s) {
     const float dot = std::max(1.0f, dotVec[t]);
     const float u = static_cast<float>(runs[t].length) / dot;
-    if (s == kOnDot) return std::log(std::max(1e-6f, GaussianLike(u, 1.0f, 0.40f)));
-    if (s == kOnDash) return std::log(std::max(1e-6f, GaussianLike(u, 3.0f, 0.75f)));
-    if (s == kOffIntra) return std::log(std::max(1e-6f, GaussianLike(u, 1.0f, 0.45f)));
-    if (s == kOffChar) return std::log(std::max(1e-6f, GaussianLike(u, 3.0f, 0.90f)));
-    return std::log(std::max(1e-6f, GaussianLike(u, 7.0f, 1.60f)));
+    if (s == kOnDot) return std::log(std::max(1e-6f, GaussianLike(u, 1.0f, cfg.hmmSigmaOnDot)));
+    if (s == kOnDash) {
+      return std::log(std::max(1e-6f, GaussianLike(u, 3.0f, cfg.hmmSigmaOnDash)));
+    }
+    if (s == kOffIntra) {
+      return std::log(std::max(1e-6f, GaussianLike(u, 1.0f, cfg.hmmSigmaOffIntra)));
+    }
+    if (s == kOffChar) {
+      return std::log(std::max(1e-6f, GaussianLike(u, 3.0f, cfg.hmmSigmaOffChar)));
+    }
+    return std::log(std::max(1e-6f, GaussianLike(u, 7.0f, cfg.hmmSigmaOffWord)));
   };
 
   for (int s = 0; s < kN; ++s) {
@@ -272,8 +288,8 @@ std::pair<std::string, float> DecodeMorseViterbiHmm(const std::vector<Run>& runs
     const float dot = std::max(1.0f, dotVec[t]);
     const float u = static_cast<float>(runs[t].length) / dot;
     if (st == kOnDot || st == kOnDash) {
-      const float pDot = GaussianLike(u, 1.0f, 0.40f);
-      const float pDash = GaussianLike(u, 3.0f, 0.75f);
+      const float pDot = GaussianLike(u, 1.0f, cfg.hmmSigmaOnDot);
+      const float pDash = GaussianLike(u, 3.0f, cfg.hmmSigmaOnDash);
       const float z = pDot + pDash + 1e-9f;
       const float postDot = pDot / z;
       const float postDash = pDash / z;
@@ -688,7 +704,7 @@ std::vector<DecodeResult> DecodeNdbFromWav(const std::vector<float>& samples, in
     const float thr = RobustMadThreshold(boxed, cfg.thresholdK);
     const auto bits = BinaryByThreshold(boxed, thr);
     const auto runs = RunLengthEncode(bits);
-    const auto decodedText = DecodeMorseViterbiHmm(runs, dotSamples);
+    const auto decodedText = DecodeMorseViterbiHmm(runs, dotSamples, cfg);
     if (decodedText.first.empty()) {
       ++done;
       Report(progress, 58 + (28 * done) / total, "decode-clusters");

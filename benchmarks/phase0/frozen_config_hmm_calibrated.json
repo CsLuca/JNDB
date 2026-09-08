@@ -1,0 +1,49 @@
+{
+  "name": "phase0_frozen_v1_hmm_legacy_hmm_calibrated",
+  "decoder_options": {
+    "fft": 512,
+    "hop": 128,
+    "mad-factor": 4.0,
+    "guard-bins": 2,
+    "max-step-bins": 3,
+    "min-track-frames": 15,
+    "sustain-penalty": 0.02,
+    "envelope-alpha": 0.05,
+    "threshold-k": 2.5,
+    "min-dot-ms": 40,
+    "max-dot-ms": 220,
+    "target-sr": 8000,
+    "max-seconds": 90,
+    "min-confidence": 0.7,
+    "hmm-on-intra": 0.73,
+    "hmm-on-char": 0.2,
+    "hmm-on-word": 0.07,
+    "hmm-off-dot": 0.8,
+    "hmm-off-dash": 0.2,
+    "hmm-sigma-dot": 0.35,
+    "hmm-sigma-dash": 0.65,
+    "hmm-sigma-intra": 0.4,
+    "hmm-sigma-char": 0.8,
+    "hmm-sigma-word": 1.35
+  },
+  "match": {
+    "freq_tolerance_hz": 2.0,
+    "min_time_overlap_sec": 0.2
+  },
+  "_calibration": {
+    "baseline": {
+      "precision": 0.08695652173913043,
+      "recall": 0.08333333333333333,
+      "false_positives_per_hour": 1008.0,
+      "quality_score_mean": 15.874500000000001
+    },
+    "best": {
+      "precision": 0.08695652173913043,
+      "recall": 0.08333333333333333,
+      "false_positives_per_hour": 1008.0,
+      "quality_score_mean": 15.9924
+    },
+    "best_score": 0.28702555020025877,
+    "tested_candidates": 12
+  }
+}

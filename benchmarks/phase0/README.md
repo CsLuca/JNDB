@@ -10,8 +10,11 @@ This folder contains the frozen benchmark baseline requested in Phase 0:
 ## Files
 
 - `frozen_config.json`: fixed decoder options and matching criteria
+- `frozen_config_hmm_legacy.json`: legacy HMM defaults expressed explicitly
+- `frozen_config_hmm_calibrated.json`: calibrated HMM config (quality-oriented, robustness constrained)
 - `gold_dataset_manifest.example.json`: schema/template for gold annotations
 - `../../tools/benchmark_phase0.py`: benchmark runner
+- `../../tools/calibrate_hmm_phase0.py`: rapid HMM transition/sigma calibration helper
 
 ## Build decoder
 
@@ -112,6 +115,23 @@ Append-only history (automatic by default):
 - `benchmarks/phase0/history/benchmark_history.jsonl`
 
 Each run appends timestamp, git commit/branch, and aggregate metrics so optimization progress is preserved over time.
+
+## Rapid HMM calibration
+
+Use the calibration helper to search HMM transition and sigma parameters quickly.
+
+```bash
+python tools/calibrate_hmm_phase0.py \
+  --decoder build-ucrt64/ndb_decode.exe \
+  --manifest benchmarks/phase0/gold_dataset_manifest.local.json \
+  --base-config benchmarks/phase0/frozen_config_hmm_legacy.json \
+  --msys-bash C:/msys64/usr/bin/bash.exe \
+  --max-candidates 12 \
+  --results-csv benchmarks/phase0/calibration/hmm_calibration_results_full.csv \
+  --best-config-out benchmarks/phase0/frozen_config_hmm_calibrated.json
+```
+
+The script writes a new config JSON with the selected HMM parameters and embeds baseline vs best benchmark metrics.
 
 ## Matching policy (frozen v1)
 
