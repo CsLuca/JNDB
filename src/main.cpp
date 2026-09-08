@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <fstream>
 #include <iomanip>
@@ -30,6 +31,8 @@ struct CliArgs {
   std::optional<std::string> outputJsonPath;
   std::optional<std::string> metricsPath;
   std::optional<std::string> diagnosticsLogPath;
+  std::optional<std::string> dashboardMode;
+  std::optional<std::string> sessionExportDir;
   std::optional<std::string> configPath;
   int streamPollMs = 1000;
   int streamIterations = 1;
@@ -100,8 +103,49 @@ bool ApplyModePreset(const std::string& mode, ndb::DecoderConfig* cfg, std::stri
     cfg->confidenceCalibration = "platt";
     return true;
   }
+  if (mode == "quiet") {
+    cfg->enableBandLimit = true;
+    cfg->bandLowHz = 130.0f;
+    cfg->bandHighHz = 1200.0f;
+    cfg->enableAutoNotch = false;
+    cfg->enableImpulseBlanker = false;
+    cfg->enableCfar2d = false;
+    cfg->thresholdK = 2.4f;
+    cfg->useAmtcFull = false;
+    return true;
+  }
+  if (mode == "urban-noise") {
+    cfg->enableBandLimit = true;
+    cfg->bandLowHz = 100.0f;
+    cfg->bandHighHz = 2200.0f;
+    cfg->enableAutoNotch = true;
+    cfg->autoNotchMaxCount = 4;
+    cfg->autoNotchSnrDb = 7.0f;
+    cfg->enableImpulseBlanker = true;
+    cfg->impulseBlankerSigma = 7.5f;
+    cfg->impulseBlankerHalfWindow = 2;
+    cfg->enableCfar2d = true;
+    cfg->cfarTrainTime = 3;
+    cfg->cfarGuardTime = 1;
+    cfg->cfarTrainFreq = 4;
+    cfg->cfarGuardFreq = 1;
+    cfg->cfarScale = 1.45f;
+    cfg->useAmtcFull = false;
+    return true;
+  }
+  if (mode == "weak-signal-dx") {
+    cfg->useAmtcFull = true;
+    cfg->maxTrackGapFrames = 5;
+    cfg->strictBeaconMode = true;
+    cfg->strictMinRepeats = 3;
+    cfg->requirePlausibleId = true;
+    cfg->plausibleIdMinScore = 0.35f;
+    cfg->confidenceCalibration = "platt";
+    cfg->thresholdK = 2.6f;
+    return true;
+  }
   *error =
-      "Invalid value for --mode (use: default, strict-dx, relaxed, phase3-balanced, phase3-selective, phase4-serious)";
+      "Invalid value for --mode (use: default, strict-dx, relaxed, phase3-balanced, phase3-selective, phase4-serious, quiet, urban-noise, weak-signal-dx)";
   return false;
 }
 
@@ -237,7 +281,9 @@ void PrintUsage() {
       << "  --stream-tail-seconds <int> Keep last N seconds per stream iteration (default: 0=all)\n"
       << "  --output-json <path.json>  Write stable JSON output alongside CSV\n"
       << "  --diag-log <path.log>      Append diagnostic run logs\n"
-      << "  --mode <preset>            Preset: default | strict-dx | relaxed | phase3-balanced | phase3-selective | phase4-serious\n"
+      << "  --dashboard rich           Print minimal terminal dashboard (waterfall/tracks/timeline)\n"
+      << "  --session-export <dir>     Export session evidence bundle (audio snippets + scores + params)\n"
+      << "  --mode <preset>            Preset: default | strict-dx | relaxed | phase3-balanced | phase3-selective | phase4-serious | quiet | urban-noise | weak-signal-dx\n"
       << "  --min-confidence <float>   Keep only rows with confidence >= value\n"
       << "  --metrics <path.json>      Write quality metrics JSON\n"
       << "  --no-progress              Disable progress output\n"
@@ -253,7 +299,8 @@ void PrintUsage() {
       << "  ndb_decode capture.wav out.csv --mode phase3-balanced\n"
       << "  ndb_decode capture.wav out.csv --mode phase4-serious --freq-prior-file priors.csv\n"
       << "  ndb_decode capture.wav out.csv --profile fast --decode-threads 8 --seed 42\n"
-      << "  ndb_decode capture.wav out.csv --output-json out.json --diag-log run.log\n";
+      << "  ndb_decode capture.wav out.csv --output-json out.json --diag-log run.log\n"
+      << "  ndb_decode capture.wav out.csv --mode urban-noise --dashboard rich --session-export session_001\n";
 }
 
 bool WriteCsv(const std::string& path, const std::vector<ndb::DecodeResult>& results,
@@ -339,6 +386,138 @@ bool WriteJson(const std::string& path, const std::vector<ndb::DecodeResult>& re
   }
   out << "  ]\n";
   out << "}\n";
+  return true;
+}
+
+void PrintRichDashboard(const std::vector<ndb::DecodeResult>& results, const ndb::DecodeStats& stats) {
+  std::cout << "\n=== JNDB Dashboard (Rich) ===\n";
+  std::cout << "Waterfall (synthetic density by confidence)\n";
+  for (const auto& r : results) {
+    const int n = std::max(1, std::min(30, static_cast<int>(std::round(r.confidence * 30.0f))));
+    std::cout << std::fixed << std::setprecision(1) << std::setw(6) << r.freqHz << "Hz | "
+              << std::string(static_cast<std::size_t>(n), '#') << '\n';
+  }
+  std::cout << "Tracks\n";
+  for (const auto& r : results) {
+    std::cout << "- T" << r.trackId << " " << std::fixed << std::setprecision(2) << r.freqHz
+              << "Hz id=" << r.plausibleId << " conf=" << std::setprecision(3) << r.confidence
+              << " score=" << r.compositeScore << "\n";
+  }
+  std::cout << "Decode timeline\n";
+  for (const auto& r : results) {
+    std::cout << "- [" << std::fixed << std::setprecision(2) << r.startSec << ".." << r.endSec
+              << "] " << (r.plausibleId.empty() ? r.text : r.plausibleId) << "\n";
+  }
+  std::cout << "Summary quality=" << std::fixed << std::setprecision(2) << stats.qualityScore
+            << " decoded=" << stats.decodedCount << " tracks=" << stats.trackCount << "\n";
+}
+
+bool ExportSessionEvidence(const std::string& dir, const ndb::WavData& wav,
+                           const std::vector<ndb::DecodeResult>& results,
+                           const ndb::DecodeStats& stats, const CliArgs& args,
+                           std::string* error) {
+  const std::string mkdirCmd = "mkdir \"" + dir + "\" 2>nul";
+  std::system(mkdirCmd.c_str());
+
+  const std::string summaryPath = dir + "\\session_summary.json";
+  std::ofstream out(summaryPath);
+  if (!out) {
+    *error = "Cannot write session summary: " + summaryPath;
+    return false;
+  }
+  out << "{\n";
+  out << "  \"quality_score\": " << std::fixed << std::setprecision(3) << stats.qualityScore << ",\n";
+  out << "  \"decoded_count\": " << stats.decodedCount << ",\n";
+  out << "  \"track_count\": " << stats.trackCount << ",\n";
+  out << "  \"sample_rate\": " << wav.sampleRate << ",\n";
+  out << "  \"decode_threads\": " << args.cfg.decodeThreads << ",\n";
+  out << "  \"seed\": " << args.cfg.deterministicSeed << ",\n";
+  out << "  \"mode_stream\": " << (args.streamMode ? "true" : "false") << ",\n";
+  out << "  \"results\": [\n";
+  for (std::size_t i = 0; i < results.size(); ++i) {
+    const auto& r = results[i];
+    out << "    {\"track_id\":" << r.trackId << ",\"freq_hz\":" << std::fixed
+        << std::setprecision(2) << r.freqHz << ",\"id\":\"" << EscapeJson(r.plausibleId)
+        << "\",\"score\":" << std::setprecision(3) << r.compositeScore << "}";
+    if (i + 1 < results.size()) {
+      out << ',';
+    }
+    out << "\n";
+  }
+  out << "  ]\n";
+  out << "}\n";
+
+  const std::string snipDir = dir + "\\snippets";
+  std::system(("mkdir \"" + snipDir + "\" 2>nul").c_str());
+
+  auto writeLe16 = [](std::ofstream& o, unsigned int v) {
+    const char b[2] = {static_cast<char>(v & 0xffU), static_cast<char>((v >> 8) & 0xffU)};
+    o.write(b, 2);
+  };
+  auto writeLe32 = [](std::ofstream& o, unsigned int v) {
+    const char b[4] = {
+        static_cast<char>(v & 0xffU),
+        static_cast<char>((v >> 8) & 0xffU),
+        static_cast<char>((v >> 16) & 0xffU),
+        static_cast<char>((v >> 24) & 0xffU),
+    };
+    o.write(b, 4);
+  };
+  auto writeSnippetWav = [&](const std::string& path, int sr, const std::vector<float>& s,
+                             std::size_t i0, std::size_t i1) {
+    if (i1 <= i0 || i0 >= s.size()) {
+      return;
+    }
+    const std::size_t end = std::min<std::size_t>(i1, s.size());
+    const std::size_t n = end - i0;
+    std::ofstream o(path, std::ios::binary);
+    if (!o) {
+      return;
+    }
+    const unsigned int dataBytes = static_cast<unsigned int>(n * 2U);
+    o.write("RIFF", 4);
+    writeLe32(o, 36U + dataBytes);
+    o.write("WAVE", 4);
+    o.write("fmt ", 4);
+    writeLe32(o, 16);
+    writeLe16(o, 1);
+    writeLe16(o, 1);
+    writeLe32(o, static_cast<unsigned int>(sr));
+    writeLe32(o, static_cast<unsigned int>(sr * 2));
+    writeLe16(o, 2);
+    writeLe16(o, 16);
+    o.write("data", 4);
+    writeLe32(o, dataBytes);
+    for (std::size_t i = i0; i < end; ++i) {
+      const float x = std::max(-1.0f, std::min(1.0f, s[i]));
+      const int iv = static_cast<int>(std::round(x * 32767.0f));
+      const unsigned int uv = static_cast<unsigned int>(static_cast<unsigned short>(iv & 0xffff));
+      writeLe16(o, uv);
+    }
+  };
+
+  const std::string cuePath = snipDir + "\\snippet_index.csv";
+  std::ofstream cue(cuePath);
+  if (cue) {
+    cue << "track_id,start_sec,end_sec,freq_hz,id,score,snippet_wav\n";
+    for (const auto& r : results) {
+      const std::string wavName = "track_" + std::to_string(r.trackId) + "_" +
+                                  std::to_string(static_cast<int>(std::round(r.startSec * 1000.0f))) +
+                                  "_" +
+                                  std::to_string(static_cast<int>(std::round(r.endSec * 1000.0f))) + ".wav";
+      const std::string wavPath = snipDir + "\\" + wavName;
+      const std::size_t i0 = wav.sampleRate > 0
+                                 ? static_cast<std::size_t>(std::max(0.0f, r.startSec) * wav.sampleRate)
+                                 : 0;
+      const std::size_t i1 = wav.sampleRate > 0
+                                 ? static_cast<std::size_t>(std::max(0.0f, r.endSec) * wav.sampleRate)
+                                 : 0;
+      writeSnippetWav(wavPath, std::max(1, wav.sampleRate), wav.samples, i0, i1);
+      cue << r.trackId << ',' << std::fixed << std::setprecision(3) << r.startSec << ',' << r.endSec
+          << ',' << std::setprecision(2) << r.freqHz << ',' << r.plausibleId << ','
+          << std::setprecision(3) << r.compositeScore << ',' << wavName << '\n';
+    }
+  }
   return true;
 }
 
@@ -1244,6 +1423,26 @@ bool ParseArgs(int argc, char** argv, CliArgs* out, std::string* error) {
       out->diagnosticsLogPath = value;
       continue;
     }
+    if (token == "--dashboard") {
+      std::string value;
+      if (!parseOptionValue(token, &value)) {
+        return false;
+      }
+      if (value != "rich") {
+        *error = "Invalid value for --dashboard (use: rich)";
+        return false;
+      }
+      out->dashboardMode = value;
+      continue;
+    }
+    if (token == "--session-export") {
+      std::string value;
+      if (!parseOptionValue(token, &value)) {
+        return false;
+      }
+      out->sessionExportDir = value;
+      continue;
+    }
     if (token == "--mode") {
       std::string value;
       if (!parseOptionValue(token, &value) || !ApplyModePreset(value, &out->cfg, error)) {
@@ -1410,6 +1609,17 @@ int main(int argc, char** argv) {
       if (!WriteJson(*args.outputJsonPath, results, stats, &error)) {
         std::cerr << error << '\n';
         return 5;
+      }
+    }
+
+    if (args.dashboardMode.has_value() && *args.dashboardMode == "rich") {
+      PrintRichDashboard(results, stats);
+    }
+
+    if (args.sessionExportDir.has_value()) {
+      if (!ExportSessionEvidence(*args.sessionExportDir, wav, results, stats, args, &error)) {
+        std::cerr << error << '\n';
+        return 6;
       }
     }
 

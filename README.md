@@ -52,6 +52,18 @@ cmake -S . -B build-ucrt64 -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build-ucrt64 -j
 ```
 
+## CI build/test and release packaging
+
+GitHub Actions workflows included:
+
+- `.github/workflows/build-test.yml`
+  - Linux build + help smoke
+  - Windows MSYS2 UCRT64 build + help smoke
+- `.github/workflows/release-packages.yml`
+  - Linux tarball artifact
+  - Windows UCRT64 zip artifact
+  - triggers on tags `v*` and manual dispatch
+
 ## Command line
 
 ```text
@@ -452,6 +464,44 @@ Expected result:
 
 - script exits with code `0`
 - prints `Phase 6 CLI smoke: PASSED`
+
+## Phase 7 UX and operations
+
+### Minimal dashboard (terminal rich)
+
+Enable terminal dashboard with waterfall/tracks/decode timeline:
+
+```bash
+ndb_decode capture.wav out.csv --dashboard rich
+```
+
+### Session export with evidence bundle
+
+Export session evidence including summary JSON and snippet index:
+
+```bash
+ndb_decode capture.wav out.csv --session-export session_001 --diag-log run.log
+```
+
+Artifacts:
+
+- `session_001/session_summary.json`
+- `session_001/snippets/snippet_index.csv`
+- `session_001/snippets/*.wav` (per-track evidence snippets)
+
+### Scenario presets
+
+Additional presets for operational contexts:
+
+- `quiet`
+- `urban-noise`
+- `weak-signal-dx`
+
+Example:
+
+```bash
+ndb_decode capture.wav out.csv --mode urban-noise --dashboard rich
+```
 
 Phase 1 detection cleanup now includes:
 

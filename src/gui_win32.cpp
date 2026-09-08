@@ -181,6 +181,47 @@ void ApplyPresetToConfig(const std::string& mode, ndb::DecoderConfig* cfg) {
     cfg->confidenceCalibration = "platt";
     return;
   }
+  if (mode == "quiet") {
+    cfg->enableBandLimit = true;
+    cfg->bandLowHz = 130.0f;
+    cfg->bandHighHz = 1200.0f;
+    cfg->enableAutoNotch = false;
+    cfg->enableImpulseBlanker = false;
+    cfg->enableCfar2d = false;
+    cfg->thresholdK = 2.4f;
+    cfg->useAmtcFull = false;
+    return;
+  }
+  if (mode == "urban-noise") {
+    cfg->enableBandLimit = true;
+    cfg->bandLowHz = 100.0f;
+    cfg->bandHighHz = 2200.0f;
+    cfg->enableAutoNotch = true;
+    cfg->autoNotchMaxCount = 4;
+    cfg->autoNotchSnrDb = 7.0f;
+    cfg->enableImpulseBlanker = true;
+    cfg->impulseBlankerSigma = 7.5f;
+    cfg->impulseBlankerHalfWindow = 2;
+    cfg->enableCfar2d = true;
+    cfg->cfarTrainTime = 3;
+    cfg->cfarGuardTime = 1;
+    cfg->cfarTrainFreq = 4;
+    cfg->cfarGuardFreq = 1;
+    cfg->cfarScale = 1.45f;
+    cfg->useAmtcFull = false;
+    return;
+  }
+  if (mode == "weak-signal-dx") {
+    cfg->useAmtcFull = true;
+    cfg->maxTrackGapFrames = 5;
+    cfg->strictBeaconMode = true;
+    cfg->strictMinRepeats = 3;
+    cfg->requirePlausibleId = true;
+    cfg->plausibleIdMinScore = 0.35f;
+    cfg->confidenceCalibration = "platt";
+    cfg->thresholdK = 2.6f;
+    return;
+  }
 }
 
 std::wstring PresetHintFromSelection(int sel) {
@@ -195,6 +236,12 @@ std::wstring PresetHintFromSelection(int sel) {
       return L"Phase3 Selective: band-limit + soft CFAR, more selective in interference.";
     case 5:
       return L"Phase4 Serious: AMTC-full + co-channel split + Platt confidence.";
+    case 6:
+      return L"Quiet: conservative low-noise profile for clean channels.";
+    case 7:
+      return L"Urban Noise: notch + blanker + CFAR for interference-heavy RF.";
+    case 8:
+      return L"Weak-signal DX: strict repeats + AMTC-full for marginal IDs.";
     default:
       return L"Default: baseline profile for general-purpose decoding.";
   }
@@ -906,6 +953,12 @@ void StartDecode(AppState* app) {
     mode = "phase3-selective";
   } else if (sel == 5) {
     mode = "phase4-serious";
+  } else if (sel == 6) {
+    mode = "quiet";
+  } else if (sel == 7) {
+    mode = "urban-noise";
+  } else if (sel == 8) {
+    mode = "weak-signal-dx";
   }
 
   app->worker = std::thread([app, inputPath, outputPath, metricsPath, priorPath, mode, calibSel,
@@ -1121,6 +1174,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       SendMessageW(app->presetCombo, CB_ADDSTRING, 0, (LPARAM)L"Phase3 Balanced");
       SendMessageW(app->presetCombo, CB_ADDSTRING, 0, (LPARAM)L"Phase3 Selective");
       SendMessageW(app->presetCombo, CB_ADDSTRING, 0, (LPARAM)L"Phase4 Serious");
+      SendMessageW(app->presetCombo, CB_ADDSTRING, 0, (LPARAM)L"Quiet");
+      SendMessageW(app->presetCombo, CB_ADDSTRING, 0, (LPARAM)L"Urban Noise");
+      SendMessageW(app->presetCombo, CB_ADDSTRING, 0, (LPARAM)L"Weak-signal DX");
       SendMessageW(app->presetCombo, CB_SETCURSEL, 0, 0);
       app->presetHintText = CreateWindowW(
           L"STATIC", L"", WS_CHILD | WS_VISIBLE, m + 464, y + 34, 340, 28, hwnd, nullptr,

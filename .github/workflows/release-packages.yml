@@ -1,0 +1,57 @@
+name: release-packages
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  package-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build -j
+      - name: Package
+        run: |
+          mkdir -p dist/jndb-linux
+          cp build/ndb_decode dist/jndb-linux/
+          cp README.md dist/jndb-linux/
+          tar -C dist -czf jndb-linux.tar.gz jndb-linux
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jndb-linux
+          path: jndb-linux.tar.gz
+
+  package-windows-msys2-ucrt64:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+      - name: Build
+        shell: msys2 {0}
+        run: |
+          cmake -S . -B build_ucrt64 -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build_ucrt64 -j
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path "dist\jndb-windows-ucrt64" -Force | Out-Null
+          Copy-Item "build_ucrt64\ndb_decode.exe" "dist\jndb-windows-ucrt64\"
+          Copy-Item "README.md" "dist\jndb-windows-ucrt64\"
+          Compress-Archive -Path "dist\jndb-windows-ucrt64\*" -DestinationPath "jndb-windows-ucrt64.zip" -Force
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jndb-windows-ucrt64
+          path: jndb-windows-ucrt64.zip

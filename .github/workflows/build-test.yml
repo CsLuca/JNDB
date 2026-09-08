@@ -1,0 +1,40 @@
+name: build-test
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build -j
+      - name: Smoke help
+        run: ./build/ndb_decode --help
+
+  windows-msys2-ucrt64:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+      - name: Configure + Build
+        shell: msys2 {0}
+        run: |
+          cmake -S . -B build_ucrt64 -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build_ucrt64 -j
+      - name: Smoke help
+        shell: msys2 {0}
+        run: ./build_ucrt64/ndb_decode.exe --help
