@@ -329,6 +329,39 @@ Continuous A/B history is appended automatically when two variants are provided:
 - `history/ab_history.csv`
 - `history/ab_history.jsonl`
 
+### Phase 5 CI gate wrapper
+
+For continuous regression checks in CI, use:
+
+```bash
+python tools/run_phase5_ci.py \
+  --manifest benchmarks/phase5/validation_manifest.local.json \
+  --beacon-db benchmarks/phase5/beacon_db.example.csv \
+  --mode known-list \
+  --decoder-a build_ucrt64/ndb_decode.exe \
+  --decoder-b build_ucrt64/ndb_decode.exe \
+  --config-a benchmarks/phase0/frozen_config_hmm_legacy.json \
+  --config-b benchmarks/phase0/frozen_config_auto_tuned.json \
+  --out-dir benchmarks/phase5/runs/ci_gate \
+  --run \
+  --msys-bash C:/msys64/usr/bin/bash.exe
+```
+
+Default gates (customizable via CLI):
+
+- `delta_f1 >= -0.01`
+- `delta_precision >= -0.02`
+- `delta_recall >= -0.02`
+- `delta_false_alarm <= +3`
+- `delta_miss <= +2`
+- `delta_confusion <= +2`
+- `delta_xrt <= +0.2`
+
+Exit codes:
+
+- `0`: pass
+- `3`: regression gates failed
+
 ### Save quality metrics for comparison between versions
 
 ```bash
