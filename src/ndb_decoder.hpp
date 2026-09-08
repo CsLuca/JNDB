@@ -24,6 +24,7 @@ struct DecodeResult {
   float keyingPeriodicityScore = 0.0f;
   std::string plausibleId;
   float plausibleIdScore = 0.0f;
+  std::string decoderModel;
 };
 
 struct DecoderConfig {
@@ -52,6 +53,7 @@ struct DecoderConfig {
   float plausibleIdMinScore = 0.30f;
   bool strictBeaconMode = false;
   int strictMinRepeats = 3;
+  std::string decoderModel = "auto";
   float hmmTransOnToIntra = 0.73f;
   float hmmTransOnToChar = 0.20f;
   float hmmTransOnToWord = 0.07f;
@@ -62,6 +64,18 @@ struct DecoderConfig {
   float hmmSigmaOffIntra = 0.40f;
   float hmmSigmaOffChar = 0.80f;
   float hmmSigmaOffWord = 1.35f;
+  float hsmmTransOnToIntra = 0.72f;
+  float hsmmTransOnToChar = 0.20f;
+  float hsmmTransOnToWord = 0.08f;
+  float hsmmTransOffToDot = 0.82f;
+  float hsmmTransOffToDash = 0.18f;
+  float hsmmSigmaOnDot = 0.38f;
+  float hsmmSigmaOnDash = 0.72f;
+  float hsmmSigmaOffIntra = 0.42f;
+  float hsmmSigmaOffChar = 0.85f;
+  float hsmmSigmaOffWord = 1.45f;
+  float hsmmDurationTailMix = 0.18f;
+  float hsmmTimeTransitionGain = 0.55f;
 };
 
 struct DecodeStats {

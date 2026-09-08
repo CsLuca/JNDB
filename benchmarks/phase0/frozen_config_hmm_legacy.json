@@ -15,6 +15,7 @@
     "target-sr": 8000,
     "max-seconds": 90,
     "min-confidence": 0.7,
+    "decoder-model": "hmm",
     "hmm-on-intra": 0.7,
     "hmm-on-char": 0.25,
     "hmm-on-word": 0.05,

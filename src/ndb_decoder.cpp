@@ -29,6 +29,13 @@ struct DecodedCandidate {
   DecodeResult result;
 };
 
+struct SequenceDecode {
+  std::string text;
+  float confidence = 0.0f;
+  float avgLogLike = -1e9f;
+  std::string model;
+};
+
 std::vector<Run> RunLengthEncode(const std::vector<int>& bits) {
   std::vector<Run> runs;
   if (bits.empty()) {
@@ -162,10 +169,35 @@ std::vector<float> AdaptiveDotPerRun(const std::vector<Run>& runs, float baseDot
   return dots;
 }
 
-std::pair<std::string, float> DecodeMorseViterbiHmm(const std::vector<Run>& runs, int dotSamples,
-                                                    const DecoderConfig& cfg) {
+float DecodeTextHeuristicScore(const std::string& text, float conf, float avgLogLike) {
+  if (text.empty()) {
+    return -1e9f;
+  }
+  int letters = 0;
+  int questions = 0;
+  int repeats = 0;
+  for (std::size_t i = 0; i < text.size(); ++i) {
+    if (text[i] >= 'A' && text[i] <= 'Z') {
+      ++letters;
+      if (i > 0 && text[i] == text[i - 1]) {
+        ++repeats;
+      }
+    } else if (text[i] == '?') {
+      ++questions;
+    }
+  }
+  const float len = static_cast<float>(std::max<std::size_t>(1, text.size()));
+  const float letterRatio = static_cast<float>(letters) / len;
+  const float qRatio = static_cast<float>(questions) / len;
+  const float repRatio = static_cast<float>(repeats) / len;
+  return 0.60f * conf + 0.30f * letterRatio - 0.40f * qRatio + 0.08f * repRatio +
+         0.08f * avgLogLike;
+}
+
+SequenceDecode DecodeMorseViterbiHmm(const std::vector<Run>& runs, int dotSamples,
+                                     const DecoderConfig& cfg) {
   if (runs.empty() || dotSamples <= 0) {
-    return {"", 0.0f};
+    return {};
   }
 
   enum State { kOnDot = 0, kOnDash = 1, kOffIntra = 2, kOffChar = 3, kOffWord = 4, kN = 5 };
@@ -322,7 +354,220 @@ std::pair<std::string, float> DecodeMorseViterbiHmm(const std::vector<Run>& runs
     text.pop_back();
   }
   const float conf = confN > 0 ? confAcc / static_cast<float>(confN) : 0.0f;
-  return {text, conf};
+  SequenceDecode out;
+  out.text = std::move(text);
+  out.confidence = conf;
+  out.avgLogLike = bestScore / static_cast<float>(std::max<std::size_t>(1, T));
+  out.model = "hmm";
+  return out;
+}
+
+float DurationLogLikeHsmm(float u, float mu, float sigma, float tailMix) {
+  const float g = GaussianLike(u, mu, sigma);
+  const float tail = 1.0f / (1.0f + std::fabs(u - mu));
+  const float mix = std::max(0.0f, std::min(0.45f, tailMix));
+  const float p = (1.0f - mix) * g + mix * tail;
+  return std::log(std::max(1e-6f, p));
+}
+
+float TimeDependentTransition(int prevState, int nextState, float baseProb, float u,
+                              float gain) {
+  auto expected = [](int st) {
+    if (st == 0 || st == 2) {
+      return 1.0f;
+    }
+    if (st == 1 || st == 3) {
+      return 3.0f;
+    }
+    return 7.0f;
+  };
+  const float mu = expected(nextState);
+  const float shape = std::exp(-std::fabs(u - mu) * std::max(0.0f, gain));
+  return std::log(std::max(1e-6f, baseProb * (0.55f + 0.45f * shape)));
+}
+
+SequenceDecode DecodeMorseHsmmExplicit(const std::vector<Run>& runs, int dotSamples,
+                                       const DecoderConfig& cfg) {
+  if (runs.empty() || dotSamples <= 0) {
+    return {};
+  }
+
+  enum State { kOnDot = 0, kOnDash = 1, kOffIntra = 2, kOffChar = 3, kOffWord = 4, kN = 5 };
+  const float kNeg = -1e30f;
+
+  auto allowed = [](int runValue, int st) {
+    if (runValue == 1) {
+      return st == kOnDot || st == kOnDash;
+    }
+    return st == kOffIntra || st == kOffChar || st == kOffWord;
+  };
+
+  const float onToIntra = std::max(1e-4f, cfg.hsmmTransOnToIntra);
+  const float onToChar = std::max(1e-4f, cfg.hsmmTransOnToChar);
+  const float onToWord = std::max(1e-4f, cfg.hsmmTransOnToWord);
+  const float onNorm = onToIntra + onToChar + onToWord;
+
+  const float offToDot = std::max(1e-4f, cfg.hsmmTransOffToDot);
+  const float offToDash = std::max(1e-4f, cfg.hsmmTransOffToDash);
+  const float offNorm = offToDot + offToDash;
+
+  float trans[kN][kN];
+  for (int a = 0; a < kN; ++a) {
+    for (int b = 0; b < kN; ++b) {
+      trans[a][b] = -8.0f;
+    }
+  }
+  trans[kOnDot][kOffIntra] = onToIntra / onNorm;
+  trans[kOnDot][kOffChar] = onToChar / onNorm;
+  trans[kOnDot][kOffWord] = onToWord / onNorm;
+  trans[kOnDash][kOffIntra] = onToIntra / onNorm;
+  trans[kOnDash][kOffChar] = onToChar / onNorm;
+  trans[kOnDash][kOffWord] = onToWord / onNorm;
+  trans[kOffIntra][kOnDot] = offToDot / offNorm;
+  trans[kOffIntra][kOnDash] = offToDash / offNorm;
+  trans[kOffChar][kOnDot] = offToDot / offNorm;
+  trans[kOffChar][kOnDash] = offToDash / offNorm;
+  trans[kOffWord][kOnDot] = offToDot / offNorm;
+  trans[kOffWord][kOnDash] = offToDash / offNorm;
+
+  const auto dotVec = AdaptiveDotPerRun(runs, static_cast<float>(dotSamples));
+  const std::size_t T = runs.size();
+  std::vector<std::array<float, kN>> dp(T);
+  std::vector<std::array<int, kN>> prev(T);
+  for (std::size_t t = 0; t < T; ++t) {
+    for (int s = 0; s < kN; ++s) {
+      dp[t][s] = kNeg;
+      prev[t][s] = -1;
+    }
+  }
+
+  auto durationLike = [&](std::size_t t, int s) {
+    const float dot = std::max(1.0f, dotVec[t]);
+    const float u = static_cast<float>(runs[t].length) / dot;
+    if (s == kOnDot) {
+      return DurationLogLikeHsmm(u, 1.0f, cfg.hsmmSigmaOnDot, cfg.hsmmDurationTailMix);
+    }
+    if (s == kOnDash) {
+      return DurationLogLikeHsmm(u, 3.0f, cfg.hsmmSigmaOnDash, cfg.hsmmDurationTailMix);
+    }
+    if (s == kOffIntra) {
+      return DurationLogLikeHsmm(u, 1.0f, cfg.hsmmSigmaOffIntra, cfg.hsmmDurationTailMix);
+    }
+    if (s == kOffChar) {
+      return DurationLogLikeHsmm(u, 3.0f, cfg.hsmmSigmaOffChar, cfg.hsmmDurationTailMix);
+    }
+    return DurationLogLikeHsmm(u, 7.0f, cfg.hsmmSigmaOffWord, cfg.hsmmDurationTailMix);
+  };
+
+  for (int s = 0; s < kN; ++s) {
+    if (allowed(runs[0].value, s)) {
+      dp[0][s] = durationLike(0, s);
+    }
+  }
+
+  const float gain = std::max(0.0f, cfg.hsmmTimeTransitionGain);
+  for (std::size_t t = 1; t < T; ++t) {
+    const float dot = std::max(1.0f, dotVec[t]);
+    const float u = static_cast<float>(runs[t].length) / dot;
+    for (int s = 0; s < kN; ++s) {
+      if (!allowed(runs[t].value, s)) {
+        continue;
+      }
+      const float dur = durationLike(t, s);
+      float best = kNeg;
+      int bestPrev = -1;
+      for (int p = 0; p < kN; ++p) {
+        if (dp[t - 1][p] <= kNeg / 2) {
+          continue;
+        }
+        if (trans[p][s] <= 0.0f) {
+          continue;
+        }
+        const float tr = TimeDependentTransition(p, s, trans[p][s], u, gain);
+        const float cand = dp[t - 1][p] + tr + dur;
+        if (cand > best) {
+          best = cand;
+          bestPrev = p;
+        }
+      }
+      dp[t][s] = best;
+      prev[t][s] = bestPrev;
+    }
+  }
+
+  int bestState = 0;
+  float bestScore = kNeg;
+  for (int s = 0; s < kN; ++s) {
+    if (dp[T - 1][s] > bestScore) {
+      bestScore = dp[T - 1][s];
+      bestState = s;
+    }
+  }
+
+  std::vector<int> path(T, 0);
+  path[T - 1] = bestState;
+  for (std::size_t ti = T - 1; ti > 0; --ti) {
+    const int p = prev[ti][path[ti]];
+    path[ti - 1] = (p >= 0 ? p : path[ti]);
+  }
+
+  std::string text;
+  std::string current;
+  float confAcc = 0.0f;
+  int confN = 0;
+
+  for (std::size_t t = 0; t < T; ++t) {
+    const int st = path[t];
+    const float dot = std::max(1.0f, dotVec[t]);
+    const float u = static_cast<float>(runs[t].length) / dot;
+    if (st == kOnDot || st == kOnDash) {
+      const float pDot = GaussianLike(u, 1.0f, cfg.hsmmSigmaOnDot);
+      const float pDash = GaussianLike(u, 3.0f, cfg.hsmmSigmaOnDash);
+      const float z = pDot + pDash + 1e-9f;
+      if (st == kOnDot) {
+        current.push_back('.');
+        confAcc += pDot / z;
+      } else {
+        current.push_back('-');
+        confAcc += pDash / z;
+      }
+      ++confN;
+    } else if (st == kOffChar || st == kOffWord) {
+      if (!current.empty()) {
+        const auto it = MorseTable().find(current);
+        text.push_back(it == MorseTable().end() ? '?' : it->second);
+        current.clear();
+      }
+      if (st == kOffWord) {
+        text.push_back(' ');
+      }
+    }
+  }
+  if (!current.empty()) {
+    const auto it = MorseTable().find(current);
+    text.push_back(it == MorseTable().end() ? '?' : it->second);
+  }
+  while (!text.empty() && text.back() == ' ') {
+    text.pop_back();
+  }
+
+  SequenceDecode out;
+  out.text = std::move(text);
+  out.confidence = confN > 0 ? confAcc / static_cast<float>(confN) : 0.0f;
+  out.avgLogLike = bestScore / static_cast<float>(std::max<std::size_t>(1, T));
+  out.model = "hsmm";
+  return out;
+}
+
+SequenceDecode DecodeMorseAuto(const std::vector<Run>& runs, int dotSamples, const DecoderConfig& cfg) {
+  const auto hmm = DecodeMorseViterbiHmm(runs, dotSamples, cfg);
+  const auto hsmm = DecodeMorseHsmmExplicit(runs, dotSamples, cfg);
+  const float sh = DecodeTextHeuristicScore(hmm.text, hmm.confidence, hmm.avgLogLike);
+  const float ss = DecodeTextHeuristicScore(hsmm.text, hsmm.confidence, hsmm.avgLogLike);
+  if (ss > sh + 0.01f) {
+    return hsmm;
+  }
+  return hmm;
 }
 
 std::vector<std::string> ExtractUpperTokens(const std::string& text) {
@@ -569,7 +814,10 @@ std::vector<DecodeResult> DedupById(const std::vector<DecodeResult>& in, float f
       e.endSec = e.lastSeenSec;
       e.hitCount += r.hitCount;
       e.compositeScore = std::max(e.compositeScore, r.compositeScore);
-      e.confidence = std::max(e.confidence, r.confidence);
+      if (r.confidence >= e.confidence) {
+        e.confidence = r.confidence;
+        e.decoderModel = r.decoderModel;
+      }
       e.plausibleIdScore = std::max(e.plausibleIdScore, r.plausibleIdScore);
       merged = true;
       break;
@@ -704,8 +952,16 @@ std::vector<DecodeResult> DecodeNdbFromWav(const std::vector<float>& samples, in
     const float thr = RobustMadThreshold(boxed, cfg.thresholdK);
     const auto bits = BinaryByThreshold(boxed, thr);
     const auto runs = RunLengthEncode(bits);
-    const auto decodedText = DecodeMorseViterbiHmm(runs, dotSamples, cfg);
-    if (decodedText.first.empty()) {
+    SequenceDecode decodedText;
+    if (cfg.decoderModel == "hmm") {
+      decodedText = DecodeMorseViterbiHmm(runs, dotSamples, cfg);
+    } else if (cfg.decoderModel == "hsmm") {
+      decodedText = DecodeMorseHsmmExplicit(runs, dotSamples, cfg);
+    } else {
+      decodedText = DecodeMorseAuto(runs, dotSamples, cfg);
+    }
+
+    if (decodedText.text.empty()) {
       ++done;
       Report(progress, 58 + (28 * done) / total, "decode-clusters");
       continue;
@@ -721,9 +977,10 @@ std::vector<DecodeResult> DecodeNdbFromWav(const std::vector<float>& samples, in
     DecodeResult r;
     r.trackId = tr.id;
     r.freqHz = f0;
-    r.text = decodedText.first;
-    r.morse = decodedText.first;
-    r.confidence = decodedText.second;
+    r.text = decodedText.text;
+    r.morse = decodedText.text;
+    r.confidence = decodedText.confidence;
+    r.decoderModel = decodedText.model;
     r.startSec = tr.startSec;
     r.endSec = tr.endSec;
     r.firstSeenSec = tr.startSec;

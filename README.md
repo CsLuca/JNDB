@@ -130,10 +130,17 @@ Note: inside MSYS2 bash, arguments starting with `/` can be path-converted by th
 - `--plausible-id-min <float>`: plausible ID minimum score (default `0.30`)
 - `--strict-beacon`: require repeated beacon observations before output
 - `--strict-min-repeats <int>`: minimum `hit_count` in strict mode (default `3`)
+- `--decoder-model <name>`: sequence decoder model (`auto`, `hmm`, `hsmm`)
 - `--hmm-on-intra <float>` / `--hmm-on-char <float>` / `--hmm-on-word <float>`: ON->OFF HMM transition weights (default `0.70/0.25/0.05`)
 - `--hmm-off-dot <float>` / `--hmm-off-dash <float>`: OFF->ON HMM transition weights (default `0.75/0.25`)
 - `--hmm-sigma-dot <float>` / `--hmm-sigma-dash <float>`: ON-state duration sigmas (default `0.40/0.75`)
 - `--hmm-sigma-intra <float>` / `--hmm-sigma-char <float>` / `--hmm-sigma-word <float>`: OFF-state duration sigmas (default `0.45/0.90/1.60`)
+- `--hsmm-on-intra <float>` / `--hsmm-on-char <float>` / `--hsmm-on-word <float>`: ON->OFF HSMM transition weights
+- `--hsmm-off-dot <float>` / `--hsmm-off-dash <float>`: OFF->ON HSMM transition weights
+- `--hsmm-sigma-dot <float>` / `--hsmm-sigma-dash <float>`: HSMM ON-state duration sigmas
+- `--hsmm-sigma-intra <float>` / `--hsmm-sigma-char <float>` / `--hsmm-sigma-word <float>`: HSMM OFF-state duration sigmas
+- `--hsmm-tail-mix <float>`: heavy-tail mix for explicit duration distribution
+- `--hsmm-time-gain <float>`: strength of time-dependent transition adaptation
 - `--mode <preset>`: preset profile (`default`, `strict-dx`, `relaxed`)
 - `--min-confidence <float>`: output filter; keep rows with confidence >= value
 - `--metrics <path.json>`: write run quality metrics JSON for trend tracking
@@ -252,6 +259,30 @@ python tools/calibrate_hmm_phase0.py \
   --max-candidates 18 \
   --results-csv benchmarks/phase0/calibration/hmm_calibration_results.csv \
   --best-config-out benchmarks/phase0/frozen_config_hmm_calibrated.json
+```
+
+### HSMM + auto model tuning helper
+
+- Script: `tools/tune_sequence_models_phase0.py`
+- Purpose: compare/tune `hmm`, explicit `hsmm`, and `auto` selection on Phase0.
+- Outputs:
+  - tuned HSMM config JSON
+  - tuned auto config JSON
+  - CSV scoreboard
+
+Example:
+
+```bash
+python tools/tune_sequence_models_phase0.py \
+  --decoder build_ucrt64/ndb_decode.exe \
+  --manifest benchmarks/phase0/gold_dataset_manifest.local.json \
+  --base-config benchmarks/phase0/frozen_config_hmm_legacy.json \
+  --msys-bash C:/msys64/usr/bin/bash.exe \
+  --only-annotated \
+  --max-hsmm-candidates 6 \
+  --results-csv benchmarks/phase0/calibration/sequence_models_tuning_annotated.csv \
+  --best-hsmm-config benchmarks/phase0/frozen_config_hsmm_tuned.json \
+  --best-auto-config benchmarks/phase0/frozen_config_auto_tuned.json
 ```
 
 ## Phase 2 robust Morse decoder

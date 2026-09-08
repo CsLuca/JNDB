@@ -93,6 +93,7 @@ void PrintUsage() {
       << "  --plausible-id-min <float> Plausible ID score threshold (default: 0.30)\n"
       << "  --strict-beacon            Require repeated ID hits before emitting\n"
       << "  --strict-min-repeats <int> Minimum hit_count for strict mode (default: 3)\n"
+      << "  --decoder-model <name>     Decoder model: auto | hmm | hsmm (default: auto)\n"
       << "  --hmm-on-intra <float>     HMM P(on->intra) base weight (default: 0.73)\n"
       << "  --hmm-on-char <float>      HMM P(on->char-gap) base weight (default: 0.20)\n"
       << "  --hmm-on-word <float>      HMM P(on->word-gap) base weight (default: 0.07)\n"
@@ -103,6 +104,18 @@ void PrintUsage() {
       << "  --hmm-sigma-intra <float>  HMM sigma for intra gap (default: 0.40)\n"
       << "  --hmm-sigma-char <float>   HMM sigma for char gap (default: 0.80)\n"
       << "  --hmm-sigma-word <float>   HMM sigma for word gap (default: 1.35)\n"
+      << "  --hsmm-on-intra <float>    HSMM P(on->intra) base weight (default: 0.72)\n"
+      << "  --hsmm-on-char <float>     HSMM P(on->char-gap) base weight (default: 0.20)\n"
+      << "  --hsmm-on-word <float>     HSMM P(on->word-gap) base weight (default: 0.08)\n"
+      << "  --hsmm-off-dot <float>     HSMM P(off->dot) base weight (default: 0.82)\n"
+      << "  --hsmm-off-dash <float>    HSMM P(off->dash) base weight (default: 0.18)\n"
+      << "  --hsmm-sigma-dot <float>   HSMM sigma for dot duration (default: 0.38)\n"
+      << "  --hsmm-sigma-dash <float>  HSMM sigma for dash duration (default: 0.72)\n"
+      << "  --hsmm-sigma-intra <float> HSMM sigma for intra gap (default: 0.42)\n"
+      << "  --hsmm-sigma-char <float>  HSMM sigma for char gap (default: 0.85)\n"
+      << "  --hsmm-sigma-word <float>  HSMM sigma for word gap (default: 1.45)\n"
+      << "  --hsmm-tail-mix <float>    HSMM duration heavy-tail mix (default: 0.18)\n"
+      << "  --hsmm-time-gain <float>   HSMM time-dependent transition gain (default: 0.55)\n"
       << "  --mode <preset>            Preset: default | strict-dx | relaxed\n"
       << "  --min-confidence <float>   Keep only rows with confidence >= value\n"
       << "  --metrics <path.json>      Write quality metrics JSON\n"
@@ -125,11 +138,12 @@ bool WriteCsv(const std::string& path, const std::vector<ndb::DecodeResult>& res
     *error = "Cannot write output file: " + path;
     return false;
   }
-  out << "track_id,freq_hz,text,plausible_id,plausible_id_score,confidence,start_sec,end_sec,first_seen_sec,last_seen_sec,hit_count,composite_score,energy_score,continuity_score,freq_stability_score,keying_periodicity_score\n";
+  out << "track_id,freq_hz,text,plausible_id,plausible_id_score,confidence,decoder_model,start_sec,end_sec,first_seen_sec,last_seen_sec,hit_count,composite_score,energy_score,continuity_score,freq_stability_score,keying_periodicity_score\n";
   for (const auto& r : results) {
     out << r.trackId << ',' << std::fixed << std::setprecision(2) << r.freqHz << ',' << '"'
         << r.text << '"' << ',' << '"' << r.plausibleId << '"' << ','
         << std::setprecision(3) << r.plausibleIdScore << ',' << r.confidence << ','
+        << r.decoderModel << ','
         << std::setprecision(3) << r.startSec << ',' << r.endSec << ','
         << r.firstSeenSec << ',' << r.lastSeenSec << ',' << r.hitCount << ','
         << r.compositeScore << ',' << r.energyScore << ',' << r.continuityScore << ','
@@ -436,6 +450,18 @@ bool ParseArgs(int argc, char** argv, CliArgs* out, std::string* error) {
       }
       continue;
     }
+    if (token == "--decoder-model") {
+      std::string value;
+      if (!parseOptionValue(token, &value)) {
+        return false;
+      }
+      if (value != "auto" && value != "hmm" && value != "hsmm") {
+        *error = "Invalid value for --decoder-model (use: auto, hmm, hsmm)";
+        return false;
+      }
+      out->cfg.decoderModel = value;
+      continue;
+    }
     if (token == "--hmm-on-intra") {
       std::string value;
       if (!parseOptionValue(token, &value) || !ParseFloat(value, &out->cfg.hmmTransOnToIntra)) {
@@ -512,6 +538,102 @@ bool ParseArgs(int argc, char** argv, CliArgs* out, std::string* error) {
       std::string value;
       if (!parseOptionValue(token, &value) || !ParseFloat(value, &out->cfg.hmmSigmaOffWord)) {
         *error = "Invalid float for --hmm-sigma-word";
+        return false;
+      }
+      continue;
+    }
+    if (token == "--hsmm-on-intra") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseFloat(value, &out->cfg.hsmmTransOnToIntra)) {
+        *error = "Invalid float for --hsmm-on-intra";
+        return false;
+      }
+      continue;
+    }
+    if (token == "--hsmm-on-char") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseFloat(value, &out->cfg.hsmmTransOnToChar)) {
+        *error = "Invalid float for --hsmm-on-char";
+        return false;
+      }
+      continue;
+    }
+    if (token == "--hsmm-on-word") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseFloat(value, &out->cfg.hsmmTransOnToWord)) {
+        *error = "Invalid float for --hsmm-on-word";
+        return false;
+      }
+      continue;
+    }
+    if (token == "--hsmm-off-dot") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseFloat(value, &out->cfg.hsmmTransOffToDot)) {
+        *error = "Invalid float for --hsmm-off-dot";
+        return false;
+      }
+      continue;
+    }
+    if (token == "--hsmm-off-dash") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseFloat(value, &out->cfg.hsmmTransOffToDash)) {
+        *error = "Invalid float for --hsmm-off-dash";
+        return false;
+      }
+      continue;
+    }
+    if (token == "--hsmm-sigma-dot") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseFloat(value, &out->cfg.hsmmSigmaOnDot)) {
+        *error = "Invalid float for --hsmm-sigma-dot";
+        return false;
+      }
+      continue;
+    }
+    if (token == "--hsmm-sigma-dash") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseFloat(value, &out->cfg.hsmmSigmaOnDash)) {
+        *error = "Invalid float for --hsmm-sigma-dash";
+        return false;
+      }
+      continue;
+    }
+    if (token == "--hsmm-sigma-intra") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseFloat(value, &out->cfg.hsmmSigmaOffIntra)) {
+        *error = "Invalid float for --hsmm-sigma-intra";
+        return false;
+      }
+      continue;
+    }
+    if (token == "--hsmm-sigma-char") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseFloat(value, &out->cfg.hsmmSigmaOffChar)) {
+        *error = "Invalid float for --hsmm-sigma-char";
+        return false;
+      }
+      continue;
+    }
+    if (token == "--hsmm-sigma-word") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseFloat(value, &out->cfg.hsmmSigmaOffWord)) {
+        *error = "Invalid float for --hsmm-sigma-word";
+        return false;
+      }
+      continue;
+    }
+    if (token == "--hsmm-tail-mix") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseFloat(value, &out->cfg.hsmmDurationTailMix)) {
+        *error = "Invalid float for --hsmm-tail-mix";
+        return false;
+      }
+      continue;
+    }
+    if (token == "--hsmm-time-gain") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseFloat(value, &out->cfg.hsmmTimeTransitionGain)) {
+        *error = "Invalid float for --hsmm-time-gain";
         return false;
       }
       continue;

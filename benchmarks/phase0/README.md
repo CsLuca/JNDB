@@ -12,9 +12,12 @@ This folder contains the frozen benchmark baseline requested in Phase 0:
 - `frozen_config.json`: fixed decoder options and matching criteria
 - `frozen_config_hmm_legacy.json`: legacy HMM defaults expressed explicitly
 - `frozen_config_hmm_calibrated.json`: calibrated HMM config (quality-oriented, robustness constrained)
+- `frozen_config_hsmm_tuned.json`: explicit HSMM tuned config
+- `frozen_config_auto_tuned.json`: auto-select model config (HMM vs HSMM per track)
 - `gold_dataset_manifest.example.json`: schema/template for gold annotations
 - `../../tools/benchmark_phase0.py`: benchmark runner
 - `../../tools/calibrate_hmm_phase0.py`: rapid HMM transition/sigma calibration helper
+- `../../tools/tune_sequence_models_phase0.py`: sequence model tuning (HMM/HSMM/auto)
 
 ## Build decoder
 
@@ -132,6 +135,27 @@ python tools/calibrate_hmm_phase0.py \
 ```
 
 The script writes a new config JSON with the selected HMM parameters and embeds baseline vs best benchmark metrics.
+
+## HSMM and auto model tuning
+
+```bash
+python tools/tune_sequence_models_phase0.py \
+  --decoder build-ucrt64/ndb_decode.exe \
+  --manifest benchmarks/phase0/gold_dataset_manifest.local.json \
+  --base-config benchmarks/phase0/frozen_config_hmm_legacy.json \
+  --msys-bash C:/msys64/usr/bin/bash.exe \
+  --only-annotated \
+  --max-hsmm-candidates 6 \
+  --results-csv benchmarks/phase0/calibration/sequence_models_tuning_annotated.csv \
+  --best-hsmm-config benchmarks/phase0/frozen_config_hsmm_tuned.json \
+  --best-auto-config benchmarks/phase0/frozen_config_auto_tuned.json
+```
+
+`decoder-model` options:
+
+- `hmm`: force HMM decoder
+- `hsmm`: force explicit HSMM decoder
+- `auto`: run both and pick the best-scoring decoded sequence per track
 
 ## Matching policy (frozen v1)
 
