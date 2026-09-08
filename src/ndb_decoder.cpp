@@ -178,6 +178,67 @@ std::pair<std::string, float> DecodeMorseLikeHmm(const std::vector<Run>& runs, i
   return {text, conf};
 }
 
+std::vector<std::string> ExtractUpperTokens(const std::string& text) {
+  std::vector<std::string> out;
+  std::string cur;
+  for (char c : text) {
+    if (c >= 'A' && c <= 'Z') {
+      cur.push_back(c);
+    } else {
+      if (!cur.empty()) {
+        out.push_back(cur);
+        cur.clear();
+      }
+    }
+  }
+  if (!cur.empty()) {
+    out.push_back(cur);
+  }
+  return out;
+}
+
+std::pair<std::string, float> ExtractPlausibleId(const std::string& text) {
+  const auto tokens = ExtractUpperTokens(text);
+  std::unordered_map<std::string, int> cnt;
+  int validTotal = 0;
+  for (const auto& t : tokens) {
+    if (t.size() >= 2 && t.size() <= 3) {
+      ++cnt[t];
+      ++validTotal;
+    }
+  }
+  if (validTotal == 0 || cnt.empty()) {
+    return {"", 0.0f};
+  }
+
+  std::string best;
+  int bestCount = 0;
+  for (const auto& kv : cnt) {
+    if (kv.second > bestCount) {
+      bestCount = kv.second;
+      best = kv.first;
+    }
+  }
+
+  int cycHits = 0;
+  int cycTotal = 0;
+  for (std::size_t i = 1; i < tokens.size(); ++i) {
+    if ((tokens[i - 1].size() >= 2 && tokens[i - 1].size() <= 3) &&
+        (tokens[i].size() >= 2 && tokens[i].size() <= 3)) {
+      ++cycTotal;
+      if (tokens[i] == tokens[i - 1]) {
+        ++cycHits;
+      }
+    }
+  }
+
+  const float support = static_cast<float>(bestCount) / static_cast<float>(validTotal);
+  const float repetition = cycTotal > 0 ? static_cast<float>(cycHits) / static_cast<float>(cycTotal)
+                                        : 0.0f;
+  const float score = std::max(0.0f, std::min(1.0f, 0.65f * support + 0.35f * repetition));
+  return {best, score};
+}
+
 int EstimateDotSamplesMatched(const std::vector<float>& env, int sampleRate, int minDotMs,
                               int maxDotMs) {
   const int minDot = std::max(1, sampleRate * minDotMs / 1000);
@@ -344,12 +405,12 @@ std::vector<ClusteredTrack> ClusterTracks(const std::vector<Track>& tracks, int 
 std::vector<DecodeResult> DedupById(const std::vector<DecodeResult>& in, float freqTolHz) {
   std::vector<DecodeResult> out;
   for (const auto& r : in) {
-    if (r.text.empty()) {
+    if (r.plausibleId.empty()) {
       continue;
     }
     bool merged = false;
     for (auto& e : out) {
-      if (e.text != r.text) {
+      if (e.plausibleId != r.plausibleId) {
         continue;
       }
       if (std::fabs(e.freqHz - r.freqHz) > freqTolHz) {
@@ -362,6 +423,7 @@ std::vector<DecodeResult> DedupById(const std::vector<DecodeResult>& in, float f
       e.hitCount += r.hitCount;
       e.compositeScore = std::max(e.compositeScore, r.compositeScore);
       e.confidence = std::max(e.confidence, r.confidence);
+      e.plausibleIdScore = std::max(e.plausibleIdScore, r.plausibleIdScore);
       merged = true;
       break;
     }
@@ -449,6 +511,7 @@ std::vector<DecodeResult> DecodeNdbFromWav(const std::vector<float>& samples, in
   Report(progress, 58, "cluster-merge");
 
   int filteredByFreq = 0;
+  int plausibleRejected = 0;
   std::vector<DecodeResult> decoded;
   decoded.reserve(clustered.size());
 
@@ -506,6 +569,20 @@ std::vector<DecodeResult> DecodeNdbFromWav(const std::vector<float>& samples, in
     r.compositeScore = 0.35f * r.energyScore + 0.25f * r.continuityScore +
                        0.20f * r.freqStabilityScore + 0.20f * r.keyingPeriodicityScore;
 
+    const auto plausible = ExtractPlausibleId(r.text);
+    r.plausibleId = plausible.first;
+    r.plausibleIdScore = plausible.second;
+    if (cfg.requirePlausibleId &&
+        (r.plausibleId.empty() || r.plausibleIdScore < cfg.plausibleIdMinScore)) {
+      ++plausibleRejected;
+      ++done;
+      Report(progress, 58 + (28 * done) / total, "decode-clusters");
+      continue;
+    }
+    if (!r.plausibleId.empty()) {
+      r.text = r.plausibleId;
+    }
+
     decoded.push_back(std::move(r));
     ++done;
     Report(progress, 58 + (28 * done) / total, "decode-clusters");
@@ -515,6 +592,7 @@ std::vector<DecodeResult> DecodeNdbFromWav(const std::vector<float>& samples, in
   if (stats) {
     stats->filteredByFrequency = filteredByFreq;
     stats->dedupCount = static_cast<int>(dedup.size());
+    stats->plausibleIdRejected = plausibleRejected;
   }
   Report(progress, 90, "dedup-id");
 
@@ -524,6 +602,7 @@ std::vector<DecodeResult> DecodeNdbFromWav(const std::vector<float>& samples, in
     stats->decodedCount = static_cast<int>(results.size());
     std::vector<float> conf;
     std::vector<float> comp;
+    int withPlausibleId = 0;
     conf.reserve(results.size());
     comp.reserve(results.size());
     float maxConf = 0.0f;
@@ -531,6 +610,9 @@ std::vector<DecodeResult> DecodeNdbFromWav(const std::vector<float>& samples, in
       conf.push_back(r.confidence);
       comp.push_back(r.compositeScore);
       maxConf = std::max(maxConf, r.confidence);
+      if (!r.plausibleId.empty()) {
+        ++withPlausibleId;
+      }
     }
     stats->meanConfidence = Mean(conf);
     stats->medianConfidence = Median(conf);
@@ -540,11 +622,15 @@ std::vector<DecodeResult> DecodeNdbFromWav(const std::vector<float>& samples, in
                                    static_cast<float>(stats->clusteredCount)
                              : 0.0f;
     stats->idLikeTokenRatio = ComputeIdLikeTokenRatio(results);
+    stats->plausibleIdRatio = results.empty() ? 0.0f
+                                              : static_cast<float>(withPlausibleId) /
+                                                    static_cast<float>(results.size());
     stats->meanCompositeScore = Mean(comp);
     stats->qualityScore = 100.0f * (0.35f * stats->meanConfidence + 0.20f * stats->medianConfidence +
                                     0.15f * stats->decodeRatio +
-                                    0.10f * stats->idLikeTokenRatio +
-                                    0.20f * stats->meanCompositeScore);
+                                    0.05f * stats->idLikeTokenRatio +
+                                    0.10f * stats->plausibleIdRatio +
+                                    0.15f * stats->meanCompositeScore);
   }
 
   Report(progress, 100, "done");

@@ -124,6 +124,9 @@ Note: inside MSYS2 bash, arguments starting with `/` can be path-converted by th
 - `--cluster-freq-tol <float>`: track cluster frequency merge tolerance (default `2.0`)
 - `--cluster-gap-sec <float>`: merge gap for overlapping/nearby tracks (default `0.4`)
 - `--dedup-freq-tol <float>`: repeated-ID dedup frequency tolerance (default `2.0`)
+- `--require-plausible-id`: enforce plausible cyclic beacon ID filter (default on)
+- `--allow-any-id`: disable plausible ID gating
+- `--plausible-id-min <float>`: plausible ID minimum score (default `0.30`)
 - `--min-confidence <float>`: output filter; keep rows with confidence >= value
 - `--metrics <path.json>`: write run quality metrics JSON for trend tracking
 - `--no-progress`: disable progress output
@@ -192,11 +195,13 @@ Metrics JSON fields:
 - `id_like_token_ratio`: ratio of 2-3 uppercase tokens in decoded text
 - `track_count`, `decoded_count`, `candidate_bin_count`, `frame_count`
 - `clustered_count`, `dedup_count`, `mean_composite_score`
+- `plausible_id_rejected`, `plausible_id_ratio`
 
 Phase 1 detection cleanup now includes:
 
 - frequency clustering and merge of overlapping tracks
 - repeated-ID dedup (`first_seen`, `last_seen`, `hit_count`)
+- plausible beacon ID extraction (2-3 uppercase tokens with cyclic repetition score)
 - composite track score from:
   - energy
   - continuity

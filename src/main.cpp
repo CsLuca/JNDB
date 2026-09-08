@@ -57,6 +57,9 @@ void PrintUsage() {
       << "  --cluster-freq-tol <float> Cluster merge freq tolerance (default: 2.0)\n"
       << "  --cluster-gap-sec <float>  Cluster merge time gap (default: 0.4)\n"
       << "  --dedup-freq-tol <float>   ID dedup freq tolerance (default: 2.0)\n"
+      << "  --require-plausible-id     Keep only plausible cyclic 2-3 char beacon IDs\n"
+      << "  --allow-any-id             Disable plausible ID filter\n"
+      << "  --plausible-id-min <float> Plausible ID score threshold (default: 0.30)\n"
       << "  --min-confidence <float>   Keep only rows with confidence >= value\n"
       << "  --metrics <path.json>      Write quality metrics JSON\n"
       << "  --no-progress              Disable progress output\n"
@@ -77,10 +80,11 @@ bool WriteCsv(const std::string& path, const std::vector<ndb::DecodeResult>& res
     *error = "Cannot write output file: " + path;
     return false;
   }
-  out << "track_id,freq_hz,text,confidence,start_sec,end_sec,first_seen_sec,last_seen_sec,hit_count,composite_score,energy_score,continuity_score,freq_stability_score,keying_periodicity_score\n";
+  out << "track_id,freq_hz,text,plausible_id,plausible_id_score,confidence,start_sec,end_sec,first_seen_sec,last_seen_sec,hit_count,composite_score,energy_score,continuity_score,freq_stability_score,keying_periodicity_score\n";
   for (const auto& r : results) {
     out << r.trackId << ',' << std::fixed << std::setprecision(2) << r.freqHz << ',' << '"'
-        << r.text << '"' << ',' << std::setprecision(3) << r.confidence << ','
+        << r.text << '"' << ',' << '"' << r.plausibleId << '"' << ','
+        << std::setprecision(3) << r.plausibleIdScore << ',' << r.confidence << ','
         << std::setprecision(3) << r.startSec << ',' << r.endSec << ','
         << r.firstSeenSec << ',' << r.lastSeenSec << ',' << r.hitCount << ','
         << r.compositeScore << ',' << r.energyScore << ',' << r.continuityScore << ','
@@ -106,6 +110,7 @@ bool WriteMetrics(const std::string& path, const ndb::DecodeStats& s, std::strin
   out << "  \"filtered_by_frequency\": " << s.filteredByFrequency << ",\n";
   out << "  \"clustered_count\": " << s.clusteredCount << ",\n";
   out << "  \"dedup_count\": " << s.dedupCount << ",\n";
+  out << "  \"plausible_id_rejected\": " << s.plausibleIdRejected << ",\n";
   out << "  \"decoded_count\": " << s.decodedCount << ",\n";
   out << "  \"mean_confidence\": " << std::fixed << std::setprecision(6) << s.meanConfidence
       << ",\n";
@@ -116,6 +121,8 @@ bool WriteMetrics(const std::string& path, const ndb::DecodeStats& s, std::strin
   out << "  \"decode_ratio\": " << std::fixed << std::setprecision(6) << s.decodeRatio << ",\n";
   out << "  \"id_like_token_ratio\": " << std::fixed << std::setprecision(6)
       << s.idLikeTokenRatio << ",\n";
+  out << "  \"plausible_id_ratio\": " << std::fixed << std::setprecision(6)
+      << s.plausibleIdRatio << ",\n";
   out << "  \"mean_composite_score\": " << std::fixed << std::setprecision(6)
       << s.meanCompositeScore << ",\n";
   out << "  \"quality_score\": " << std::fixed << std::setprecision(3) << s.qualityScore << "\n";
@@ -131,6 +138,7 @@ void PrintMetricsSummary(const ndb::DecodeStats& s) {
             << "  median_confidence  : " << std::setprecision(3) << s.medianConfidence << "\n"
             << "  decode_ratio       : " << std::setprecision(3) << s.decodeRatio << "\n"
             << "  id_like_token_ratio: " << std::setprecision(3) << s.idLikeTokenRatio << "\n"
+            << "  plausible_id_ratio : " << std::setprecision(3) << s.plausibleIdRatio << "\n"
             << "  mean_composite     : " << std::setprecision(3) << s.meanCompositeScore << "\n"
             << "  tracks(decoded/all): " << s.decodedCount << "/" << s.trackCount << "\n";
 }
@@ -353,6 +361,22 @@ bool ParseArgs(int argc, char** argv, CliArgs* out, std::string* error) {
       }
       continue;
     }
+    if (token == "--require-plausible-id") {
+      out->cfg.requirePlausibleId = true;
+      continue;
+    }
+    if (token == "--allow-any-id") {
+      out->cfg.requirePlausibleId = false;
+      continue;
+    }
+    if (token == "--plausible-id-min") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseFloat(value, &out->cfg.plausibleIdMinScore)) {
+        *error = "Invalid float for --plausible-id-min";
+        return false;
+      }
+      continue;
+    }
     if (token == "--min-confidence") {
       std::string value;
       if (!parseOptionValue(token, &value) || !ParseFloat(value, &out->minConfidence)) {
@@ -477,8 +501,9 @@ int main(int argc, char** argv) {
     }
     for (const auto& r : results) {
       std::cout << "track=" << r.trackId << " freq=" << std::fixed << std::setprecision(2)
-                << r.freqHz << "Hz text=\"" << r.text << "\" conf=" << std::setprecision(3)
-                << r.confidence << " score=" << r.compositeScore << " hits=" << r.hitCount
+                << r.freqHz << "Hz id=\"" << r.plausibleId << "\" pid="
+                << std::setprecision(3) << r.plausibleIdScore << " conf=" << r.confidence
+                << " score=" << r.compositeScore << " hits=" << r.hitCount
                 << " t=[" << r.startSec << "," << r.endSec << "]\n";
     }
   }

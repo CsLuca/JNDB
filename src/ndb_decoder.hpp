@@ -22,6 +22,8 @@ struct DecodeResult {
   float continuityScore = 0.0f;
   float freqStabilityScore = 0.0f;
   float keyingPeriodicityScore = 0.0f;
+  std::string plausibleId;
+  float plausibleIdScore = 0.0f;
 };
 
 struct DecoderConfig {
@@ -46,6 +48,8 @@ struct DecoderConfig {
   float clusterFreqTolHz = 2.0f;
   float clusterGapSec = 0.4f;
   float dedupFreqTolHz = 2.0f;
+  bool requirePlausibleId = true;
+  float plausibleIdMinScore = 0.30f;
 };
 
 struct DecodeStats {
@@ -59,12 +63,14 @@ struct DecodeStats {
   int filteredByFrequency = 0;
   int clusteredCount = 0;
   int dedupCount = 0;
+  int plausibleIdRejected = 0;
   int decodedCount = 0;
   float meanConfidence = 0.0f;
   float medianConfidence = 0.0f;
   float maxConfidence = 0.0f;
   float decodeRatio = 0.0f;
   float idLikeTokenRatio = 0.0f;
+  float plausibleIdRatio = 0.0f;
   float meanCompositeScore = 0.0f;
   float qualityScore = 0.0f;
 };
