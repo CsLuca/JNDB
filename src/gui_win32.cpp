@@ -63,6 +63,8 @@ struct DecodeThreadResult {
 struct HistoryEntry {
   std::string runId;
   std::string ts;
+  std::string gitCommit;
+  std::string gitBranch;
   double precision = 0.0;
   double recall = 0.0;
   double fph = 0.0;
@@ -104,6 +106,10 @@ struct AppState {
   bool dragging = false;
   int dragStartX = 0;
   int panStartPx = 0;
+  bool hoverActive = false;
+  POINT hoverPoint = {0, 0};
+  std::wstring hoverText;
+  bool mouseLeaveArmed = false;
 };
 
 std::wstring ToWide(const std::string& s) {
@@ -319,6 +325,8 @@ bool LoadHistoryCsv(const std::string& path, std::vector<HistoryEntry>* out, std
 
   const int iRun = idx("run_id");
   const int iTs = idx("timestamp_utc");
+  const int iCommit = idx("git_commit");
+  const int iBranch = idx("git_branch");
   const int iPrec = idx("precision");
   const int iRec = idx("recall");
   const int iFph = idx("false_positives_per_hour");
@@ -343,6 +351,12 @@ bool LoadHistoryCsv(const std::string& path, std::vector<HistoryEntry>* out, std
     HistoryEntry e;
     e.runId = c[static_cast<std::size_t>(iRun)];
     e.ts = c[static_cast<std::size_t>(iTs)];
+    if (iCommit >= 0 && static_cast<int>(c.size()) > iCommit) {
+      e.gitCommit = c[static_cast<std::size_t>(iCommit)];
+    }
+    if (iBranch >= 0 && static_cast<int>(c.size()) > iBranch) {
+      e.gitBranch = c[static_cast<std::size_t>(iBranch)];
+    }
     if (!ToDouble(c[static_cast<std::size_t>(iPrec)], &e.precision)) continue;
     if (!ToDouble(c[static_cast<std::size_t>(iRec)], &e.recall)) continue;
     if (!ToDouble(c[static_cast<std::size_t>(iFph)], &e.fph)) continue;
@@ -474,6 +488,152 @@ void DrawMetricChart(HDC hdc, const RECT& rc, const std::vector<HistoryEntry>& h
   DrawTextW(hdc, ss.str().c_str(), -1, &valRc, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
 }
 
+struct HitPoint {
+  bool ok = false;
+  POINT pt = {0, 0};
+  std::wstring text;
+};
+
+void DrawTooltip(HDC hdc, const RECT& canvas, POINT anchor, const std::wstring& text) {
+  if (text.empty()) {
+    return;
+  }
+  RECT tr = {0, 0, 380, 200};
+  DrawTextW(hdc, text.c_str(), -1, &tr, DT_LEFT | DT_TOP | DT_WORDBREAK | DT_CALCRECT);
+
+  const int pad = 8;
+  int w = (tr.right - tr.left) + pad * 2;
+  int h = (tr.bottom - tr.top) + pad * 2;
+  int x = anchor.x + 14;
+  int y = anchor.y + 14;
+  if (x + w > canvas.right - 4) {
+    x = anchor.x - w - 14;
+  }
+  if (y + h > canvas.bottom - 4) {
+    y = anchor.y - h - 14;
+  }
+  x = std::max(static_cast<int>(canvas.left) + 4, x);
+  y = std::max(static_cast<int>(canvas.top) + 4, y);
+
+  RECT box = {x, y, x + w, y + h};
+  HBRUSH bg = CreateSolidBrush(RGB(255, 255, 245));
+  FillRect(hdc, &box, bg);
+  DeleteObject(bg);
+
+  HPEN pen = CreatePen(PS_SOLID, 1, RGB(120, 120, 100));
+  auto old = reinterpret_cast<HPEN>(SelectObject(hdc, pen));
+  MoveToEx(hdc, box.left, box.top, nullptr);
+  LineTo(hdc, box.right - 1, box.top);
+  LineTo(hdc, box.right - 1, box.bottom - 1);
+  LineTo(hdc, box.left, box.bottom - 1);
+  LineTo(hdc, box.left, box.top);
+  SelectObject(hdc, old);
+  DeleteObject(pen);
+
+  RECT tx = {box.left + pad, box.top + pad, box.right - pad, box.bottom - pad};
+  SetBkMode(hdc, TRANSPARENT);
+  SetTextColor(hdc, RGB(30, 30, 30));
+  DrawTextW(hdc, text.c_str(), -1, &tx, DT_LEFT | DT_TOP | DT_WORDBREAK);
+}
+
+HitPoint HitTestCharts(const AppState* app, const RECT& rc, POINT mouse) {
+  HitPoint hit;
+  if (!app) {
+    return hit;
+  }
+
+  std::vector<ChartDef> defs = {
+      {L"Precision", RGB(27, 94, 32), &HistoryEntry::precision, false},
+      {L"Recall", RGB(21, 101, 192), &HistoryEntry::recall, false},
+      {L"False Positives / hour", RGB(211, 47, 47), &HistoryEntry::fph, true},
+      {L"ID Latency (s)", RGB(255, 143, 0), &HistoryEntry::latency, true},
+      {L"Runtime x Realtime", RGB(123, 31, 162), &HistoryEntry::xrt, true},
+      {L"Quality Score", RGB(0, 105, 92), &HistoryEntry::quality, false},
+  };
+
+  const int cols = 2;
+  const int rows = 3;
+  const int gap = 10;
+  const int w = (rc.right - rc.left - gap * (cols + 1)) / cols;
+  const int h = (rc.bottom - rc.top - gap * (rows + 1)) / rows;
+
+  auto trySeries = [&](const std::vector<HistoryEntry>& src, const ChartDef& cd, const RECT& plot,
+                       const RECT& chartRc, bool isCompare) {
+    if (src.size() < 2) {
+      return;
+    }
+    double minV = std::numeric_limits<double>::max();
+    double maxV = std::numeric_limits<double>::lowest();
+    for (const auto& e : app->history) {
+      const double v = e.*(cd.field);
+      minV = std::min(minV, v);
+      maxV = std::max(maxV, v);
+    }
+    for (const auto& e : app->historyCompare) {
+      const double v = e.*(cd.field);
+      minV = std::min(minV, v);
+      maxV = std::max(maxV, v);
+    }
+    if (minV == std::numeric_limits<double>::max()) {
+      minV = 0.0;
+      maxV = 1.0;
+    }
+    if (std::fabs(maxV - minV) < 1e-12) {
+      maxV += 1.0;
+      minV -= 1.0;
+    }
+
+    const int radius = isCompare ? 3 : 5;
+    for (std::size_t i = 0; i < src.size(); ++i) {
+      const double v = src[i].*(cd.field);
+      double t = static_cast<double>(i) / static_cast<double>(src.size() - 1);
+      t = (t - 0.5) * app->chartZoom + 0.5;
+      const int x = plot.left + static_cast<int>(t * (plot.right - plot.left)) + app->chartPanPx;
+      const double yn = (v - minV) / (maxV - minV);
+      const int y = plot.bottom - static_cast<int>(yn * (plot.bottom - plot.top));
+
+      const int dx = mouse.x - x;
+      const int dy = mouse.y - y;
+      if ((dx * dx + dy * dy) <= radius * radius * 4) {
+        hit.ok = true;
+        hit.pt = {x, y};
+        std::wstringstream ss;
+        ss << cd.title << L"\n"
+           << L"Run: " << ToWide(src[i].runId) << L"\n"
+           << L"Time: " << ToWide(src[i].ts) << L"\n"
+           << L"Commit: " << ToWide(src[i].gitCommit) << L"\n"
+           << L"Branch: " << ToWide(src[i].gitBranch) << L"\n"
+           << L"Value: " << std::fixed << std::setprecision(6) << v
+           << (isCompare ? L"\nSeries: Compare" : L"\nSeries: Primary");
+        hit.text = ss.str();
+        return;
+      }
+    }
+  };
+
+  for (int r = 0; r < rows; ++r) {
+    for (int c = 0; c < cols; ++c) {
+      const int idx = r * cols + c;
+      RECT cr = {rc.left + gap + c * (w + gap), rc.top + gap + r * (h + gap),
+                 rc.left + gap + c * (w + gap) + w, rc.top + gap + r * (h + gap) + h};
+      if (mouse.x < cr.left || mouse.x > cr.right || mouse.y < cr.top || mouse.y > cr.bottom) {
+        continue;
+      }
+      RECT plot = {cr.left + 8, cr.top + 28, cr.right - 8, cr.bottom - 24};
+      trySeries(app->history, defs[idx], plot, cr, false);
+      if (hit.ok) {
+        return hit;
+      }
+      trySeries(app->historyCompare, defs[idx], plot, cr, true);
+      if (hit.ok) {
+        return hit;
+      }
+    }
+  }
+
+  return hit;
+}
+
 void DrawCharts(AppState* app, HDC hdc, const RECT& rc) {
   HBRUSH bg = CreateSolidBrush(RGB(248, 250, 252));
   FillRect(hdc, &rc, bg);
@@ -502,6 +662,10 @@ void DrawCharts(AppState* app, HDC hdc, const RECT& rc) {
       DrawMetricChart(hdc, cr, app->history, app->historyCompare, defs[idx], app->chartZoom,
                       app->chartPanPx);
     }
+  }
+
+  if (app->hoverActive) {
+    DrawTooltip(hdc, rc, app->hoverPoint, app->hoverText);
   }
 }
 
@@ -675,16 +839,43 @@ LRESULT CALLBACK ChartProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       }
       return 0;
     case WM_MOUSEMOVE:
-      if (app && app->dragging) {
-        const int x = GET_X_LPARAM(lParam);
-        app->chartPanPx = app->panStartPx + (x - app->dragStartX);
-        InvalidateRect(hwnd, nullptr, TRUE);
+      if (app) {
+        if (!app->mouseLeaveArmed) {
+          TRACKMOUSEEVENT tme = {sizeof(tme), TME_LEAVE, hwnd, 0};
+          TrackMouseEvent(&tme);
+          app->mouseLeaveArmed = true;
+        }
+        const POINT p = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        if (app->dragging) {
+          app->chartPanPx = app->panStartPx + (p.x - app->dragStartX);
+          app->hoverActive = false;
+          InvalidateRect(hwnd, nullptr, TRUE);
+        } else {
+          RECT rc;
+          GetClientRect(hwnd, &rc);
+          auto hit = HitTestCharts(app, rc, p);
+          if (hit.ok) {
+            app->hoverActive = true;
+            app->hoverPoint = hit.pt;
+            app->hoverText = hit.text;
+          } else {
+            app->hoverActive = false;
+          }
+          InvalidateRect(hwnd, nullptr, TRUE);
+        }
       }
       return 0;
     case WM_LBUTTONUP:
       if (app && app->dragging) {
         app->dragging = false;
         ReleaseCapture();
+      }
+      return 0;
+    case WM_MOUSELEAVE:
+      if (app) {
+        app->mouseLeaveArmed = false;
+        app->hoverActive = false;
+        InvalidateRect(hwnd, nullptr, TRUE);
       }
       return 0;
   }

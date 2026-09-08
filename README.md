@@ -90,6 +90,7 @@ Professional analytics dashboard (Windows GUI):
 - Supports zoom/pan exploration directly in charts
 - Exports dashboard to PNG for reports
 - Includes compare overlay mode (second history CSV)
+- Hover tooltip on chart points with run id, timestamp, commit, branch, and exact metric value
 
 Tip: for automated flows and scripts, use CLI mode with explicit arguments.
 
