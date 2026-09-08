@@ -116,7 +116,39 @@ def main() -> int:
     m = json.loads(met_path.read_text(encoding="utf-8"))
     assert_true("quality_score" in m and "decoded_count" in m, "metrics JSON missing expected fields")
 
-    print("Phase 6 CLI smoke: PASSED")
+    assert_true(csv_path.read_text(encoding="utf-8").startswith("track_id,"), "CSV header mismatch")
+
+    sess_dir = out_root / "session_evidence"
+    cmd_parts2 = [
+        shlex.quote(to_msys_path(decoder)),
+        shlex.quote(to_msys_path(wav)),
+        shlex.quote(to_msys_path(out_root / "phase6_out_session.csv")),
+        "--mode",
+        "urban-noise",
+        "--dashboard",
+        "rich",
+        "--session-export",
+        shlex.quote(to_msys_path(sess_dir)),
+        "--max-seconds",
+        "8",
+        "--no-progress",
+        "--quiet",
+    ]
+    cp2 = run_msys(msys_bash, cmd_parts2)
+    assert_true(cp2.returncode == 0, f"session export decode failed rc={cp2.returncode}\nstdout={cp2.stdout}\nstderr={cp2.stderr}")
+
+    session_summary = sess_dir / "session_summary.json"
+    snippet_index = sess_dir / "snippets" / "snippet_index.csv"
+    assert_true(session_summary.exists(), "session_summary.json missing")
+    assert_true(snippet_index.exists(), "snippet_index.csv missing")
+    lines = [x for x in snippet_index.read_text(encoding="utf-8").splitlines() if x.strip()]
+    assert_true(len(lines) >= 2, "snippet_index must contain at least one snippet row")
+    first = lines[1].split(",")
+    assert_true(len(first) >= 7, "snippet_index columns mismatch")
+    wav_name = first[6]
+    assert_true((sess_dir / "snippets" / wav_name).exists(), "snippet WAV referenced in index is missing")
+
+    print("Phase 6/7 CLI smoke: PASSED")
     print(f"- out_dir: {out_root}")
     if temp_ctx is not None:
         temp_ctx.cleanup()

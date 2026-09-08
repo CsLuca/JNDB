@@ -59,6 +59,10 @@ GitHub Actions workflows included:
 - `.github/workflows/build-test.yml`
   - Linux build + help smoke
   - Windows MSYS2 UCRT64 build + help smoke
+- `.github/workflows/e2e-smoke.yml`
+  - Windows MSYS2 UCRT64 build
+  - synthetic short WAV generation
+  - end-to-end smoke decode with dashboard + session export checks
 - `.github/workflows/release-packages.yml`
   - Linux tarball artifact
   - Windows UCRT64 zip artifact

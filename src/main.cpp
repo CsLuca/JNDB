@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <fstream>
+#include <filesystem>
 #include <iomanip>
 #include <iostream>
 #include <optional>
@@ -416,13 +417,18 @@ bool ExportSessionEvidence(const std::string& dir, const ndb::WavData& wav,
                            const std::vector<ndb::DecodeResult>& results,
                            const ndb::DecodeStats& stats, const CliArgs& args,
                            std::string* error) {
-  const std::string mkdirCmd = "mkdir \"" + dir + "\" 2>nul";
-  std::system(mkdirCmd.c_str());
+  const std::filesystem::path baseDir(dir);
+  std::error_code ec;
+  std::filesystem::create_directories(baseDir, ec);
+  if (ec) {
+    *error = "Cannot create session export directory: " + baseDir.string();
+    return false;
+  }
 
-  const std::string summaryPath = dir + "\\session_summary.json";
-  std::ofstream out(summaryPath);
+  const std::filesystem::path summaryPath = baseDir / "session_summary.json";
+  std::ofstream out(summaryPath.string());
   if (!out) {
-    *error = "Cannot write session summary: " + summaryPath;
+    *error = "Cannot write session summary: " + summaryPath.string();
     return false;
   }
   out << "{\n";
@@ -447,8 +453,12 @@ bool ExportSessionEvidence(const std::string& dir, const ndb::WavData& wav,
   out << "  ]\n";
   out << "}\n";
 
-  const std::string snipDir = dir + "\\snippets";
-  std::system(("mkdir \"" + snipDir + "\" 2>nul").c_str());
+  const std::filesystem::path snipDir = baseDir / "snippets";
+  std::filesystem::create_directories(snipDir, ec);
+  if (ec) {
+    *error = "Cannot create snippets directory: " + snipDir.string();
+    return false;
+  }
 
   auto writeLe16 = [](std::ofstream& o, unsigned int v) {
     const char b[2] = {static_cast<char>(v & 0xffU), static_cast<char>((v >> 8) & 0xffU)};
@@ -496,8 +506,8 @@ bool ExportSessionEvidence(const std::string& dir, const ndb::WavData& wav,
     }
   };
 
-  const std::string cuePath = snipDir + "\\snippet_index.csv";
-  std::ofstream cue(cuePath);
+  const std::filesystem::path cuePath = snipDir / "snippet_index.csv";
+  std::ofstream cue(cuePath.string());
   if (cue) {
     cue << "track_id,start_sec,end_sec,freq_hz,id,score,snippet_wav\n";
     for (const auto& r : results) {
@@ -505,17 +515,29 @@ bool ExportSessionEvidence(const std::string& dir, const ndb::WavData& wav,
                                   std::to_string(static_cast<int>(std::round(r.startSec * 1000.0f))) +
                                   "_" +
                                   std::to_string(static_cast<int>(std::round(r.endSec * 1000.0f))) + ".wav";
-      const std::string wavPath = snipDir + "\\" + wavName;
+      const std::filesystem::path wavPath = snipDir / wavName;
       const std::size_t i0 = wav.sampleRate > 0
                                  ? static_cast<std::size_t>(std::max(0.0f, r.startSec) * wav.sampleRate)
                                  : 0;
       const std::size_t i1 = wav.sampleRate > 0
                                  ? static_cast<std::size_t>(std::max(0.0f, r.endSec) * wav.sampleRate)
                                  : 0;
-      writeSnippetWav(wavPath, std::max(1, wav.sampleRate), wav.samples, i0, i1);
+      writeSnippetWav(wavPath.string(), std::max(1, wav.sampleRate), wav.samples, i0, i1);
       cue << r.trackId << ',' << std::fixed << std::setprecision(3) << r.startSec << ',' << r.endSec
           << ',' << std::setprecision(2) << r.freqHz << ',' << r.plausibleId << ','
           << std::setprecision(3) << r.compositeScore << ',' << wavName << '\n';
+    }
+    if (results.empty() && wav.sampleRate > 0 && !wav.samples.empty()) {
+      const float endSec = std::min(5.0f,
+                                    static_cast<float>(wav.samples.size()) /
+                                        static_cast<float>(wav.sampleRate));
+      const std::string wavName = "raw_head.wav";
+      const std::filesystem::path wavPath = snipDir / wavName;
+      const std::size_t i0 = 0;
+      const std::size_t i1 = static_cast<std::size_t>(endSec * wav.sampleRate);
+      writeSnippetWav(wavPath.string(), wav.sampleRate, wav.samples, i0, i1);
+      cue << "0,0.000," << std::fixed << std::setprecision(3) << endSec
+          << ",0.00,,0.000," << wavName << '\n';
     }
   }
   return true;

@@ -1,0 +1,34 @@
+name: e2e-smoke
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  windows-msys2-e2e:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+      - name: Build
+        shell: msys2 {0}
+        run: |
+          cmake -S . -B build_ucrt64 -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build_ucrt64 -j
+      - name: Generate short synthetic sample
+        shell: pwsh
+        run: |
+          python tools/generate_ci_e2e_sample.py --out benchmarks/phase6/runs/ci_e2e_sample.wav
+      - name: Run E2E smoke (Phase6/7)
+        shell: pwsh
+        run: |
+          python tools/test_phase6_cli_smoke.py --decoder build_ucrt64/ndb_decode.exe --wav benchmarks/phase6/runs/ci_e2e_sample.wav --msys-bash C:/msys64/usr/bin/bash.exe --out-dir benchmarks/phase6/runs/ci_e2e
