@@ -329,6 +329,7 @@ def main() -> int:
         "files_total": len(manifest.get("files", [])),
         "files_missing": missing_files,
         "files_evaluated": len(manifest.get("files", [])) - missing_files,
+        "files_with_annotations": sum(1 for x in manifest.get("files", []) if x.get("annotations")),
         "precision": global_precision,
         "recall": global_recall,
         "false_positives_per_hour": global_fph,
@@ -397,6 +398,8 @@ def main() -> int:
         f"FP/h={global_fph:.3f} latency={global_latency:.3f}s xRT={global_xrt:.3f} "
         f"quality_mean={mean_quality:.3f}"
     )
+    if summary["files_with_annotations"] == 0:
+        print("- warning: no annotations present in manifest; precision/recall are not meaningful yet")
     return 0
 
 

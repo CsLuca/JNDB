@@ -35,6 +35,23 @@ cmake --build build-ucrt64 -j
      - `start_sec`, `end_sec`
      - `snr_db_est` optional
 
+### Fast bootstrap from one long WAV (local)
+
+You can generate 20-50 chunk files and a local manifest to annotate:
+
+```bash
+python tools/prepare_phase0_chunks.py \
+  --input-wav C:/Users/LBiondi/Downloads/ndb-315-415_013.wav \
+  --out-dir C:/Users/LBiondi/Downloads/jndb_phase0_chunks \
+  --manifest-out benchmarks/phase0/gold_dataset_manifest.local.json \
+  --chunk-sec 5 \
+  --count 30 \
+  --start-sec 0 \
+  --prefix phase0
+```
+
+Then fill `annotations` for each chunk in the local manifest.
+
 ## Run benchmark (decode + evaluate)
 
 ```bash
@@ -78,3 +95,9 @@ Generated in `--out-dir`:
 - One-to-one greedy assignment annotation->prediction
 
 Keep this policy unchanged for baseline comparability.
+
+## Notes about metrics validity
+
+- If manifest files have empty `annotations`, benchmark still runs and reports runtime/quality metrics.
+- In that condition, precision/recall are placeholders and not scientifically meaningful.
+- The script prints a warning when annotation coverage is zero.
