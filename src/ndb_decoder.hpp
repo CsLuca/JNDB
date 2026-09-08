@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -31,7 +32,29 @@ struct DecoderConfig {
   int maxAnalyzeSeconds = 90;
 };
 
+struct DecodeStats {
+  int inputSampleRate = 0;
+  int workSampleRate = 0;
+  std::size_t inputSamples = 0;
+  std::size_t workSamples = 0;
+  int frameCount = 0;
+  int candidateBinCount = 0;
+  int trackCount = 0;
+  int filteredByFrequency = 0;
+  int decodedCount = 0;
+  float meanConfidence = 0.0f;
+  float medianConfidence = 0.0f;
+  float maxConfidence = 0.0f;
+  float decodeRatio = 0.0f;
+  float idLikeTokenRatio = 0.0f;
+  float qualityScore = 0.0f;
+};
+
+using ProgressCallback = std::function<void(int percent, const std::string& stage)>;
+
 std::vector<DecodeResult> DecodeNdbFromWav(const std::vector<float>& samples, int sampleRate,
-                                           const DecoderConfig& cfg);
+                                           const DecoderConfig& cfg,
+                                           DecodeStats* stats = nullptr,
+                                           ProgressCallback progress = {});
 
 }  // namespace ndb

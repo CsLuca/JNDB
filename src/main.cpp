@@ -1,6 +1,7 @@
 #include "ndb_decoder.hpp"
 #include "wav.hpp"
 
+#include <algorithm>
 #include <cstdlib>
 #include <fstream>
 #include <iomanip>
@@ -13,8 +14,11 @@ namespace {
 
 struct CliArgs {
   bool help = false;
+  bool progress = true;
+  bool quiet = false;
   std::string inputPath;
   std::optional<std::string> outputPath;
+  std::optional<std::string> metricsPath;
   float minConfidence = 0.0f;
   ndb::DecoderConfig cfg;
 };
@@ -40,13 +44,17 @@ void PrintUsage() {
       << "  --max-dot-ms <int>         Max dot length ms (default: 220)\n"
       << "  --target-sr <int>          Target sample rate after decimation (default: 8000)\n"
       << "  --max-seconds <int>        Max seconds to analyze (default: 90)\n"
-      << "  --min-confidence <float>   Keep only rows with confidence >= value\n\n"
+      << "  --min-confidence <float>   Keep only rows with confidence >= value\n"
+      << "  --metrics <path.json>      Write quality metrics JSON\n"
+      << "  --no-progress              Disable progress output\n"
+      << "  --quiet                    Print only final essentials\n\n"
       << "Examples:\n"
       << "  ndb_decode /?\n"
       << "  ndb_decode C:\\radio\\capture.wav\n"
       << "  ndb_decode C:\\radio\\capture.wav C:\\radio\\out.csv\n"
       << "  ndb_decode capture.wav out.csv --max-seconds 180 --target-sr 12000\n"
-      << "  ndb_decode capture.wav --min-confidence 0.7 --mad-factor 3.5\n";
+      << "  ndb_decode capture.wav --min-confidence 0.7 --mad-factor 3.5\n"
+      << "  ndb_decode capture.wav out.csv --metrics run_metrics.json\n";
 }
 
 bool WriteCsv(const std::string& path, const std::vector<ndb::DecodeResult>& results,
@@ -63,6 +71,47 @@ bool WriteCsv(const std::string& path, const std::vector<ndb::DecodeResult>& res
         << std::setprecision(3) << r.startSec << ',' << r.endSec << '\n';
   }
   return true;
+}
+
+bool WriteMetrics(const std::string& path, const ndb::DecodeStats& s, std::string* error) {
+  std::ofstream out(path);
+  if (!out) {
+    *error = "Cannot write metrics file: " + path;
+    return false;
+  }
+  out << "{\n";
+  out << "  \"input_sample_rate\": " << s.inputSampleRate << ",\n";
+  out << "  \"work_sample_rate\": " << s.workSampleRate << ",\n";
+  out << "  \"input_samples\": " << s.inputSamples << ",\n";
+  out << "  \"work_samples\": " << s.workSamples << ",\n";
+  out << "  \"frame_count\": " << s.frameCount << ",\n";
+  out << "  \"candidate_bin_count\": " << s.candidateBinCount << ",\n";
+  out << "  \"track_count\": " << s.trackCount << ",\n";
+  out << "  \"filtered_by_frequency\": " << s.filteredByFrequency << ",\n";
+  out << "  \"decoded_count\": " << s.decodedCount << ",\n";
+  out << "  \"mean_confidence\": " << std::fixed << std::setprecision(6) << s.meanConfidence
+      << ",\n";
+  out << "  \"median_confidence\": " << std::fixed << std::setprecision(6) << s.medianConfidence
+      << ",\n";
+  out << "  \"max_confidence\": " << std::fixed << std::setprecision(6) << s.maxConfidence
+      << ",\n";
+  out << "  \"decode_ratio\": " << std::fixed << std::setprecision(6) << s.decodeRatio << ",\n";
+  out << "  \"id_like_token_ratio\": " << std::fixed << std::setprecision(6)
+      << s.idLikeTokenRatio << ",\n";
+  out << "  \"quality_score\": " << std::fixed << std::setprecision(3) << s.qualityScore << "\n";
+  out << "}\n";
+  return true;
+}
+
+void PrintMetricsSummary(const ndb::DecodeStats& s) {
+  std::cout << "\nQuality Metrics\n"
+            << "  quality_score      : " << std::fixed << std::setprecision(2) << s.qualityScore
+            << "/100\n"
+            << "  mean_confidence    : " << std::setprecision(3) << s.meanConfidence << "\n"
+            << "  median_confidence  : " << std::setprecision(3) << s.medianConfidence << "\n"
+            << "  decode_ratio       : " << std::setprecision(3) << s.decodeRatio << "\n"
+            << "  id_like_token_ratio: " << std::setprecision(3) << s.idLikeTokenRatio << "\n"
+            << "  tracks(decoded/all): " << s.decodedCount << "/" << s.trackCount << "\n";
 }
 
 bool IsHelpToken(const std::string& token) {
@@ -122,9 +171,7 @@ bool ParseArgs(int argc, char** argv, CliArgs* out, std::string* error) {
     if (token == "--fft") {
       std::string value;
       if (!parseOptionValue(token, &value) || !ParseInt(value, &out->cfg.fftSize)) {
-        if (error->empty()) {
-          *error = "Invalid integer for --fft";
-        }
+        *error = "Invalid integer for --fft";
         return false;
       }
       continue;
@@ -132,9 +179,7 @@ bool ParseArgs(int argc, char** argv, CliArgs* out, std::string* error) {
     if (token == "--hop") {
       std::string value;
       if (!parseOptionValue(token, &value) || !ParseInt(value, &out->cfg.hopSize)) {
-        if (error->empty()) {
-          *error = "Invalid integer for --hop";
-        }
+        *error = "Invalid integer for --hop";
         return false;
       }
       continue;
@@ -142,9 +187,7 @@ bool ParseArgs(int argc, char** argv, CliArgs* out, std::string* error) {
     if (token == "--mad-factor") {
       std::string value;
       if (!parseOptionValue(token, &value) || !ParseFloat(value, &out->cfg.madFactor)) {
-        if (error->empty()) {
-          *error = "Invalid float for --mad-factor";
-        }
+        *error = "Invalid float for --mad-factor";
         return false;
       }
       continue;
@@ -152,9 +195,7 @@ bool ParseArgs(int argc, char** argv, CliArgs* out, std::string* error) {
     if (token == "--guard-bins") {
       std::string value;
       if (!parseOptionValue(token, &value) || !ParseInt(value, &out->cfg.guardBins)) {
-        if (error->empty()) {
-          *error = "Invalid integer for --guard-bins";
-        }
+        *error = "Invalid integer for --guard-bins";
         return false;
       }
       continue;
@@ -162,9 +203,7 @@ bool ParseArgs(int argc, char** argv, CliArgs* out, std::string* error) {
     if (token == "--max-step-bins") {
       std::string value;
       if (!parseOptionValue(token, &value) || !ParseInt(value, &out->cfg.maxTrackStepBins)) {
-        if (error->empty()) {
-          *error = "Invalid integer for --max-step-bins";
-        }
+        *error = "Invalid integer for --max-step-bins";
         return false;
       }
       continue;
@@ -172,9 +211,7 @@ bool ParseArgs(int argc, char** argv, CliArgs* out, std::string* error) {
     if (token == "--min-track-frames") {
       std::string value;
       if (!parseOptionValue(token, &value) || !ParseInt(value, &out->cfg.minTrackFrames)) {
-        if (error->empty()) {
-          *error = "Invalid integer for --min-track-frames";
-        }
+        *error = "Invalid integer for --min-track-frames";
         return false;
       }
       continue;
@@ -182,9 +219,7 @@ bool ParseArgs(int argc, char** argv, CliArgs* out, std::string* error) {
     if (token == "--sustain-penalty") {
       std::string value;
       if (!parseOptionValue(token, &value) || !ParseFloat(value, &out->cfg.sustainPenalty)) {
-        if (error->empty()) {
-          *error = "Invalid float for --sustain-penalty";
-        }
+        *error = "Invalid float for --sustain-penalty";
         return false;
       }
       continue;
@@ -192,9 +227,7 @@ bool ParseArgs(int argc, char** argv, CliArgs* out, std::string* error) {
     if (token == "--envelope-alpha") {
       std::string value;
       if (!parseOptionValue(token, &value) || !ParseFloat(value, &out->cfg.envelopeAlpha)) {
-        if (error->empty()) {
-          *error = "Invalid float for --envelope-alpha";
-        }
+        *error = "Invalid float for --envelope-alpha";
         return false;
       }
       continue;
@@ -202,9 +235,7 @@ bool ParseArgs(int argc, char** argv, CliArgs* out, std::string* error) {
     if (token == "--threshold-k") {
       std::string value;
       if (!parseOptionValue(token, &value) || !ParseFloat(value, &out->cfg.thresholdK)) {
-        if (error->empty()) {
-          *error = "Invalid float for --threshold-k";
-        }
+        *error = "Invalid float for --threshold-k";
         return false;
       }
       continue;
@@ -212,9 +243,7 @@ bool ParseArgs(int argc, char** argv, CliArgs* out, std::string* error) {
     if (token == "--min-dot-ms") {
       std::string value;
       if (!parseOptionValue(token, &value) || !ParseInt(value, &out->cfg.minDotMs)) {
-        if (error->empty()) {
-          *error = "Invalid integer for --min-dot-ms";
-        }
+        *error = "Invalid integer for --min-dot-ms";
         return false;
       }
       continue;
@@ -222,9 +251,7 @@ bool ParseArgs(int argc, char** argv, CliArgs* out, std::string* error) {
     if (token == "--max-dot-ms") {
       std::string value;
       if (!parseOptionValue(token, &value) || !ParseInt(value, &out->cfg.maxDotMs)) {
-        if (error->empty()) {
-          *error = "Invalid integer for --max-dot-ms";
-        }
+        *error = "Invalid integer for --max-dot-ms";
         return false;
       }
       continue;
@@ -232,9 +259,7 @@ bool ParseArgs(int argc, char** argv, CliArgs* out, std::string* error) {
     if (token == "--target-sr") {
       std::string value;
       if (!parseOptionValue(token, &value) || !ParseInt(value, &out->cfg.targetSampleRate)) {
-        if (error->empty()) {
-          *error = "Invalid integer for --target-sr";
-        }
+        *error = "Invalid integer for --target-sr";
         return false;
       }
       continue;
@@ -242,9 +267,7 @@ bool ParseArgs(int argc, char** argv, CliArgs* out, std::string* error) {
     if (token == "--max-seconds") {
       std::string value;
       if (!parseOptionValue(token, &value) || !ParseInt(value, &out->cfg.maxAnalyzeSeconds)) {
-        if (error->empty()) {
-          *error = "Invalid integer for --max-seconds";
-        }
+        *error = "Invalid integer for --max-seconds";
         return false;
       }
       continue;
@@ -252,11 +275,25 @@ bool ParseArgs(int argc, char** argv, CliArgs* out, std::string* error) {
     if (token == "--min-confidence") {
       std::string value;
       if (!parseOptionValue(token, &value) || !ParseFloat(value, &out->minConfidence)) {
-        if (error->empty()) {
-          *error = "Invalid float for --min-confidence";
-        }
+        *error = "Invalid float for --min-confidence";
         return false;
       }
+      continue;
+    }
+    if (token == "--metrics") {
+      std::string value;
+      if (!parseOptionValue(token, &value)) {
+        return false;
+      }
+      out->metricsPath = value;
+      continue;
+    }
+    if (token == "--no-progress") {
+      out->progress = false;
+      continue;
+    }
+    if (token == "--quiet") {
+      out->quiet = true;
       continue;
     }
 
@@ -280,7 +317,6 @@ bool ParseArgs(int argc, char** argv, CliArgs* out, std::string* error) {
     *error = "Too many positional arguments";
     return false;
   }
-
   out->inputPath = positional[0];
   if (positional.size() == 2) {
     out->outputPath = positional[1];
@@ -314,7 +350,21 @@ int main(int argc, char** argv) {
     return 2;
   }
 
-  auto results = ndb::DecodeNdbFromWav(wav.samples, wav.sampleRate, args.cfg);
+  int lastPercent = -1;
+  ndb::DecodeStats stats;
+  auto progressCb = [&](int percent, const std::string& stage) {
+    if (!args.progress || args.quiet) {
+      return;
+    }
+    percent = std::max(0, std::min(100, percent));
+    if (percent == lastPercent && percent != 100) {
+      return;
+    }
+    lastPercent = percent;
+    std::cout << "[" << std::setw(3) << percent << "%] " << stage << '\n';
+  };
+
+  auto results = ndb::DecodeNdbFromWav(wav.samples, wav.sampleRate, args.cfg, &stats, progressCb);
   if (args.minConfidence > 0.0f) {
     std::vector<ndb::DecodeResult> filtered;
     filtered.reserve(results.size());
@@ -331,14 +381,36 @@ int main(int argc, char** argv) {
       std::cerr << error << '\n';
       return 3;
     }
-    std::cout << "Written " << results.size() << " rows to " << *args.outputPath << '\n';
+    if (!args.quiet) {
+      std::cout << "Written " << results.size() << " rows to " << *args.outputPath << '\n';
+    }
   } else {
-    std::cout << "Detected candidates: " << results.size() << '\n';
+    if (!args.quiet) {
+      std::cout << "Detected candidates: " << results.size() << '\n';
+    }
     for (const auto& r : results) {
       std::cout << "track=" << r.trackId << " freq=" << std::fixed << std::setprecision(2)
                 << r.freqHz << "Hz text=\"" << r.text << "\" conf=" << std::setprecision(3)
                 << r.confidence << " t=[" << r.startSec << "," << r.endSec << "]\n";
     }
+  }
+
+  if (args.metricsPath.has_value()) {
+    if (!WriteMetrics(*args.metricsPath, stats, &error)) {
+      std::cerr << error << '\n';
+      return 4;
+    }
+    if (!args.quiet) {
+      std::cout << "Metrics written to " << *args.metricsPath << '\n';
+    }
+  }
+
+  if (args.quiet) {
+    std::cout << "rows=" << results.size() << " quality=" << std::fixed << std::setprecision(2)
+              << stats.qualityScore << " mean_conf=" << std::setprecision(3)
+              << stats.meanConfidence << " decode_ratio=" << stats.decodeRatio << '\n';
+  } else {
+    PrintMetricsSummary(stats);
   }
 
   return 0;

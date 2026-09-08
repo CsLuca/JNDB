@@ -81,6 +81,9 @@ Note: inside MSYS2 bash, arguments starting with `/` can be path-converted by th
 - `--target-sr <int>`: target sample rate after decimation (default `8000`)
 - `--max-seconds <int>`: max seconds analyzed from the file (default `90`)
 - `--min-confidence <float>`: output filter; keep rows with confidence >= value
+- `--metrics <path.json>`: write run quality metrics JSON for trend tracking
+- `--no-progress`: disable progress output
+- `--quiet`: compact final output only
 
 ## Examples
 
@@ -114,6 +117,18 @@ ndb_decode capture.wav results.csv --max-seconds 180 --target-sr 12000
 ndb_decode capture.wav results.csv --min-confidence 0.70 --mad-factor 3.5 --threshold-k 3.0
 ```
 
+### Save quality metrics for comparison between versions
+
+```bash
+ndb_decode capture.wav results.csv --metrics run_metrics.json
+```
+
+### Quiet mode for automation
+
+```bash
+ndb_decode capture.wav results.csv --quiet --metrics run_metrics.json
+```
+
 ## Output format
 
 CSV columns:
@@ -124,6 +139,20 @@ CSV columns:
 - `confidence`
 - `start_sec`
 - `end_sec`
+
+Metrics JSON fields:
+
+- `quality_score`: synthetic 0..100 score to compare runs over time
+- `mean_confidence`, `median_confidence`, `max_confidence`
+- `decode_ratio`: decoded tracks / total tracks
+- `id_like_token_ratio`: ratio of 2-3 uppercase tokens in decoded text
+- `track_count`, `decoded_count`, `candidate_bin_count`, `frame_count`
+
+Quality score formula:
+
+- `100 * (0.45*mean_confidence + 0.25*median_confidence + 0.20*decode_ratio + 0.10*id_like_token_ratio)`
+
+Use this as a trend indicator across the same benchmark set. It is not an absolute scientific accuracy metric.
 
 ## Practical limitations
 
