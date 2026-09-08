@@ -7,12 +7,14 @@
 
 #include <commctrl.h>
 #include <commdlg.h>
-#include <windowsx.h>
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -20,6 +22,7 @@
 #include <vector>
 
 #pragma comment(lib, "Comctl32.lib")
+#pragma comment(lib, "Comdlg32.lib")
 
 namespace {
 
@@ -33,6 +36,10 @@ constexpr int kIdRun = 1007;
 constexpr int kIdProgress = 1008;
 constexpr int kIdStatus = 1009;
 constexpr int kIdSummary = 1010;
+constexpr int kIdHistoryEdit = 1011;
+constexpr int kIdHistoryBrowse = 1012;
+constexpr int kIdHistoryRefresh = 1013;
+constexpr int kIdChartPanel = 1014;
 
 constexpr UINT kMsgProgress = WM_APP + 1;
 constexpr UINT kMsgDone = WM_APP + 2;
@@ -46,6 +53,24 @@ struct DecodeThreadResult {
   std::size_t rowCount = 0;
 };
 
+struct HistoryEntry {
+  std::string runId;
+  std::string ts;
+  double precision = 0.0;
+  double recall = 0.0;
+  double fph = 0.0;
+  double latency = 0.0;
+  double xrt = 0.0;
+  double quality = 0.0;
+};
+
+struct ChartDef {
+  std::wstring title;
+  COLORREF color = RGB(30, 30, 30);
+  double HistoryEntry::*field = nullptr;
+  bool lowerIsBetter = false;
+};
+
 struct AppState {
   HWND hwnd = nullptr;
   HWND inputEdit = nullptr;
@@ -55,12 +80,16 @@ struct AppState {
   HWND progressBar = nullptr;
   HWND statusText = nullptr;
   HWND summaryText = nullptr;
+  HWND historyEdit = nullptr;
+  HWND chartPanel = nullptr;
 
   HFONT font = nullptr;
   HFONT fontBig = nullptr;
+  HFONT fontMono = nullptr;
 
   std::atomic<bool> running{false};
   std::thread worker;
+  std::vector<HistoryEntry> history;
 };
 
 std::wstring ToWide(const std::string& s) {
@@ -102,12 +131,13 @@ void SetText(HWND h, const std::wstring& s) {
   SetWindowTextW(h, s.c_str());
 }
 
-std::wstring ChooseOpenWav(HWND owner) {
+std::wstring ChooseOpenFile(HWND owner, const wchar_t* title, const wchar_t* filter) {
   wchar_t fileName[MAX_PATH] = {};
   OPENFILENAMEW ofn = {};
   ofn.lStructSize = sizeof(ofn);
   ofn.hwndOwner = owner;
-  ofn.lpstrFilter = L"WAV files (*.wav)\0*.wav\0All files (*.*)\0*.*\0";
+  ofn.lpstrTitle = title;
+  ofn.lpstrFilter = filter;
   ofn.lpstrFile = fileName;
   ofn.nMaxFile = MAX_PATH;
   ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST;
@@ -198,6 +228,238 @@ std::wstring BuildSummary(const DecodeThreadResult& r) {
   return ss.str();
 }
 
+std::vector<std::string> SplitCsvLine(const std::string& line) {
+  std::vector<std::string> out;
+  std::string cur;
+  bool quoted = false;
+  for (char c : line) {
+    if (c == '"') {
+      quoted = !quoted;
+      continue;
+    }
+    if (c == ',' && !quoted) {
+      out.push_back(cur);
+      cur.clear();
+    } else {
+      cur.push_back(c);
+    }
+  }
+  out.push_back(cur);
+  return out;
+}
+
+bool ToDouble(const std::string& s, double* out) {
+  try {
+    *out = std::stod(s);
+    return true;
+  } catch (...) {
+    return false;
+  }
+}
+
+bool LoadHistoryCsv(const std::string& path, std::vector<HistoryEntry>* out, std::string* error) {
+  out->clear();
+  std::ifstream in(path);
+  if (!in) {
+    *error = "Cannot open history CSV: " + path;
+    return false;
+  }
+
+  std::string headerLine;
+  if (!std::getline(in, headerLine)) {
+    *error = "Empty history CSV";
+    return false;
+  }
+  const auto header = SplitCsvLine(headerLine);
+  auto idx = [&](const std::string& key) -> int {
+    for (std::size_t i = 0; i < header.size(); ++i) {
+      if (header[i] == key) {
+        return static_cast<int>(i);
+      }
+    }
+    return -1;
+  };
+
+  const int iRun = idx("run_id");
+  const int iTs = idx("timestamp_utc");
+  const int iPrec = idx("precision");
+  const int iRec = idx("recall");
+  const int iFph = idx("false_positives_per_hour");
+  const int iLat = idx("id_latency_sec");
+  const int iXrt = idx("runtime_x_realtime");
+  const int iQual = idx("quality_score_mean");
+  if (iRun < 0 || iTs < 0 || iPrec < 0 || iRec < 0 || iFph < 0 || iLat < 0 || iXrt < 0 || iQual < 0) {
+    *error = "History CSV missing required columns";
+    return false;
+  }
+
+  std::string line;
+  while (std::getline(in, line)) {
+    if (line.empty()) {
+      continue;
+    }
+    auto c = SplitCsvLine(line);
+    const int need = std::max({iRun, iTs, iPrec, iRec, iFph, iLat, iXrt, iQual});
+    if (static_cast<int>(c.size()) <= need) {
+      continue;
+    }
+    HistoryEntry e;
+    e.runId = c[static_cast<std::size_t>(iRun)];
+    e.ts = c[static_cast<std::size_t>(iTs)];
+    if (!ToDouble(c[static_cast<std::size_t>(iPrec)], &e.precision)) continue;
+    if (!ToDouble(c[static_cast<std::size_t>(iRec)], &e.recall)) continue;
+    if (!ToDouble(c[static_cast<std::size_t>(iFph)], &e.fph)) continue;
+    if (!ToDouble(c[static_cast<std::size_t>(iLat)], &e.latency)) continue;
+    if (!ToDouble(c[static_cast<std::size_t>(iXrt)], &e.xrt)) continue;
+    if (!ToDouble(c[static_cast<std::size_t>(iQual)], &e.quality)) continue;
+    out->push_back(e);
+  }
+
+  if (out->empty()) {
+    *error = "No valid rows in history CSV";
+    return false;
+  }
+  return true;
+}
+
+void DrawMetricChart(HDC hdc, const RECT& rc, const std::vector<HistoryEntry>& history, const ChartDef& cd) {
+  HBRUSH panel = CreateSolidBrush(RGB(255, 255, 255));
+  FillRect(hdc, &rc, panel);
+  DeleteObject(panel);
+
+  HPEN border = CreatePen(PS_SOLID, 1, RGB(220, 225, 232));
+  auto oldPen = reinterpret_cast<HPEN>(SelectObject(hdc, border));
+  MoveToEx(hdc, rc.left, rc.top, nullptr);
+  LineTo(hdc, rc.right - 1, rc.top);
+  LineTo(hdc, rc.right - 1, rc.bottom - 1);
+  LineTo(hdc, rc.left, rc.bottom - 1);
+  LineTo(hdc, rc.left, rc.top);
+  SelectObject(hdc, oldPen);
+  DeleteObject(border);
+
+  const int pad = 10;
+  RECT titleRc = {rc.left + pad, rc.top + 4, rc.right - pad, rc.top + 24};
+  SetTextColor(hdc, RGB(38, 50, 56));
+  SetBkMode(hdc, TRANSPARENT);
+  DrawTextW(hdc, cd.title.c_str(), -1, &titleRc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+
+  if (history.size() < 2) {
+    RECT msg = {rc.left + pad, rc.top + 28, rc.right - pad, rc.bottom - pad};
+    SetTextColor(hdc, RGB(120, 128, 138));
+    DrawTextW(hdc, L"Need >= 2 runs", -1, &msg, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    return;
+  }
+
+  double minV = std::numeric_limits<double>::max();
+  double maxV = std::numeric_limits<double>::lowest();
+  for (const auto& e : history) {
+    const double v = e.*(cd.field);
+    minV = std::min(minV, v);
+    maxV = std::max(maxV, v);
+  }
+  if (std::fabs(maxV - minV) < 1e-12) {
+    maxV += 1.0;
+    minV -= 1.0;
+  }
+
+  RECT plot = {rc.left + 8, rc.top + 28, rc.right - 8, rc.bottom - 24};
+  HPEN grid = CreatePen(PS_DOT, 1, RGB(232, 236, 242));
+  oldPen = reinterpret_cast<HPEN>(SelectObject(hdc, grid));
+  for (int i = 1; i <= 3; ++i) {
+    const int y = plot.top + (plot.bottom - plot.top) * i / 4;
+    MoveToEx(hdc, plot.left, y, nullptr);
+    LineTo(hdc, plot.right, y);
+  }
+  SelectObject(hdc, oldPen);
+  DeleteObject(grid);
+
+  HPEN line = CreatePen(PS_SOLID, 2, cd.color);
+  oldPen = reinterpret_cast<HPEN>(SelectObject(hdc, line));
+  for (std::size_t i = 0; i < history.size(); ++i) {
+    const double v = history[i].*(cd.field);
+    const double t = static_cast<double>(i) / static_cast<double>(history.size() - 1);
+    const int x = plot.left + static_cast<int>(t * (plot.right - plot.left));
+    const double yn = (v - minV) / (maxV - minV);
+    const int y = plot.bottom - static_cast<int>(yn * (plot.bottom - plot.top));
+    if (i == 0) {
+      MoveToEx(hdc, x, y, nullptr);
+    } else {
+      LineTo(hdc, x, y);
+    }
+    HBRUSH dot = CreateSolidBrush(cd.color);
+    RECT dr = {x - 2, y - 2, x + 3, y + 3};
+    FillRect(hdc, &dr, dot);
+    DeleteObject(dot);
+  }
+  SelectObject(hdc, oldPen);
+  DeleteObject(line);
+
+  const auto& last = history.back();
+  const auto& prev = history[history.size() - 2];
+  const double lv = last.*(cd.field);
+  const double pv = prev.*(cd.field);
+  const double delta = lv - pv;
+  bool good = cd.lowerIsBetter ? (delta <= 0.0) : (delta >= 0.0);
+
+  std::wstringstream ss;
+  ss << std::fixed << std::setprecision(3) << lv << L"  (" << (delta >= 0.0 ? L"+" : L"")
+     << std::setprecision(3) << delta << L")";
+  RECT valRc = {rc.left + 8, rc.bottom - 20, rc.right - 8, rc.bottom - 2};
+  SetTextColor(hdc, good ? RGB(0, 122, 94) : RGB(192, 57, 43));
+  DrawTextW(hdc, ss.str().c_str(), -1, &valRc, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
+}
+
+void DrawCharts(AppState* app, HDC hdc, const RECT& rc) {
+  HBRUSH bg = CreateSolidBrush(RGB(248, 250, 252));
+  FillRect(hdc, &rc, bg);
+  DeleteObject(bg);
+
+  std::vector<ChartDef> defs = {
+      {L"Precision", RGB(27, 94, 32), &HistoryEntry::precision, false},
+      {L"Recall", RGB(21, 101, 192), &HistoryEntry::recall, false},
+      {L"False Positives / hour", RGB(211, 47, 47), &HistoryEntry::fph, true},
+      {L"ID Latency (s)", RGB(255, 143, 0), &HistoryEntry::latency, true},
+      {L"Runtime x Realtime", RGB(123, 31, 162), &HistoryEntry::xrt, true},
+      {L"Quality Score", RGB(0, 105, 92), &HistoryEntry::quality, false},
+  };
+
+  const int cols = 2;
+  const int rows = 3;
+  const int gap = 10;
+  const int w = (rc.right - rc.left - gap * (cols + 1)) / cols;
+  const int h = (rc.bottom - rc.top - gap * (rows + 1)) / rows;
+
+  for (int r = 0; r < rows; ++r) {
+    for (int c = 0; c < cols; ++c) {
+      const int idx = r * cols + c;
+      RECT cr = {rc.left + gap + c * (w + gap), rc.top + gap + r * (h + gap),
+                 rc.left + gap + c * (w + gap) + w, rc.top + gap + r * (h + gap) + h};
+      DrawMetricChart(hdc, cr, app->history, defs[idx]);
+    }
+  }
+}
+
+void RefreshHistory(AppState* app) {
+  const std::string path = ToUtf8(GetText(app->historyEdit));
+  if (path.empty()) {
+    SetStatus(app, L"History path is empty");
+    return;
+  }
+  std::string error;
+  std::vector<HistoryEntry> hist;
+  if (!LoadHistoryCsv(path, &hist, &error)) {
+    SetStatus(app, L"History load failed");
+    SetSummary(app, ToWide(error));
+    InvalidateRect(app->chartPanel, nullptr, TRUE);
+    return;
+  }
+  app->history = std::move(hist);
+  std::wstringstream ss;
+  ss << L"History loaded: " << app->history.size() << L" runs";
+  SetStatus(app, ss.str());
+  InvalidateRect(app->chartPanel, nullptr, TRUE);
+}
+
 void StartDecode(AppState* app) {
   if (app->running) {
     return;
@@ -237,7 +499,6 @@ void StartDecode(AppState* app) {
     auto progress = [app](int percent, const std::string&) {
       PostMessageW(app->hwnd, kMsgProgress, static_cast<WPARAM>(percent), 0);
     };
-
     auto rows = ndb::DecodeNdbFromWav(wav.samples, wav.sampleRate, cfg, &result->stats, progress);
     result->rowCount = rows.size();
 
@@ -280,9 +541,27 @@ void OnDone(AppState* app, DecodeThreadResult* result) {
   delete result;
 }
 
+LRESULT CALLBACK ChartProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+  if (msg == WM_PAINT) {
+    auto* app = reinterpret_cast<AppState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    PAINTSTRUCT ps;
+    HDC hdc = BeginPaint(hwnd, &ps);
+    RECT rc;
+    GetClientRect(hwnd, &rc);
+    if (app) {
+      DrawCharts(app, hdc, rc);
+    }
+    EndPaint(hwnd, &ps);
+    return 0;
+  }
+  if (msg == WM_ERASEBKGND) {
+    return 1;
+  }
+  return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
   AppState* app = reinterpret_cast<AppState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
-
   switch (msg) {
     case WM_CREATE: {
       auto* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
@@ -298,93 +577,109 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       lf.lfWeight = FW_SEMIBOLD;
       app->fontBig = CreateFontIndirectW(&lf);
 
-      const int m = 18;
-      const int lw = 120;
-      const int bh = 34;
-      const int eh = 30;
-      const int bw = 120;
-      int y = 20;
+      LOGFONTW mono = ncm.lfMessageFont;
+      wcscpy_s(mono.lfFaceName, LF_FACESIZE, L"Consolas");
+      app->fontMono = CreateFontIndirectW(&mono);
 
-      HWND title = CreateWindowW(L"STATIC", L"JNDB Decoder", WS_CHILD | WS_VISIBLE, m, y, 400, 36,
-                                 hwnd, nullptr, nullptr, nullptr);
+      WNDCLASSW cc = {};
+      cc.lpfnWndProc = ChartProc;
+      cc.hInstance = cs->hInstance;
+      cc.lpszClassName = L"JNDBChartPanel";
+      cc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+      RegisterClassW(&cc);
+
+      const int m = 16;
+      const int leftW = 470;
+      const int rightX = m + leftW + 12;
+      const int rightW = 950 - rightX - m;
+      int y = 16;
+
+      HWND title = CreateWindowW(L"STATIC", L"JNDB Professional Decoder", WS_CHILD | WS_VISIBLE,
+                                 m, y, 520, 34, hwnd, nullptr, nullptr, nullptr);
       SendMessageW(title, WM_SETFONT, reinterpret_cast<WPARAM>(app->fontBig), TRUE);
-      y += 48;
+      y += 40;
 
-      CreateWindowW(L"STATIC", L"Input WAV", WS_CHILD | WS_VISIBLE, m, y + 6, lw, 24, hwnd, nullptr,
-                    nullptr, nullptr);
-      app->inputEdit = CreateWindowW(L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
-                                     m + lw, y, 430, eh, hwnd, (HMENU)kIdInputEdit, nullptr, nullptr);
-      CreateWindowW(L"BUTTON", L"Browse", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, m + lw + 438, y,
-                    bw, bh, hwnd, (HMENU)kIdInputBrowse, nullptr, nullptr);
-      y += 46;
+      auto addRow = [&](const wchar_t* label, int editId, int btnId, int yrow, const wchar_t* btnText) {
+        CreateWindowW(L"STATIC", label, WS_CHILD | WS_VISIBLE, m, yrow + 6, 100, 22, hwnd, nullptr,
+                      nullptr, nullptr);
+        HWND e = CreateWindowW(L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
+                               m + 100, yrow, 250, 30, hwnd,
+                               reinterpret_cast<HMENU>(static_cast<INT_PTR>(editId)), nullptr,
+                               nullptr);
+        CreateWindowW(L"BUTTON", btnText, WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, m + 358, yrow, 96,
+                      32, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(btnId)), nullptr,
+                      nullptr);
+        SendMessageW(e, WM_SETFONT, reinterpret_cast<WPARAM>(app->font), TRUE);
+        return e;
+      };
 
-      CreateWindowW(L"STATIC", L"Output CSV", WS_CHILD | WS_VISIBLE, m, y + 6, lw, 24, hwnd, nullptr,
-                    nullptr, nullptr);
-      app->outputEdit = CreateWindowW(L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
-                                      m + lw, y, 430, eh, hwnd, (HMENU)kIdOutputEdit, nullptr, nullptr);
-      CreateWindowW(L"BUTTON", L"Browse", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, m + lw + 438, y,
-                    bw, bh, hwnd, (HMENU)kIdOutputBrowse, nullptr, nullptr);
-      y += 46;
+      app->inputEdit = addRow(L"Input WAV", kIdInputEdit, kIdInputBrowse, y, L"Browse");
+      y += 40;
+      app->outputEdit = addRow(L"Output CSV", kIdOutputEdit, kIdOutputBrowse, y, L"Browse");
+      y += 40;
+      app->metricsEdit = addRow(L"Metrics", kIdMetricsEdit, kIdMetricsBrowse, y, L"Browse");
+      y += 40;
+      app->historyEdit = addRow(L"History", kIdHistoryEdit, kIdHistoryBrowse, y, L"Browse");
 
-      CreateWindowW(L"STATIC", L"Metrics JSON", WS_CHILD | WS_VISIBLE, m, y + 6, lw, 24, hwnd,
-                    nullptr, nullptr, nullptr);
-      app->metricsEdit = CreateWindowW(L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
-                                       m + lw, y, 430, eh, hwnd, (HMENU)kIdMetricsEdit, nullptr,
-                                       nullptr);
-      CreateWindowW(L"BUTTON", L"Browse", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, m + lw + 438, y,
-                    bw, bh, hwnd, (HMENU)kIdMetricsBrowse, nullptr, nullptr);
-      y += 56;
-
+      CreateWindowW(L"BUTTON", L"Refresh Charts", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, m + 260,
+                    y + 40, 194, 34, hwnd, (HMENU)kIdHistoryRefresh, nullptr, nullptr);
       app->runButton = CreateWindowW(L"BUTTON", L"Start Decode", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-                                     m + lw, y, 180, 40, hwnd, (HMENU)kIdRun, nullptr, nullptr);
-      y += 50;
+                                     m + 100, y + 40, 152, 34, hwnd, (HMENU)kIdRun, nullptr, nullptr);
+      y += 82;
 
-      app->progressBar = CreateWindowW(PROGRESS_CLASSW, nullptr,
-                                       WS_CHILD | WS_VISIBLE | PBS_SMOOTH, m, y, 690, 24, hwnd,
-                                       (HMENU)kIdProgress, nullptr, nullptr);
+      app->progressBar = CreateWindowW(PROGRESS_CLASSW, nullptr, WS_CHILD | WS_VISIBLE | PBS_SMOOTH,
+                                       m, y, leftW - 8, 22, hwnd, (HMENU)kIdProgress, nullptr, nullptr);
       SendMessageW(app->progressBar, PBM_SETRANGE, 0, MAKELPARAM(0, 100));
-      y += 34;
-
-      app->statusText = CreateWindowW(L"STATIC", L"Ready", WS_CHILD | WS_VISIBLE, m, y, 690, 24, hwnd,
-                                      (HMENU)kIdStatus, nullptr, nullptr);
       y += 30;
+
+      app->statusText = CreateWindowW(L"STATIC", L"Ready", WS_CHILD | WS_VISIBLE, m, y, leftW - 8, 22,
+                                      hwnd, (HMENU)kIdStatus, nullptr, nullptr);
+      y += 28;
 
       app->summaryText = CreateWindowW(L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_MULTILINE |
                                                      ES_READONLY | WS_VSCROLL,
-                                       m, y, 690, 150, hwnd, (HMENU)kIdSummary, nullptr, nullptr);
+                                       m, y, leftW - 8, 280, hwnd, (HMENU)kIdSummary, nullptr, nullptr);
+      SendMessageW(app->summaryText, WM_SETFONT, reinterpret_cast<WPARAM>(app->fontMono), TRUE);
 
-      const HWND controls[] = {app->inputEdit, app->outputEdit, app->metricsEdit, app->runButton,
-                               app->statusText, app->summaryText};
+      app->chartPanel = CreateWindowW(L"JNDBChartPanel", nullptr, WS_CHILD | WS_VISIBLE | WS_BORDER,
+                                      rightX, 16, rightW, 560, hwnd, (HMENU)kIdChartPanel, nullptr,
+                                      nullptr);
+      SetWindowLongPtrW(app->chartPanel, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(app));
+
+      const HWND controls[] = {app->runButton, app->statusText, app->historyEdit,
+                               app->inputEdit, app->outputEdit, app->metricsEdit};
       for (HWND c : controls) {
         SendMessageW(c, WM_SETFONT, reinterpret_cast<WPARAM>(app->font), TRUE);
       }
 
+      wchar_t modPath[MAX_PATH] = {};
+      GetModuleFileNameW(nullptr, modPath, MAX_PATH);
+      std::filesystem::path p(modPath);
+      auto hist = p.parent_path().parent_path().parent_path() / "benchmarks" / "phase0" / "history" /
+                  "benchmark_history.csv";
+      SetText(app->historyEdit, hist.wstring());
+      RefreshHistory(app);
       return 0;
     }
     case WM_COMMAND: {
-      if (!app) {
-        return 0;
-      }
+      if (!app) return 0;
       switch (LOWORD(wParam)) {
         case kIdInputBrowse: {
-          const std::wstring p = ChooseOpenWav(hwnd);
+          const auto p = ChooseOpenFile(hwnd, L"Open WAV",
+                                        L"WAV files (*.wav)\0*.wav\0All files (*.*)\0*.*\0");
           if (!p.empty()) {
             SetText(app->inputEdit, p);
             if (GetText(app->outputEdit).empty()) {
-              std::wstring csv = p;
+              auto csv = p;
               const auto pos = csv.find_last_of(L'.');
-              if (pos != std::wstring::npos) {
-                csv = csv.substr(0, pos);
-              }
+              if (pos != std::wstring::npos) csv = csv.substr(0, pos);
               csv += L"_out.csv";
               SetText(app->outputEdit, csv);
             }
             if (GetText(app->metricsEdit).empty()) {
-              std::wstring js = p;
+              auto js = p;
               const auto pos = js.find_last_of(L'.');
-              if (pos != std::wstring::npos) {
-                js = js.substr(0, pos);
-              }
+              if (pos != std::wstring::npos) js = js.substr(0, pos);
               js += L"_metrics.json";
               SetText(app->metricsEdit, js);
             }
@@ -392,22 +687,31 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           return 0;
         }
         case kIdOutputBrowse: {
-          const std::wstring p =
-              ChooseSaveFile(hwnd, L"Save CSV", L"CSV files (*.csv)\0*.csv\0All files (*.*)\0*.*\0", L"csv");
-          if (!p.empty()) {
-            SetText(app->outputEdit, p);
-          }
+          const auto p = ChooseSaveFile(
+              hwnd, L"Save CSV", L"CSV files (*.csv)\0*.csv\0All files (*.*)\0*.*\0", L"csv");
+          if (!p.empty()) SetText(app->outputEdit, p);
           return 0;
         }
         case kIdMetricsBrowse: {
-          const std::wstring p = ChooseSaveFile(
-              hwnd, L"Save metrics JSON",
-              L"JSON files (*.json)\0*.json\0All files (*.*)\0*.*\0", L"json");
+          const auto p =
+              ChooseSaveFile(hwnd, L"Save metrics JSON",
+                             L"JSON files (*.json)\0*.json\0All files (*.*)\0*.*\0", L"json");
+          if (!p.empty()) SetText(app->metricsEdit, p);
+          return 0;
+        }
+        case kIdHistoryBrowse: {
+          const auto p = ChooseOpenFile(
+              hwnd, L"Open benchmark history CSV",
+              L"CSV files (*.csv)\0*.csv\0All files (*.*)\0*.*\0");
           if (!p.empty()) {
-            SetText(app->metricsEdit, p);
+            SetText(app->historyEdit, p);
+            RefreshHistory(app);
           }
           return 0;
         }
+        case kIdHistoryRefresh:
+          RefreshHistory(app);
+          return 0;
         case kIdRun:
           StartDecode(app);
           return 0;
@@ -431,7 +735,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_CTLCOLOREDIT: {
       HDC hdc = reinterpret_cast<HDC>(wParam);
       SetBkMode(hdc, TRANSPARENT);
-      SetTextColor(hdc, RGB(30, 30, 30));
+      SetTextColor(hdc, RGB(24, 24, 24));
       static HBRUSH bg = CreateSolidBrush(RGB(248, 250, 252));
       return reinterpret_cast<LRESULT>(bg);
     }
@@ -470,9 +774,11 @@ int RunGuiApplication(HINSTANCE instance, int nCmdShow) {
     return 1;
   }
 
-  HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"JNDB - NDB Decoder", WS_OVERLAPPED | WS_CAPTION |
-                                                   WS_SYSMENU | WS_MINIMIZEBOX,
-                              CW_USEDEFAULT, CW_USEDEFAULT, 760, 560, nullptr, nullptr, instance,
+  HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"JNDB - Professional NDB Decoder", WS_OVERLAPPED |
+                                                                                              WS_CAPTION |
+                                                                                              WS_SYSMENU |
+                                                                                              WS_MINIMIZEBOX,
+                              CW_USEDEFAULT, CW_USEDEFAULT, 980, 640, nullptr, nullptr, instance,
                               &app);
   if (!hwnd) {
     return 1;

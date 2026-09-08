@@ -75,6 +75,19 @@ GUI design goals:
 - Progress bar with live percent and compact quality summary
 - Responsive behavior (decode runs in background thread)
 
+Professional analytics dashboard (Windows GUI):
+
+- Loads benchmark history CSV and plots all key optimization metrics
+- Charts included:
+  - Precision
+  - Recall
+  - False positives/hour
+  - ID latency (seconds)
+  - Runtime x realtime
+  - Quality score
+- Shows last-value delta (improving/worsening color-coded)
+- Refresh button for immediate comparison after each benchmark run
+
 Tip: for automated flows and scripts, use CLI mode with explicit arguments.
 
 ### Help switches
