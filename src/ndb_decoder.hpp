@@ -14,6 +14,14 @@ struct DecodeResult {
   float confidence = 0.0f;
   float startSec = 0.0f;
   float endSec = 0.0f;
+  int hitCount = 1;
+  float firstSeenSec = 0.0f;
+  float lastSeenSec = 0.0f;
+  float compositeScore = 0.0f;
+  float energyScore = 0.0f;
+  float continuityScore = 0.0f;
+  float freqStabilityScore = 0.0f;
+  float keyingPeriodicityScore = 0.0f;
 };
 
 struct DecoderConfig {
@@ -30,6 +38,14 @@ struct DecoderConfig {
   int maxDotMs = 220;
   int targetSampleRate = 8000;
   int maxAnalyzeSeconds = 90;
+  bool rfFrequencyInput = false;
+  float ndbRfMinHz = 190.0f;
+  float ndbRfMaxHz = 535.0f;
+  float audioMinHz = 80.0f;
+  float audioMaxHz = 2000.0f;
+  float clusterFreqTolHz = 2.0f;
+  float clusterGapSec = 0.4f;
+  float dedupFreqTolHz = 2.0f;
 };
 
 struct DecodeStats {
@@ -41,12 +57,15 @@ struct DecodeStats {
   int candidateBinCount = 0;
   int trackCount = 0;
   int filteredByFrequency = 0;
+  int clusteredCount = 0;
+  int dedupCount = 0;
   int decodedCount = 0;
   float meanConfidence = 0.0f;
   float medianConfidence = 0.0f;
   float maxConfidence = 0.0f;
   float decodeRatio = 0.0f;
   float idLikeTokenRatio = 0.0f;
+  float meanCompositeScore = 0.0f;
   float qualityScore = 0.0f;
 };
 

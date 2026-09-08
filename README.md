@@ -118,6 +118,12 @@ Note: inside MSYS2 bash, arguments starting with `/` can be path-converted by th
 - `--max-dot-ms <int>`: maximum dot length hypothesis in ms (default `220`)
 - `--target-sr <int>`: target sample rate after decimation (default `8000`)
 - `--max-seconds <int>`: max seconds analyzed from the file (default `90`)
+- `--rf-input`: interpret frequency gate as RF NDB range
+- `--ndb-min-hz <float>` / `--ndb-max-hz <float>`: RF NDB range gate (default `190..535`)
+- `--audio-min-hz <float>` / `--audio-max-hz <float>`: audio gate range (default `80..2000`)
+- `--cluster-freq-tol <float>`: track cluster frequency merge tolerance (default `2.0`)
+- `--cluster-gap-sec <float>`: merge gap for overlapping/nearby tracks (default `0.4`)
+- `--dedup-freq-tol <float>`: repeated-ID dedup frequency tolerance (default `2.0`)
 - `--min-confidence <float>`: output filter; keep rows with confidence >= value
 - `--metrics <path.json>`: write run quality metrics JSON for trend tracking
 - `--no-progress`: disable progress output
@@ -185,6 +191,18 @@ Metrics JSON fields:
 - `decode_ratio`: decoded tracks / total tracks
 - `id_like_token_ratio`: ratio of 2-3 uppercase tokens in decoded text
 - `track_count`, `decoded_count`, `candidate_bin_count`, `frame_count`
+- `clustered_count`, `dedup_count`, `mean_composite_score`
+
+Phase 1 detection cleanup now includes:
+
+- frequency clustering and merge of overlapping tracks
+- repeated-ID dedup (`first_seen`, `last_seen`, `hit_count`)
+- composite track score from:
+  - energy
+  - continuity
+  - frequency stability
+  - keying periodicity
+- realistic range gate for RF NDB or audio-domain processing
 
 Quality score formula:
 

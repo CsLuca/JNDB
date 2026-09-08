@@ -49,6 +49,14 @@ void PrintUsage() {
       << "  --max-dot-ms <int>         Max dot length ms (default: 220)\n"
       << "  --target-sr <int>          Target sample rate after decimation (default: 8000)\n"
       << "  --max-seconds <int>        Max seconds to analyze (default: 90)\n"
+      << "  --rf-input                 Treat frequency as RF-scale NDB (190..535)\n"
+      << "  --ndb-min-hz <float>       RF lower gate (default: 190)\n"
+      << "  --ndb-max-hz <float>       RF upper gate (default: 535)\n"
+      << "  --audio-min-hz <float>     Audio lower gate (default: 80)\n"
+      << "  --audio-max-hz <float>     Audio upper gate (default: 2000)\n"
+      << "  --cluster-freq-tol <float> Cluster merge freq tolerance (default: 2.0)\n"
+      << "  --cluster-gap-sec <float>  Cluster merge time gap (default: 0.4)\n"
+      << "  --dedup-freq-tol <float>   ID dedup freq tolerance (default: 2.0)\n"
       << "  --min-confidence <float>   Keep only rows with confidence >= value\n"
       << "  --metrics <path.json>      Write quality metrics JSON\n"
       << "  --no-progress              Disable progress output\n"
@@ -69,11 +77,14 @@ bool WriteCsv(const std::string& path, const std::vector<ndb::DecodeResult>& res
     *error = "Cannot write output file: " + path;
     return false;
   }
-  out << "track_id,freq_hz,text,confidence,start_sec,end_sec\n";
+  out << "track_id,freq_hz,text,confidence,start_sec,end_sec,first_seen_sec,last_seen_sec,hit_count,composite_score,energy_score,continuity_score,freq_stability_score,keying_periodicity_score\n";
   for (const auto& r : results) {
     out << r.trackId << ',' << std::fixed << std::setprecision(2) << r.freqHz << ',' << '"'
         << r.text << '"' << ',' << std::setprecision(3) << r.confidence << ','
-        << std::setprecision(3) << r.startSec << ',' << r.endSec << '\n';
+        << std::setprecision(3) << r.startSec << ',' << r.endSec << ','
+        << r.firstSeenSec << ',' << r.lastSeenSec << ',' << r.hitCount << ','
+        << r.compositeScore << ',' << r.energyScore << ',' << r.continuityScore << ','
+        << r.freqStabilityScore << ',' << r.keyingPeriodicityScore << '\n';
   }
   return true;
 }
@@ -93,6 +104,8 @@ bool WriteMetrics(const std::string& path, const ndb::DecodeStats& s, std::strin
   out << "  \"candidate_bin_count\": " << s.candidateBinCount << ",\n";
   out << "  \"track_count\": " << s.trackCount << ",\n";
   out << "  \"filtered_by_frequency\": " << s.filteredByFrequency << ",\n";
+  out << "  \"clustered_count\": " << s.clusteredCount << ",\n";
+  out << "  \"dedup_count\": " << s.dedupCount << ",\n";
   out << "  \"decoded_count\": " << s.decodedCount << ",\n";
   out << "  \"mean_confidence\": " << std::fixed << std::setprecision(6) << s.meanConfidence
       << ",\n";
@@ -103,6 +116,8 @@ bool WriteMetrics(const std::string& path, const ndb::DecodeStats& s, std::strin
   out << "  \"decode_ratio\": " << std::fixed << std::setprecision(6) << s.decodeRatio << ",\n";
   out << "  \"id_like_token_ratio\": " << std::fixed << std::setprecision(6)
       << s.idLikeTokenRatio << ",\n";
+  out << "  \"mean_composite_score\": " << std::fixed << std::setprecision(6)
+      << s.meanCompositeScore << ",\n";
   out << "  \"quality_score\": " << std::fixed << std::setprecision(3) << s.qualityScore << "\n";
   out << "}\n";
   return true;
@@ -116,6 +131,7 @@ void PrintMetricsSummary(const ndb::DecodeStats& s) {
             << "  median_confidence  : " << std::setprecision(3) << s.medianConfidence << "\n"
             << "  decode_ratio       : " << std::setprecision(3) << s.decodeRatio << "\n"
             << "  id_like_token_ratio: " << std::setprecision(3) << s.idLikeTokenRatio << "\n"
+            << "  mean_composite     : " << std::setprecision(3) << s.meanCompositeScore << "\n"
             << "  tracks(decoded/all): " << s.decodedCount << "/" << s.trackCount << "\n";
 }
 
@@ -277,6 +293,66 @@ bool ParseArgs(int argc, char** argv, CliArgs* out, std::string* error) {
       }
       continue;
     }
+    if (token == "--rf-input") {
+      out->cfg.rfFrequencyInput = true;
+      continue;
+    }
+    if (token == "--ndb-min-hz") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseFloat(value, &out->cfg.ndbRfMinHz)) {
+        *error = "Invalid float for --ndb-min-hz";
+        return false;
+      }
+      continue;
+    }
+    if (token == "--ndb-max-hz") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseFloat(value, &out->cfg.ndbRfMaxHz)) {
+        *error = "Invalid float for --ndb-max-hz";
+        return false;
+      }
+      continue;
+    }
+    if (token == "--audio-min-hz") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseFloat(value, &out->cfg.audioMinHz)) {
+        *error = "Invalid float for --audio-min-hz";
+        return false;
+      }
+      continue;
+    }
+    if (token == "--audio-max-hz") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseFloat(value, &out->cfg.audioMaxHz)) {
+        *error = "Invalid float for --audio-max-hz";
+        return false;
+      }
+      continue;
+    }
+    if (token == "--cluster-freq-tol") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseFloat(value, &out->cfg.clusterFreqTolHz)) {
+        *error = "Invalid float for --cluster-freq-tol";
+        return false;
+      }
+      continue;
+    }
+    if (token == "--cluster-gap-sec") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseFloat(value, &out->cfg.clusterGapSec)) {
+        *error = "Invalid float for --cluster-gap-sec";
+        return false;
+      }
+      continue;
+    }
+    if (token == "--dedup-freq-tol") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseFloat(value, &out->cfg.dedupFreqTolHz)) {
+        *error = "Invalid float for --dedup-freq-tol";
+        return false;
+      }
+      continue;
+    }
     if (token == "--min-confidence") {
       std::string value;
       if (!parseOptionValue(token, &value) || !ParseFloat(value, &out->minConfidence)) {
@@ -402,7 +478,8 @@ int main(int argc, char** argv) {
     for (const auto& r : results) {
       std::cout << "track=" << r.trackId << " freq=" << std::fixed << std::setprecision(2)
                 << r.freqHz << "Hz text=\"" << r.text << "\" conf=" << std::setprecision(3)
-                << r.confidence << " t=[" << r.startSec << "," << r.endSec << "]\n";
+                << r.confidence << " score=" << r.compositeScore << " hits=" << r.hitCount
+                << " t=[" << r.startSec << "," << r.endSec << "]\n";
     }
   }
 
