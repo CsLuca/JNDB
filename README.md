@@ -91,6 +91,7 @@ Professional analytics dashboard (Windows GUI):
 - Exports dashboard to PNG for reports
 - Includes compare overlay mode (second history CSV)
 - Hover tooltip on chart points with run id, timestamp, commit, branch, and exact metric value
+- Preset selector for decode profiles: `Default`, `Strict DX`, `Relaxed`
 
 Tip: for automated flows and scripts, use CLI mode with explicit arguments.
 
