@@ -436,6 +436,23 @@ Example config snippet:
 }
 ```
 
+### Phase 6 CLI smoke tests
+
+Run automated smoke checks for `--output-json`, `--profile`, `--stream`, and `--config`:
+
+```bash
+python tools/test_phase6_cli_smoke.py \
+  --decoder build_ucrt64/ndb_decode.exe \
+  --wav samples/ndb_phase3/pla.wav \
+  --msys-bash C:/msys64/usr/bin/bash.exe \
+  --out-dir benchmarks/phase6/runs/smoke
+```
+
+Expected result:
+
+- script exits with code `0`
+- prints `Phase 6 CLI smoke: PASSED`
+
 Phase 1 detection cleanup now includes:
 
 - frequency clustering and merge of overlapping tracks
