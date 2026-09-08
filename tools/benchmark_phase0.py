@@ -6,6 +6,7 @@ import re
 import shlex
 import subprocess
 import time
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -197,6 +198,56 @@ def safe_div(a: float, b: float) -> float:
     return a / b if b else 0.0
 
 
+def git_value(args: List[str]) -> str:
+    try:
+        cp = subprocess.run(args, check=False, capture_output=True, text=True)
+        if cp.returncode == 0:
+            return cp.stdout.strip()
+    except Exception:
+        pass
+    return ""
+
+
+def append_history(csv_path: Path, jsonl_path: Path, record: dict) -> None:
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+
+    csv_fields = [
+        "run_id",
+        "timestamp_utc",
+        "git_commit",
+        "git_branch",
+        "dataset_name",
+        "config_name",
+        "files_total",
+        "files_missing",
+        "files_evaluated",
+        "files_with_annotations",
+        "precision",
+        "recall",
+        "false_positives_per_hour",
+        "id_latency_sec",
+        "runtime_x_realtime",
+        "quality_score_mean",
+        "tp",
+        "fp",
+        "fn",
+        "total_audio_sec",
+        "total_runtime_sec",
+    ]
+
+    csv_exists = csv_path.exists()
+    with csv_path.open("a", encoding="utf-8", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=csv_fields)
+        if not csv_exists:
+            w.writeheader()
+        row = {k: record.get(k, "") for k in csv_fields}
+        w.writerow(row)
+
+    with jsonl_path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description="Phase 0 benchmark for JNDB")
     p.add_argument("--decoder", required=True, help="Path to ndb_decode executable")
@@ -208,6 +259,21 @@ def main() -> int:
         "--msys-bash",
         default="",
         help="Optional path to MSYS2 bash.exe. If set, decoder is executed via UCRT64 shell.",
+    )
+    p.add_argument(
+        "--history-csv",
+        default="",
+        help="Append-only history CSV path. Default: <phase0>/history/benchmark_history.csv",
+    )
+    p.add_argument(
+        "--history-jsonl",
+        default="",
+        help="Append-only history JSONL path. Default: <phase0>/history/benchmark_history.jsonl",
+    )
+    p.add_argument(
+        "--no-history",
+        action="store_true",
+        help="Disable append-only history write for this run",
     )
     args = p.parse_args()
 
@@ -344,6 +410,35 @@ def main() -> int:
         "frozen_config": cfg,
     }
 
+    timestamp_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    git_commit = git_value(["git", "rev-parse", "--short", "HEAD"])
+    git_branch = git_value(["git", "rev-parse", "--abbrev-ref", "HEAD"])
+
+    history_record = {
+        "run_id": run_id,
+        "timestamp_utc": timestamp_utc,
+        "git_commit": git_commit,
+        "git_branch": git_branch,
+        "dataset_name": summary["dataset_name"],
+        "config_name": cfg.get("name", "unknown"),
+        "files_total": summary["files_total"],
+        "files_missing": summary["files_missing"],
+        "files_evaluated": summary["files_evaluated"],
+        "files_with_annotations": summary["files_with_annotations"],
+        "precision": summary["precision"],
+        "recall": summary["recall"],
+        "false_positives_per_hour": summary["false_positives_per_hour"],
+        "id_latency_sec": summary["id_latency_sec"],
+        "runtime_x_realtime": summary["runtime_x_realtime"],
+        "quality_score_mean": summary["quality_score_mean"],
+        "tp": summary["tp"],
+        "fp": summary["fp"],
+        "fn": summary["fn"],
+        "total_audio_sec": summary["total_audio_sec"],
+        "total_runtime_sec": summary["total_runtime_sec"],
+    }
+
     report_json = out_dir / "benchmark_report.json"
     with report_json.open("w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
@@ -389,6 +484,16 @@ def main() -> int:
         ]:
             w.writerow([k, summary[k]])
 
+    if not args.no_history:
+        default_history_dir = out_dir.parent / "history"
+        history_csv = Path(args.history_csv) if args.history_csv else (default_history_dir / "benchmark_history.csv")
+        history_jsonl = (
+            Path(args.history_jsonl)
+            if args.history_jsonl
+            else (default_history_dir / "benchmark_history.jsonl")
+        )
+        append_history(history_csv, history_jsonl, history_record)
+
     print("Benchmark completed")
     print(f"- report: {report_json}")
     print(f"- summary_csv: {summary_csv}")
@@ -398,6 +503,9 @@ def main() -> int:
         f"FP/h={global_fph:.3f} latency={global_latency:.3f}s xRT={global_xrt:.3f} "
         f"quality_mean={mean_quality:.3f}"
     )
+    if not args.no_history:
+        print(f"- history_csv: {history_csv}")
+        print(f"- history_jsonl: {history_jsonl}")
     if summary["files_with_annotations"] == 0:
         print("- warning: no annotations present in manifest; precision/recall are not meaningful yet")
     return 0

@@ -106,6 +106,13 @@ Generated in `--out-dir`:
 - `<file_id>_pred.csv`: decoder output (if `--run`)
 - `<file_id>_metrics.json`: decoder quality metrics (if `--run`)
 
+Append-only history (automatic by default):
+
+- `benchmarks/phase0/history/benchmark_history.csv`
+- `benchmarks/phase0/history/benchmark_history.jsonl`
+
+Each run appends timestamp, git commit/branch, and aggregate metrics so optimization progress is preserved over time.
+
 ## Matching policy (frozen v1)
 
 - ID token match: exact uppercase token extracted from decoded text (`[A-Z]{2,3}`)
