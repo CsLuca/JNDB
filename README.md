@@ -400,6 +400,42 @@ Metrics JSON fields:
 - `plausible_id_rejected`, `plausible_id_ratio`
 - `strict_rejected`
 
+### Phase 6 performance and product options
+
+- Per-track parallel decode with thread pool style workers:
+  - `--decode-threads <int>`
+- Deterministic ordering/reproducibility:
+  - `--seed <int>`
+- Performance profiles:
+  - `--profile fast`
+  - `--profile balanced`
+  - `--profile deep`
+- Streaming mode on live-updating WAV source:
+  - `--stream`
+  - `--stream-iterations <int>`
+  - `--stream-poll-ms <int>`
+  - `--stream-tail-seconds <int>`
+- Stable JSON output schema:
+  - `--output-json <path.json>`
+  - schema version currently: `jndb.decode.v1`
+- Diagnostic logs:
+  - `--diag-log <path.log>`
+- Config file support:
+  - `--config <path.json>`
+
+Example config snippet:
+
+```json
+{
+  "profile": "balanced",
+  "decode_threads": 4,
+  "seed": 42,
+  "stream": false,
+  "output_json": "run_out.json",
+  "diag_log": "run_diag.log"
+}
+```
+
 Phase 1 detection cleanup now includes:
 
 - frequency clustering and merge of overlapping tracks

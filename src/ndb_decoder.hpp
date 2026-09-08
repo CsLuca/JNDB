@@ -108,6 +108,8 @@ struct DecoderConfig {
   std::string freqPriorFile;
   float freqPriorTolHz = 2.5f;
   bool requirePriorMatch = false;
+  int decodeThreads = 1;
+  unsigned int deterministicSeed = 1337U;
 };
 
 struct DecodeStats {

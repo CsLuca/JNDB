@@ -4,10 +4,13 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <fstream>
 #include <numeric>
+#include <mutex>
 #include <sstream>
+#include <thread>
 #include <unordered_map>
 
 namespace ndb {
@@ -783,6 +786,15 @@ float Clamp01(float x) {
   return x;
 }
 
+int DeterministicTrackOrderKey(const ClusteredTrack& tr, unsigned int seed) {
+  const int f = static_cast<int>(std::round(tr.freqHz * 10.0f));
+  const int t = static_cast<int>(std::round(tr.startSec * 100.0f));
+  const unsigned int h = static_cast<unsigned int>((f * 73856093) ^ (t * 19349663) ^
+                                                    (tr.id * 83492791) ^
+                                                    static_cast<int>(seed * 2654435761U));
+  return static_cast<int>(h & 0x7fffffff);
+}
+
 float ComputeContinuityScore(const std::vector<TrackPoint>& points) {
   if (points.size() < 2) {
     return 0.0f;
@@ -1145,14 +1157,39 @@ std::vector<DecodeResult> DecodeNdbFromWav(const std::vector<float>& samples, in
   decoded.reserve(clustered.size());
 
   const int total = std::max(1, static_cast<int>(clustered.size()));
-  int done = 0;
+  std::vector<ClusteredTrack> ordered = clustered;
+  std::sort(ordered.begin(), ordered.end(), [&](const ClusteredTrack& a, const ClusteredTrack& b) {
+    const int ka = DeterministicTrackOrderKey(a, cfg.deterministicSeed);
+    const int kb = DeterministicTrackOrderKey(b, cfg.deterministicSeed);
+    if (ka != kb) {
+      return ka < kb;
+    }
+    return a.id < b.id;
+  });
 
-  for (const auto& tr : clustered) {
+  std::atomic<int> nextIdx{0};
+  std::atomic<int> done{0};
+  std::mutex outMutex;
+
+  const int workerN = std::max(1, cfg.decodeThreads);
+  std::vector<std::thread> workers;
+  workers.reserve(static_cast<std::size_t>(workerN));
+
+  auto workerFn = [&]() {
+    while (true) {
+      const int idx = nextIdx.fetch_add(1);
+      if (idx >= static_cast<int>(ordered.size())) {
+        break;
+      }
+      const auto& tr = ordered[static_cast<std::size_t>(idx)];
     const float f0 = tr.freqHz;
     if (!InNdbRange(f0, cfg)) {
-      ++filteredByFreq;
-      ++done;
-      Report(progress, 58 + (28 * done) / total, "decode-clusters");
+      {
+        std::lock_guard<std::mutex> lock(outMutex);
+        ++filteredByFreq;
+      }
+      const int nowDone = done.fetch_add(1) + 1;
+      Report(progress, 58 + (28 * nowDone) / total, "decode-clusters");
       continue;
     }
 
@@ -1175,8 +1212,8 @@ std::vector<DecodeResult> DecodeNdbFromWav(const std::vector<float>& samples, in
     }
 
     if (decodedText.text.empty()) {
-      ++done;
-      Report(progress, 58 + (28 * done) / total, "decode-clusters");
+      const int nowDone = done.fetch_add(1) + 1;
+      Report(progress, 58 + (28 * nowDone) / total, "decode-clusters");
       continue;
     }
 
@@ -1218,26 +1255,43 @@ std::vector<DecodeResult> DecodeNdbFromWav(const std::vector<float>& samples, in
       r.priorCandidates = JoinPipe(cand);
       r.priorMatched = (!r.plausibleId.empty() && ContainsToken(cand, r.plausibleId));
       if (cfg.requirePriorMatch && !cand.empty() && !r.priorMatched) {
-        ++plausibleRejected;
-        ++done;
-        Report(progress, 58 + (28 * done) / total, "decode-clusters");
+        {
+          std::lock_guard<std::mutex> lock(outMutex);
+          ++plausibleRejected;
+        }
+        const int nowDone = done.fetch_add(1) + 1;
+        Report(progress, 58 + (28 * nowDone) / total, "decode-clusters");
         continue;
       }
     }
     if (cfg.requirePlausibleId &&
         (r.plausibleId.empty() || r.plausibleIdScore < cfg.plausibleIdMinScore)) {
-      ++plausibleRejected;
-      ++done;
-      Report(progress, 58 + (28 * done) / total, "decode-clusters");
+      {
+        std::lock_guard<std::mutex> lock(outMutex);
+        ++plausibleRejected;
+      }
+      const int nowDone = done.fetch_add(1) + 1;
+      Report(progress, 58 + (28 * nowDone) / total, "decode-clusters");
       continue;
     }
     if (!r.plausibleId.empty()) {
       r.text = r.plausibleId;
     }
 
-    decoded.push_back(std::move(r));
-    ++done;
-    Report(progress, 58 + (28 * done) / total, "decode-clusters");
+      {
+        std::lock_guard<std::mutex> lock(outMutex);
+        decoded.push_back(std::move(r));
+      }
+      const int nowDone = done.fetch_add(1) + 1;
+      Report(progress, 58 + (28 * nowDone) / total, "decode-clusters");
+    }
+  };
+
+  for (int i = 0; i < workerN; ++i) {
+    workers.emplace_back(workerFn);
+  }
+  for (auto& th : workers) {
+    th.join();
   }
 
   auto dedup = DedupById(decoded, cfg.dedupFreqTolHz);

@@ -7,12 +7,15 @@
 #endif
 
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <optional>
+#include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -21,9 +24,16 @@ struct CliArgs {
   bool help = false;
   bool progress = true;
   bool quiet = false;
+  bool streamMode = false;
   std::string inputPath;
   std::optional<std::string> outputPath;
+  std::optional<std::string> outputJsonPath;
   std::optional<std::string> metricsPath;
+  std::optional<std::string> diagnosticsLogPath;
+  std::optional<std::string> configPath;
+  int streamPollMs = 1000;
+  int streamIterations = 1;
+  int streamTailSeconds = 0;
   float minConfidence = 0.0f;
   ndb::DecoderConfig cfg;
 };
@@ -92,6 +102,38 @@ bool ApplyModePreset(const std::string& mode, ndb::DecoderConfig* cfg, std::stri
   }
   *error =
       "Invalid value for --mode (use: default, strict-dx, relaxed, phase3-balanced, phase3-selective, phase4-serious)";
+  return false;
+}
+
+bool ApplyPerformanceProfile(const std::string& profile, ndb::DecoderConfig* cfg, std::string* error) {
+  if (!cfg || !error) {
+    return false;
+  }
+  if (profile == "balanced") {
+    cfg->decodeThreads = std::max(1u, std::thread::hardware_concurrency() / 2u);
+    cfg->targetSampleRate = 8000;
+    cfg->fftSize = 512;
+    cfg->hopSize = 128;
+    return true;
+  }
+  if (profile == "fast") {
+    cfg->decodeThreads = std::max(1u, std::thread::hardware_concurrency());
+    cfg->targetSampleRate = 6000;
+    cfg->fftSize = 256;
+    cfg->hopSize = 128;
+    cfg->useAmtcFull = false;
+    return true;
+  }
+  if (profile == "deep") {
+    cfg->decodeThreads = std::max(1u, std::thread::hardware_concurrency() / 2u);
+    cfg->targetSampleRate = 12000;
+    cfg->fftSize = 1024;
+    cfg->hopSize = 128;
+    cfg->useAmtcFull = true;
+    cfg->maxAnalyzeSeconds = std::max(cfg->maxAnalyzeSeconds, 180);
+    return true;
+  }
+  *error = "Invalid value for --profile (use: fast, balanced, deep)";
   return false;
 }
 
@@ -185,6 +227,16 @@ void PrintUsage() {
       << "  --freq-prior-file <path>   Optional frequency prior CSV: freq_hz,ID1|ID2|...\n"
       << "  --freq-prior-tol <float>   Frequency tolerance for prior shortlist (default: 2.5)\n"
       << "  --require-prior-match      If prior exists near freq, keep only matching ID\n"
+      << "  --decode-threads <int>     Worker threads for per-track decode (default: 1)\n"
+      << "  --seed <int>               Deterministic seed for stable ordering (default: 1337)\n"
+      << "  --profile <name>           Performance profile: fast | balanced | deep\n"
+      << "  --config <path.json>       Optional config file for startup values\n"
+      << "  --stream                   Streaming mode (polling same WAV path repeatedly)\n"
+      << "  --stream-poll-ms <int>     Streaming polling interval ms (default: 1000)\n"
+      << "  --stream-iterations <int>  Number of streaming iterations (default: 1)\n"
+      << "  --stream-tail-seconds <int> Keep last N seconds per stream iteration (default: 0=all)\n"
+      << "  --output-json <path.json>  Write stable JSON output alongside CSV\n"
+      << "  --diag-log <path.log>      Append diagnostic run logs\n"
       << "  --mode <preset>            Preset: default | strict-dx | relaxed | phase3-balanced | phase3-selective | phase4-serious\n"
       << "  --min-confidence <float>   Keep only rows with confidence >= value\n"
       << "  --metrics <path.json>      Write quality metrics JSON\n"
@@ -199,7 +251,9 @@ void PrintUsage() {
       << "  ndb_decode capture.wav out.csv --metrics run_metrics.json\n"
       << "  ndb_decode capture.wav out.csv --mode strict-dx\n"
       << "  ndb_decode capture.wav out.csv --mode phase3-balanced\n"
-      << "  ndb_decode capture.wav out.csv --mode phase4-serious --freq-prior-file priors.csv\n";
+      << "  ndb_decode capture.wav out.csv --mode phase4-serious --freq-prior-file priors.csv\n"
+      << "  ndb_decode capture.wav out.csv --profile fast --decode-threads 8 --seed 42\n"
+      << "  ndb_decode capture.wav out.csv --output-json out.json --diag-log run.log\n";
 }
 
 bool WriteCsv(const std::string& path, const std::vector<ndb::DecodeResult>& results,
@@ -221,6 +275,187 @@ bool WriteCsv(const std::string& path, const std::vector<ndb::DecodeResult>& res
         << r.firstSeenSec << ',' << r.lastSeenSec << ',' << r.hitCount << ','
         << r.compositeScore << ',' << r.energyScore << ',' << r.continuityScore << ','
         << r.freqStabilityScore << ',' << r.keyingPeriodicityScore << '\n';
+  }
+  return true;
+}
+
+std::string EscapeJson(const std::string& s) {
+  std::ostringstream o;
+  for (char c : s) {
+    switch (c) {
+      case '"':
+        o << "\\\"";
+        break;
+      case '\\':
+        o << "\\\\";
+        break;
+      case '\n':
+        o << "\\n";
+        break;
+      case '\r':
+        o << "\\r";
+        break;
+      case '\t':
+        o << "\\t";
+        break;
+      default:
+        o << c;
+        break;
+    }
+  }
+  return o.str();
+}
+
+bool WriteJson(const std::string& path, const std::vector<ndb::DecodeResult>& results,
+               const ndb::DecodeStats& s, std::string* error) {
+  std::ofstream out(path);
+  if (!out) {
+    *error = "Cannot write JSON output file: " + path;
+    return false;
+  }
+  out << "{\n";
+  out << "  \"schema_version\": \"jndb.decode.v1\",\n";
+  out << "  \"stats\": {\n";
+  out << "    \"quality_score\": " << std::fixed << std::setprecision(3) << s.qualityScore << ",\n";
+  out << "    \"decoded_count\": " << s.decodedCount << ",\n";
+  out << "    \"track_count\": " << s.trackCount << "\n";
+  out << "  },\n";
+  out << "  \"results\": [\n";
+  for (std::size_t i = 0; i < results.size(); ++i) {
+    const auto& r = results[i];
+    out << "    {\"track_id\": " << r.trackId << ", \"freq_hz\": " << std::fixed
+        << std::setprecision(2) << r.freqHz << ", \"text\": \"" << EscapeJson(r.text)
+        << "\", \"plausible_id\": \"" << EscapeJson(r.plausibleId)
+        << "\", \"confidence\": " << std::setprecision(3) << r.confidence
+        << ", \"confidence_raw\": " << r.confidenceRaw
+        << ", \"confidence_calibrated\": " << r.confidenceCalibrated
+        << ", \"decoder_model\": \"" << EscapeJson(r.decoderModel)
+        << "\", \"start_sec\": " << std::setprecision(3) << r.startSec
+        << ", \"end_sec\": " << r.endSec << "}";
+    if (i + 1 < results.size()) {
+      out << ',';
+    }
+    out << "\n";
+  }
+  out << "  ]\n";
+  out << "}\n";
+  return true;
+}
+
+void AppendDiagnostics(const std::optional<std::string>& path, const std::string& msg) {
+  if (!path.has_value()) {
+    return;
+  }
+  std::ofstream out(*path, std::ios::app);
+  if (!out) {
+    return;
+  }
+  out << msg << '\n';
+}
+
+bool ApplyConfigJson(const std::string& path, CliArgs* args, std::string* error) {
+  if (!args || !error) {
+    return false;
+  }
+  std::ifstream in(path);
+  if (!in) {
+    *error = "Cannot open config file: " + path;
+    return false;
+  }
+  std::stringstream buf;
+  buf << in.rdbuf();
+  const std::string txt = buf.str();
+
+  auto parseString = [&](const std::string& key, std::string* out) {
+    const std::string k = "\"" + key + "\"";
+    const std::size_t p = txt.find(k);
+    if (p == std::string::npos) return;
+    const std::size_t q1 = txt.find('"', txt.find(':', p) + 1);
+    if (q1 == std::string::npos) return;
+    const std::size_t q2 = txt.find('"', q1 + 1);
+    if (q2 == std::string::npos) return;
+    *out = txt.substr(q1 + 1, q2 - q1 - 1);
+  };
+  auto parseFloat = [&](const std::string& key, float* out) {
+    const std::string k = "\"" + key + "\"";
+    const std::size_t p = txt.find(k);
+    if (p == std::string::npos) return;
+    const std::size_t c = txt.find(':', p);
+    if (c == std::string::npos) return;
+    std::size_t e = c + 1;
+    while (e < txt.size() && (txt[e] == ' ' || txt[e] == '\t')) ++e;
+    std::size_t z = e;
+    while (z < txt.size() && ((txt[z] >= '0' && txt[z] <= '9') || txt[z] == '-' || txt[z] == '.')) {
+      ++z;
+    }
+    if (z > e) {
+      *out = std::strtof(txt.substr(e, z - e).c_str(), nullptr);
+    }
+  };
+  auto parseBool = [&](const std::string& key, bool* out) {
+    const std::string k = "\"" + key + "\"";
+    const std::size_t p = txt.find(k);
+    if (p == std::string::npos) return;
+    const std::size_t c = txt.find(':', p);
+    if (c == std::string::npos) return;
+    std::size_t e = c + 1;
+    while (e < txt.size() && (txt[e] == ' ' || txt[e] == '\t')) ++e;
+    if (txt.compare(e, 4, "true") == 0) {
+      *out = true;
+    } else if (txt.compare(e, 5, "false") == 0) {
+      *out = false;
+    }
+  };
+  auto parseInt = [&](const std::string& key, int* out) {
+    const std::string k = "\"" + key + "\"";
+    const std::size_t p = txt.find(k);
+    if (p == std::string::npos) return;
+    const std::size_t c = txt.find(':', p);
+    if (c == std::string::npos) return;
+    std::size_t e = c + 1;
+    while (e < txt.size() && (txt[e] == ' ' || txt[e] == '\t')) ++e;
+    std::size_t z = e;
+    while (z < txt.size() && ((txt[z] >= '0' && txt[z] <= '9') || txt[z] == '-')) ++z;
+    if (z > e) {
+      *out = std::atoi(txt.substr(e, z - e).c_str());
+    }
+  };
+  auto parseUInt = [&](const std::string& key, unsigned int* out) {
+    int tmp = static_cast<int>(*out);
+    parseInt(key, &tmp);
+    if (tmp >= 0) {
+      *out = static_cast<unsigned int>(tmp);
+    }
+  };
+
+  parseInt("decode_threads", &args->cfg.decodeThreads);
+  parseUInt("seed", &args->cfg.deterministicSeed);
+  parseFloat("min_confidence", &args->minConfidence);
+  parseInt("stream_poll_ms", &args->streamPollMs);
+  parseInt("stream_iterations", &args->streamIterations);
+  parseInt("stream_tail_seconds", &args->streamTailSeconds);
+  parseBool("stream", &args->streamMode);
+
+  std::string mode;
+  parseString("mode", &mode);
+  if (!mode.empty() && !ApplyModePreset(mode, &args->cfg, error)) {
+    return false;
+  }
+  std::string profile;
+  parseString("profile", &profile);
+  if (!profile.empty() && !ApplyPerformanceProfile(profile, &args->cfg, error)) {
+    return false;
+  }
+
+  std::string outputJson;
+  parseString("output_json", &outputJson);
+  if (!outputJson.empty()) {
+    args->outputJsonPath = outputJson;
+  }
+  std::string diagLog;
+  parseString("diag_log", &diagLog);
+  if (!diagLog.empty()) {
+    args->diagnosticsLogPath = diagLog;
   }
   return true;
 }
@@ -929,6 +1164,86 @@ bool ParseArgs(int argc, char** argv, CliArgs* out, std::string* error) {
       out->cfg.enableFreqPriors = true;
       continue;
     }
+    if (token == "--decode-threads") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseInt(value, &out->cfg.decodeThreads)) {
+        *error = "Invalid integer for --decode-threads";
+        return false;
+      }
+      continue;
+    }
+    if (token == "--seed") {
+      std::string value;
+      int iv = 0;
+      if (!parseOptionValue(token, &value) || !ParseInt(value, &iv) || iv < 0) {
+        *error = "Invalid non-negative integer for --seed";
+        return false;
+      }
+      out->cfg.deterministicSeed = static_cast<unsigned int>(iv);
+      continue;
+    }
+    if (token == "--profile") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ApplyPerformanceProfile(value, &out->cfg, error)) {
+        return false;
+      }
+      continue;
+    }
+    if (token == "--config") {
+      std::string value;
+      if (!parseOptionValue(token, &value)) {
+        return false;
+      }
+      out->configPath = value;
+      if (!ApplyConfigJson(value, out, error)) {
+        return false;
+      }
+      continue;
+    }
+    if (token == "--stream") {
+      out->streamMode = true;
+      continue;
+    }
+    if (token == "--stream-poll-ms") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseInt(value, &out->streamPollMs)) {
+        *error = "Invalid integer for --stream-poll-ms";
+        return false;
+      }
+      continue;
+    }
+    if (token == "--stream-iterations") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseInt(value, &out->streamIterations)) {
+        *error = "Invalid integer for --stream-iterations";
+        return false;
+      }
+      continue;
+    }
+    if (token == "--stream-tail-seconds") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseInt(value, &out->streamTailSeconds)) {
+        *error = "Invalid integer for --stream-tail-seconds";
+        return false;
+      }
+      continue;
+    }
+    if (token == "--output-json") {
+      std::string value;
+      if (!parseOptionValue(token, &value)) {
+        return false;
+      }
+      out->outputJsonPath = value;
+      continue;
+    }
+    if (token == "--diag-log") {
+      std::string value;
+      if (!parseOptionValue(token, &value)) {
+        return false;
+      }
+      out->diagnosticsLogPath = value;
+      continue;
+    }
     if (token == "--mode") {
       std::string value;
       if (!parseOptionValue(token, &value) || !ApplyModePreset(value, &out->cfg, error)) {
@@ -1017,77 +1332,120 @@ int main(int argc, char** argv) {
     return 0;
   }
 
-  ndb::WavData wav;
-  if (!ndb::ReadWavMono16(args.inputPath, &wav, &error)) {
-    std::cerr << error << '\n';
-    return 2;
-  }
+  AppendDiagnostics(args.diagnosticsLogPath,
+                    "startup decode_threads=" + std::to_string(args.cfg.decodeThreads) +
+                        " seed=" + std::to_string(args.cfg.deterministicSeed) +
+                        " stream=" + std::string(args.streamMode ? "true" : "false"));
 
-  int lastPercent = -1;
-  ndb::DecodeStats stats;
-  auto progressCb = [&](int percent, const std::string& stage) {
-    if (!args.progress || args.quiet) {
-      return;
+  auto runOneDecode = [&](int iter) -> int {
+    ndb::WavData wav;
+    if (!ndb::ReadWavMono16(args.inputPath, &wav, &error)) {
+      std::cerr << error << '\n';
+      AppendDiagnostics(args.diagnosticsLogPath, "read_failed iter=" + std::to_string(iter) +
+                                                    " err=" + error);
+      return 2;
     }
-    percent = std::max(0, std::min(100, percent));
-    if (percent == lastPercent && percent != 100) {
-      return;
-    }
-    lastPercent = percent;
-    std::cout << "[" << std::setw(3) << percent << "%] " << stage << '\n';
-  };
-
-  auto results = ndb::DecodeNdbFromWav(wav.samples, wav.sampleRate, args.cfg, &stats, progressCb);
-  if (args.minConfidence > 0.0f) {
-    std::vector<ndb::DecodeResult> filtered;
-    filtered.reserve(results.size());
-    for (const auto& r : results) {
-      if (r.confidence >= args.minConfidence) {
-        filtered.push_back(r);
+    if (args.streamTailSeconds > 0 && wav.sampleRate > 0) {
+      const std::size_t keep = static_cast<std::size_t>(args.streamTailSeconds) *
+                               static_cast<std::size_t>(wav.sampleRate);
+      if (wav.samples.size() > keep) {
+        wav.samples.erase(wav.samples.begin(), wav.samples.end() - static_cast<std::ptrdiff_t>(keep));
       }
     }
-    results = std::move(filtered);
-  }
 
-  if (args.outputPath.has_value()) {
-    if (!WriteCsv(*args.outputPath, results, &error)) {
-      std::cerr << error << '\n';
-      return 3;
-    }
-    if (!args.quiet) {
-      std::cout << "Written " << results.size() << " rows to " << *args.outputPath << '\n';
-    }
-  } else {
-    if (!args.quiet) {
-      std::cout << "Detected candidates: " << results.size() << '\n';
-    }
-    for (const auto& r : results) {
-      std::cout << "track=" << r.trackId << " freq=" << std::fixed << std::setprecision(2)
-                << r.freqHz << "Hz id=\"" << r.plausibleId << "\" pid="
-                << std::setprecision(3) << r.plausibleIdScore << " conf=" << r.confidence
-                << " raw=" << r.confidenceRaw
-                << " cal=" << r.confidenceCalibrated
-                << " score=" << r.compositeScore << " hits=" << r.hitCount
-                << " t=[" << r.startSec << "," << r.endSec << "]\n";
-    }
-  }
+    int lastPercent = -1;
+    ndb::DecodeStats stats;
+    auto progressCb = [&](int percent, const std::string& stage) {
+      if (!args.progress || args.quiet) {
+        return;
+      }
+      percent = std::max(0, std::min(100, percent));
+      if (percent == lastPercent && percent != 100) {
+        return;
+      }
+      lastPercent = percent;
+      std::cout << "[" << std::setw(3) << percent << "%] " << stage;
+      if (args.streamMode) {
+        std::cout << " (iter " << iter << ")";
+      }
+      std::cout << '\n';
+    };
 
-  if (args.metricsPath.has_value()) {
-    if (!WriteMetrics(*args.metricsPath, stats, &error)) {
-      std::cerr << error << '\n';
-      return 4;
+    auto results = ndb::DecodeNdbFromWav(wav.samples, wav.sampleRate, args.cfg, &stats, progressCb);
+    if (args.minConfidence > 0.0f) {
+      std::vector<ndb::DecodeResult> filtered;
+      filtered.reserve(results.size());
+      for (const auto& r : results) {
+        if (r.confidence >= args.minConfidence) {
+          filtered.push_back(r);
+        }
+      }
+      results = std::move(filtered);
     }
-    if (!args.quiet) {
-      std::cout << "Metrics written to " << *args.metricsPath << '\n';
-    }
-  }
 
-  if (args.quiet) {
-    std::cout << "rows=" << results.size() << " quality=" << std::fixed << std::setprecision(2)
-              << stats.qualityScore << " mean_conf=" << std::setprecision(3)
-              << stats.meanConfidence << " decode_ratio=" << stats.decodeRatio << '\n';
-  } else {
-    PrintMetricsSummary(stats);
+    if (args.outputPath.has_value()) {
+      if (!WriteCsv(*args.outputPath, results, &error)) {
+        std::cerr << error << '\n';
+        return 3;
+      }
+      if (!args.quiet) {
+        std::cout << "Written " << results.size() << " rows to " << *args.outputPath << '\n';
+      }
+    } else {
+      if (!args.quiet) {
+        std::cout << "Detected candidates: " << results.size() << '\n';
+      }
+      for (const auto& r : results) {
+        std::cout << "track=" << r.trackId << " freq=" << std::fixed << std::setprecision(2)
+                  << r.freqHz << "Hz id=\"" << r.plausibleId << "\" pid="
+                  << std::setprecision(3) << r.plausibleIdScore << " conf=" << r.confidence
+                  << " raw=" << r.confidenceRaw
+                  << " cal=" << r.confidenceCalibrated
+                  << " score=" << r.compositeScore << " hits=" << r.hitCount
+                  << " t=[" << r.startSec << "," << r.endSec << "]\n";
+      }
+    }
+
+    if (args.outputJsonPath.has_value()) {
+      if (!WriteJson(*args.outputJsonPath, results, stats, &error)) {
+        std::cerr << error << '\n';
+        return 5;
+      }
+    }
+
+    if (args.metricsPath.has_value()) {
+      if (!WriteMetrics(*args.metricsPath, stats, &error)) {
+        std::cerr << error << '\n';
+        return 4;
+      }
+      if (!args.quiet) {
+        std::cout << "Metrics written to " << *args.metricsPath << '\n';
+      }
+    }
+
+    AppendDiagnostics(args.diagnosticsLogPath,
+                      "iter=" + std::to_string(iter) + " rows=" + std::to_string(results.size()) +
+                          " quality=" + std::to_string(stats.qualityScore));
+
+    if (args.quiet) {
+      std::cout << "rows=" << results.size() << " quality=" << std::fixed << std::setprecision(2)
+                << stats.qualityScore << " mean_conf=" << std::setprecision(3)
+                << stats.meanConfidence << " decode_ratio=" << stats.decodeRatio << '\n';
+    } else {
+      PrintMetricsSummary(stats);
+    }
+    return 0;
+  };
+
+  const int iters = args.streamMode ? std::max(1, args.streamIterations) : 1;
+  for (int i = 1; i <= iters; ++i) {
+    const int rc = runOneDecode(i);
+    if (rc != 0) {
+      return rc;
+    }
+    if (args.streamMode && i < iters) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(std::max(1, args.streamPollMs)));
+    }
   }
 
   return 0;
