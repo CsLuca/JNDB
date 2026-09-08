@@ -179,3 +179,21 @@ Use this as a trend indicator across the same benchmark set. It is not an absolu
 
 - If the recording is audio from a narrow receiver chain, only tones present in that audio are decodable.
 - For wideband "all beacon in span" workflows, IQ capture is typically preferred.
+
+## Phase 0 baseline benchmark
+
+A reproducible Phase 0 benchmark framework is included.
+
+- Frozen config: `benchmarks/phase0/frozen_config.json`
+- Gold dataset template: `benchmarks/phase0/gold_dataset_manifest.example.json`
+- Benchmark runner: `tools/benchmark_phase0.py`
+- Guide: `benchmarks/phase0/README.md`
+
+This tracks the requested metrics over time:
+
+- precision
+- recall
+- false positives/hour
+- ID latency
+- runtime x real-time
+- plus mean `quality_score`

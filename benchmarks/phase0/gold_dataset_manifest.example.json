@@ -1,0 +1,28 @@
+{
+  "dataset_name": "jndb_gold_phase0",
+  "version": "0.1",
+  "notes": "Target: 20-50 WAV files. Keep annotations strict and reproducible.",
+  "files": [
+    {
+      "file_id": "sample_001",
+      "wav_path": "C:/path/to/sample_001.wav",
+      "duration_sec": 90.0,
+      "annotations": [
+        {
+          "id": "ABC",
+          "freq_hz": 504.4,
+          "start_sec": 12.4,
+          "end_sec": 18.9,
+          "snr_db_est": -4.5
+        },
+        {
+          "id": "DEF",
+          "freq_hz": 413.0,
+          "start_sec": 40.0,
+          "end_sec": 46.5,
+          "snr_db_est": -8.2
+        }
+      ]
+    }
+  ]
+}
