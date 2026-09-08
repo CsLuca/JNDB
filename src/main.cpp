@@ -80,8 +80,18 @@ bool ApplyModePreset(const std::string& mode, ndb::DecoderConfig* cfg, std::stri
     cfg->useAmtcFull = false;
     return true;
   }
+  if (mode == "phase4-serious") {
+    cfg->useAmtcFull = true;
+    cfg->maxTrackGapFrames = 4;
+    cfg->enableCochannelSeparation = true;
+    cfg->cochannelMaxTracks = 2;
+    cfg->cochannelMaxGapFrames = 4;
+    cfg->cochannelMaxStepHz = 5.0f;
+    cfg->confidenceCalibration = "platt";
+    return true;
+  }
   *error =
-      "Invalid value for --mode (use: default, strict-dx, relaxed, phase3-balanced, phase3-selective)";
+      "Invalid value for --mode (use: default, strict-dx, relaxed, phase3-balanced, phase3-selective, phase4-serious)";
   return false;
 }
 
@@ -136,6 +146,11 @@ void PrintUsage() {
       << "  --cluster-freq-tol <float> Cluster merge freq tolerance (default: 2.0)\n"
       << "  --cluster-gap-sec <float>  Cluster merge time gap (default: 0.4)\n"
       << "  --dedup-freq-tol <float>   ID dedup freq tolerance (default: 2.0)\n"
+      << "  --cochannel-sep            Enable co-channel split for nearby overlapping beacons\n"
+      << "  --no-cochannel-sep         Disable co-channel split\n"
+      << "  --cochannel-max-tracks <int> Max split tracks per cluster (default: 2)\n"
+      << "  --cochannel-max-gap <int>  Max frame gap inside split tracks (default: 4)\n"
+      << "  --cochannel-max-step-hz <float> Max frequency step per point in split tracker (default: 6)\n"
       << "  --require-plausible-id     Keep only plausible cyclic 2-3 char beacon IDs\n"
       << "  --allow-any-id             Disable plausible ID filter\n"
       << "  --plausible-id-min <float> Plausible ID score threshold (default: 0.30)\n"
@@ -164,7 +179,13 @@ void PrintUsage() {
       << "  --hsmm-sigma-word <float>  HSMM sigma for word gap (default: 1.45)\n"
       << "  --hsmm-tail-mix <float>    HSMM duration heavy-tail mix (default: 0.18)\n"
       << "  --hsmm-time-gain <float>   HSMM time-dependent transition gain (default: 0.55)\n"
-      << "  --mode <preset>            Preset: default | strict-dx | relaxed | phase3-balanced | phase3-selective\n"
+      << "  --confidence-calibration <name> Confidence calibration: none | platt | isotonic\n"
+      << "  --platt-a <float>          Platt sigmoid slope parameter A (default: 5.0)\n"
+      << "  --platt-b <float>          Platt sigmoid bias parameter B (default: -2.5)\n"
+      << "  --freq-prior-file <path>   Optional frequency prior CSV: freq_hz,ID1|ID2|...\n"
+      << "  --freq-prior-tol <float>   Frequency tolerance for prior shortlist (default: 2.5)\n"
+      << "  --require-prior-match      If prior exists near freq, keep only matching ID\n"
+      << "  --mode <preset>            Preset: default | strict-dx | relaxed | phase3-balanced | phase3-selective | phase4-serious\n"
       << "  --min-confidence <float>   Keep only rows with confidence >= value\n"
       << "  --metrics <path.json>      Write quality metrics JSON\n"
       << "  --no-progress              Disable progress output\n"
@@ -177,7 +198,8 @@ void PrintUsage() {
       << "  ndb_decode capture.wav --min-confidence 0.7 --mad-factor 3.5\n"
       << "  ndb_decode capture.wav out.csv --metrics run_metrics.json\n"
       << "  ndb_decode capture.wav out.csv --mode strict-dx\n"
-      << "  ndb_decode capture.wav out.csv --mode phase3-balanced\n";
+      << "  ndb_decode capture.wav out.csv --mode phase3-balanced\n"
+      << "  ndb_decode capture.wav out.csv --mode phase4-serious --freq-prior-file priors.csv\n";
 }
 
 bool WriteCsv(const std::string& path, const std::vector<ndb::DecodeResult>& results,
@@ -187,11 +209,13 @@ bool WriteCsv(const std::string& path, const std::vector<ndb::DecodeResult>& res
     *error = "Cannot write output file: " + path;
     return false;
   }
-  out << "track_id,freq_hz,text,plausible_id,plausible_id_score,confidence,decoder_model,start_sec,end_sec,first_seen_sec,last_seen_sec,hit_count,composite_score,energy_score,continuity_score,freq_stability_score,keying_periodicity_score\n";
+  out << "track_id,freq_hz,text,plausible_id,plausible_id_score,confidence,confidence_raw,confidence_calibrated,prior_matched,prior_candidates,decoder_model,start_sec,end_sec,first_seen_sec,last_seen_sec,hit_count,composite_score,energy_score,continuity_score,freq_stability_score,keying_periodicity_score\n";
   for (const auto& r : results) {
     out << r.trackId << ',' << std::fixed << std::setprecision(2) << r.freqHz << ',' << '"'
         << r.text << '"' << ',' << '"' << r.plausibleId << '"' << ','
         << std::setprecision(3) << r.plausibleIdScore << ',' << r.confidence << ','
+        << r.confidenceRaw << ',' << r.confidenceCalibrated << ','
+        << (r.priorMatched ? 1 : 0) << ',' << '"' << r.priorCandidates << '"' << ','
         << r.decoderModel << ','
         << std::setprecision(3) << r.startSec << ',' << r.endSec << ','
         << r.firstSeenSec << ',' << r.lastSeenSec << ',' << r.hitCount << ','
@@ -607,6 +631,38 @@ bool ParseArgs(int argc, char** argv, CliArgs* out, std::string* error) {
       }
       continue;
     }
+    if (token == "--cochannel-sep") {
+      out->cfg.enableCochannelSeparation = true;
+      continue;
+    }
+    if (token == "--no-cochannel-sep") {
+      out->cfg.enableCochannelSeparation = false;
+      continue;
+    }
+    if (token == "--cochannel-max-tracks") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseInt(value, &out->cfg.cochannelMaxTracks)) {
+        *error = "Invalid integer for --cochannel-max-tracks";
+        return false;
+      }
+      continue;
+    }
+    if (token == "--cochannel-max-gap") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseInt(value, &out->cfg.cochannelMaxGapFrames)) {
+        *error = "Invalid integer for --cochannel-max-gap";
+        return false;
+      }
+      continue;
+    }
+    if (token == "--cochannel-max-step-hz") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseFloat(value, &out->cfg.cochannelMaxStepHz)) {
+        *error = "Invalid float for --cochannel-max-step-hz";
+        return false;
+      }
+      continue;
+    }
     if (token == "--require-plausible-id") {
       out->cfg.requirePlausibleId = true;
       continue;
@@ -823,6 +879,56 @@ bool ParseArgs(int argc, char** argv, CliArgs* out, std::string* error) {
       }
       continue;
     }
+    if (token == "--confidence-calibration") {
+      std::string value;
+      if (!parseOptionValue(token, &value)) {
+        return false;
+      }
+      if (value != "none" && value != "platt" && value != "isotonic") {
+        *error = "Invalid value for --confidence-calibration (use: none, platt, isotonic)";
+        return false;
+      }
+      out->cfg.confidenceCalibration = value;
+      continue;
+    }
+    if (token == "--platt-a") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseFloat(value, &out->cfg.plattA)) {
+        *error = "Invalid float for --platt-a";
+        return false;
+      }
+      continue;
+    }
+    if (token == "--platt-b") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseFloat(value, &out->cfg.plattB)) {
+        *error = "Invalid float for --platt-b";
+        return false;
+      }
+      continue;
+    }
+    if (token == "--freq-prior-file") {
+      std::string value;
+      if (!parseOptionValue(token, &value)) {
+        return false;
+      }
+      out->cfg.enableFreqPriors = true;
+      out->cfg.freqPriorFile = value;
+      continue;
+    }
+    if (token == "--freq-prior-tol") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseFloat(value, &out->cfg.freqPriorTolHz)) {
+        *error = "Invalid float for --freq-prior-tol";
+        return false;
+      }
+      continue;
+    }
+    if (token == "--require-prior-match") {
+      out->cfg.requirePriorMatch = true;
+      out->cfg.enableFreqPriors = true;
+      continue;
+    }
     if (token == "--mode") {
       std::string value;
       if (!parseOptionValue(token, &value) || !ApplyModePreset(value, &out->cfg, error)) {
@@ -959,6 +1065,8 @@ int main(int argc, char** argv) {
       std::cout << "track=" << r.trackId << " freq=" << std::fixed << std::setprecision(2)
                 << r.freqHz << "Hz id=\"" << r.plausibleId << "\" pid="
                 << std::setprecision(3) << r.plausibleIdScore << " conf=" << r.confidence
+                << " raw=" << r.confidenceRaw
+                << " cal=" << r.confidenceCalibrated
                 << " score=" << r.compositeScore << " hits=" << r.hitCount
                 << " t=[" << r.startSec << "," << r.endSec << "]\n";
     }

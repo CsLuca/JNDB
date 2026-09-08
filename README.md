@@ -15,6 +15,7 @@ It is designed for weak-signal workflows and includes robust thresholding, multi
 - FFT acceleration path: FFTW3f auto-detected in CMake, with internal FFT/DFT fallback
 - Phase 3 DSP blocks available: band-limit, auto-notch, impulse blanker, 2D-CFAR
 - AMTC full DP tracker available via CLI (`--amtc-full`)
+- Phase 4 options: co-channel split, confidence calibration, frequency priors
 
 ## Algorithmic notes (paper-inspired)
 
@@ -128,6 +129,10 @@ Note: inside MSYS2 bash, arguments starting with `/` can be path-converted by th
 - `--cluster-freq-tol <float>`: track cluster frequency merge tolerance (default `2.0`)
 - `--cluster-gap-sec <float>`: merge gap for overlapping/nearby tracks (default `0.4`)
 - `--dedup-freq-tol <float>`: repeated-ID dedup frequency tolerance (default `2.0`)
+- `--cochannel-sep` / `--no-cochannel-sep`: enable/disable co-channel split per merged cluster
+- `--cochannel-max-tracks <int>`: max split tracks per cluster (default `2`)
+- `--cochannel-max-gap <int>`: max frame gap inside split tracks (default `4`)
+- `--cochannel-max-step-hz <float>`: max per-point frequency step in split tracker (default `6.0`)
 - `--require-plausible-id`: enforce plausible cyclic beacon ID filter (default on)
 - `--allow-any-id`: disable plausible ID gating
 - `--plausible-id-min <float>`: plausible ID minimum score (default `0.30`)
@@ -156,8 +161,12 @@ Note: inside MSYS2 bash, arguments starting with `/` can be path-converted by th
 - `--hsmm-sigma-intra <float>` / `--hsmm-sigma-char <float>` / `--hsmm-sigma-word <float>`: HSMM OFF-state duration sigmas
 - `--hsmm-tail-mix <float>`: heavy-tail mix for explicit duration distribution
 - `--hsmm-time-gain <float>`: strength of time-dependent transition adaptation
-- `--mode <preset>`: preset profile (`default`, `strict-dx`, `relaxed`)
-- `--mode <preset>`: preset profile (`default`, `strict-dx`, `relaxed`, `phase3-balanced`, `phase3-selective`)
+- `--confidence-calibration <name>`: confidence calibration (`none`, `platt`, `isotonic`)
+- `--platt-a <float>` / `--platt-b <float>`: Platt scaling parameters
+- `--freq-prior-file <path>`: optional CSV `freq_hz,ID1|ID2|...`
+- `--freq-prior-tol <float>`: matching tolerance for prior shortlist (default `2.5`)
+- `--require-prior-match`: if prior exists around freq, keep only matching IDs
+- `--mode <preset>`: preset profile (`default`, `strict-dx`, `relaxed`, `phase3-balanced`, `phase3-selective`, `phase4-serious`)
 - `--min-confidence <float>`: output filter; keep rows with confidence >= value
 - `--metrics <path.json>`: write run quality metrics JSON for trend tracking
 - `--no-progress`: disable progress output
@@ -224,6 +233,19 @@ ndb_decode capture.wav out.csv --mode phase3-balanced
 ndb_decode capture.wav out.csv --mode phase3-selective
 ```
 
+### Phase 4 preset
+
+- `phase4-serious`
+  - enables AMTC-full and robust gap handling
+  - enables co-channel split (two simultaneous nearby traces)
+  - enables Platt confidence calibration for cross-file comparability
+
+Example:
+
+```bash
+ndb_decode capture.wav out.csv --mode phase4-serious --freq-prior-file priors.csv
+```
+
 ### Save quality metrics for comparison between versions
 
 ```bash
@@ -244,6 +266,10 @@ CSV columns:
 - `freq_hz`
 - `text`
 - `confidence`
+- `confidence_raw`
+- `confidence_calibrated`
+- `prior_matched`
+- `prior_candidates`
 - `start_sec`
 - `end_sec`
 

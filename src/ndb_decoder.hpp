@@ -12,6 +12,8 @@ struct DecodeResult {
   std::string morse;
   std::string text;
   float confidence = 0.0f;
+  float confidenceRaw = 0.0f;
+  float confidenceCalibrated = 0.0f;
   float startSec = 0.0f;
   float endSec = 0.0f;
   int hitCount = 1;
@@ -25,6 +27,8 @@ struct DecodeResult {
   std::string plausibleId;
   float plausibleIdScore = 0.0f;
   std::string decoderModel;
+  bool priorMatched = false;
+  std::string priorCandidates;
 };
 
 struct DecoderConfig {
@@ -51,6 +55,10 @@ struct DecoderConfig {
   float clusterFreqTolHz = 2.0f;
   float clusterGapSec = 0.4f;
   float dedupFreqTolHz = 2.0f;
+  bool enableCochannelSeparation = true;
+  int cochannelMaxTracks = 2;
+  int cochannelMaxGapFrames = 4;
+  float cochannelMaxStepHz = 6.0f;
   bool requirePlausibleId = true;
   float plausibleIdMinScore = 0.30f;
   bool strictBeaconMode = false;
@@ -93,6 +101,13 @@ struct DecoderConfig {
   int cfarTrainFreq = 6;
   int cfarGuardFreq = 1;
   float cfarScale = 2.8f;
+  std::string confidenceCalibration = "none";
+  float plattA = 5.0f;
+  float plattB = -2.5f;
+  bool enableFreqPriors = false;
+  std::string freqPriorFile;
+  float freqPriorTolHz = 2.5f;
+  bool requirePriorMatch = false;
 };
 
 struct DecodeStats {

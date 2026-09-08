@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <fstream>
 #include <numeric>
 #include <sstream>
 #include <unordered_map>
@@ -27,6 +28,11 @@ struct ClusteredTrack {
 
 struct DecodedCandidate {
   DecodeResult result;
+};
+
+struct PriorEntry {
+  float freqHz = 0.0f;
+  std::vector<std::string> ids;
 };
 
 struct SequenceDecode {
@@ -139,6 +145,111 @@ float ComputeIdLikeTokenRatio(const std::vector<DecodeResult>& results) {
     return 0.0f;
   }
   return static_cast<float>(good) / static_cast<float>(total);
+}
+
+std::vector<PriorEntry> LoadFreqPriors(const std::string& path) {
+  std::vector<PriorEntry> out;
+  if (path.empty()) {
+    return out;
+  }
+  std::ifstream in(path);
+  if (!in) {
+    return out;
+  }
+  std::string line;
+  while (std::getline(in, line)) {
+    if (line.empty() || line[0] == '#') {
+      continue;
+    }
+    std::istringstream iss(line);
+    std::string f;
+    std::string ids;
+    if (!std::getline(iss, f, ',')) {
+      continue;
+    }
+    if (!std::getline(iss, ids)) {
+      continue;
+    }
+    PriorEntry e;
+    try {
+      e.freqHz = std::stof(f);
+    } catch (...) {
+      continue;
+    }
+    std::istringstream idss(ids);
+    std::string id;
+    while (std::getline(idss, id, '|')) {
+      for (char& c : id) {
+        if (c >= 'a' && c <= 'z') {
+          c = static_cast<char>(c - 'a' + 'A');
+        }
+      }
+      const bool tokenLike = (id.size() >= 2 && id.size() <= 3) &&
+                             std::all_of(id.begin(), id.end(), [](char c) {
+                               return c >= 'A' && c <= 'Z';
+                             });
+      if (tokenLike) {
+        e.ids.push_back(id);
+      }
+    }
+    if (!e.ids.empty()) {
+      out.push_back(std::move(e));
+    }
+  }
+  return out;
+}
+
+std::vector<std::string> FindPriorCandidates(float freqHz, const std::vector<PriorEntry>& priors,
+                                             float tolHz) {
+  std::vector<std::string> out;
+  for (const auto& p : priors) {
+    if (std::fabs(p.freqHz - freqHz) <= tolHz) {
+      out.insert(out.end(), p.ids.begin(), p.ids.end());
+    }
+  }
+  std::sort(out.begin(), out.end());
+  out.erase(std::unique(out.begin(), out.end()), out.end());
+  return out;
+}
+
+bool ContainsToken(const std::vector<std::string>& v, const std::string& x) {
+  for (const auto& a : v) {
+    if (a == x) {
+      return true;
+    }
+  }
+  return false;
+}
+
+std::string JoinPipe(const std::vector<std::string>& v) {
+  std::string out;
+  for (std::size_t i = 0; i < v.size(); ++i) {
+    if (i > 0) {
+      out.push_back('|');
+    }
+    out += v[i];
+  }
+  return out;
+}
+
+float CalibrateConfidence(float raw, const DecoderConfig& cfg) {
+  const float x = std::max(1e-4f, std::min(0.9999f, raw));
+  if (cfg.confidenceCalibration == "platt") {
+    const float z = cfg.plattA * x + cfg.plattB;
+    return 1.0f / (1.0f + std::exp(-z));
+  }
+  if (cfg.confidenceCalibration == "isotonic") {
+    const std::array<float, 7> xp = {0.0f, 0.15f, 0.30f, 0.50f, 0.70f, 0.85f, 1.0f};
+    const std::array<float, 7> yp = {0.02f, 0.12f, 0.26f, 0.52f, 0.72f, 0.86f, 0.97f};
+    for (std::size_t i = 1; i < xp.size(); ++i) {
+      if (x <= xp[i]) {
+        const float t = (x - xp[i - 1]) / (xp[i] - xp[i - 1] + 1e-6f);
+        return yp[i - 1] + t * (yp[i] - yp[i - 1]);
+      }
+    }
+    return yp.back();
+  }
+  return x;
 }
 
 float GaussianLike(float x, float mu, float sigma) {
@@ -794,6 +905,75 @@ std::vector<ClusteredTrack> ClusterTracks(const std::vector<Track>& tracks, int 
   return out;
 }
 
+std::vector<ClusteredTrack> SplitCochannelTracks(const std::vector<ClusteredTrack>& in,
+                                                 int hopSize, int sampleRate,
+                                                 const DecoderConfig& cfg) {
+  if (!cfg.enableCochannelSeparation || cfg.cochannelMaxTracks <= 1) {
+    return in;
+  }
+  std::vector<ClusteredTrack> out;
+  int nextId = 1;
+  for (const auto& c : in) {
+    if (c.points.empty()) {
+      continue;
+    }
+    std::vector<std::vector<TrackPoint>> buckets(static_cast<std::size_t>(cfg.cochannelMaxTracks));
+    std::vector<int> lastFrame(static_cast<std::size_t>(cfg.cochannelMaxTracks), -100000);
+    std::vector<float> lastFreq(static_cast<std::size_t>(cfg.cochannelMaxTracks), c.freqHz);
+
+    for (const auto& p : c.points) {
+      int best = -1;
+      float bestCost = 1e30f;
+      for (int k = 0; k < cfg.cochannelMaxTracks; ++k) {
+        const float df = std::fabs(p.freqHz - lastFreq[static_cast<std::size_t>(k)]);
+        const int dt = p.frame - lastFrame[static_cast<std::size_t>(k)];
+        if (!buckets[static_cast<std::size_t>(k)].empty()) {
+          if (df > cfg.cochannelMaxStepHz || dt > cfg.cochannelMaxGapFrames) {
+            continue;
+          }
+        }
+        const float cst = df + 0.5f * static_cast<float>(std::max(0, dt - 1));
+        if (cst < bestCost) {
+          bestCost = cst;
+          best = k;
+        }
+      }
+      if (best < 0) {
+        int empt = -1;
+        for (int k = 0; k < cfg.cochannelMaxTracks; ++k) {
+          if (buckets[static_cast<std::size_t>(k)].empty()) {
+            empt = k;
+            break;
+          }
+        }
+        best = (empt >= 0 ? empt : 0);
+      }
+      buckets[static_cast<std::size_t>(best)].push_back(p);
+      lastFrame[static_cast<std::size_t>(best)] = p.frame;
+      lastFreq[static_cast<std::size_t>(best)] = p.freqHz;
+    }
+
+    for (auto& b : buckets) {
+      if (b.size() < 6) {
+        continue;
+      }
+      ClusteredTrack s;
+      s.id = nextId++;
+      s.points = std::move(b);
+      std::sort(s.points.begin(), s.points.end(), [](const TrackPoint& a, const TrackPoint& b) {
+        return a.frame < b.frame;
+      });
+      s.freqHz = MeanFrequency(s.points);
+      const int firstFrame = s.points.front().frame;
+      const int lastFrame = s.points.back().frame;
+      s.startSec = static_cast<float>(firstFrame * hopSize) / static_cast<float>(sampleRate);
+      s.endSec = static_cast<float>(lastFrame * hopSize) / static_cast<float>(sampleRate);
+      out.push_back(std::move(s));
+    }
+  }
+  return out;
+}
+
 std::vector<DecodeResult> DedupById(const std::vector<DecodeResult>& in, float freqTolHz) {
   std::vector<DecodeResult> out;
   for (const auto& r : in) {
@@ -816,7 +996,11 @@ std::vector<DecodeResult> DedupById(const std::vector<DecodeResult>& in, float f
       e.compositeScore = std::max(e.compositeScore, r.compositeScore);
       if (r.confidence >= e.confidence) {
         e.confidence = r.confidence;
+        e.confidenceRaw = r.confidenceRaw;
+        e.confidenceCalibrated = r.confidenceCalibrated;
         e.decoderModel = r.decoderModel;
+        e.priorMatched = r.priorMatched;
+        e.priorCandidates = r.priorCandidates;
       }
       e.plausibleIdScore = std::max(e.plausibleIdScore, r.plausibleIdScore);
       merged = true;
@@ -945,12 +1129,15 @@ std::vector<DecodeResult> DecodeNdbFromWav(const std::vector<float>& samples, in
   }
   Report(progress, 47, "tracking");
 
-  const auto clustered = ClusterTracks(tracks, cfg.hopSize, workRate, cfg.clusterFreqTolHz,
-                                       cfg.clusterGapSec);
+  const auto clusteredRaw = ClusterTracks(tracks, cfg.hopSize, workRate, cfg.clusterFreqTolHz,
+                                          cfg.clusterGapSec);
+  const auto clustered = SplitCochannelTracks(clusteredRaw, cfg.hopSize, workRate, cfg);
   if (stats) {
     stats->clusteredCount = static_cast<int>(clustered.size());
   }
   Report(progress, 58, "cluster-merge");
+
+  const auto priors = cfg.enableFreqPriors ? LoadFreqPriors(cfg.freqPriorFile) : std::vector<PriorEntry>{};
 
   int filteredByFreq = 0;
   int plausibleRejected = 0;
@@ -1005,7 +1192,9 @@ std::vector<DecodeResult> DecodeNdbFromWav(const std::vector<float>& samples, in
     r.freqHz = f0;
     r.text = decodedText.text;
     r.morse = decodedText.text;
-    r.confidence = decodedText.confidence;
+    r.confidenceRaw = decodedText.confidence;
+    r.confidenceCalibrated = CalibrateConfidence(decodedText.confidence, cfg);
+    r.confidence = r.confidenceCalibrated;
     r.decoderModel = decodedText.model;
     r.startSec = tr.startSec;
     r.endSec = tr.endSec;
@@ -1023,6 +1212,18 @@ std::vector<DecodeResult> DecodeNdbFromWav(const std::vector<float>& samples, in
     const auto plausible = ExtractPlausibleId(r.text);
     r.plausibleId = plausible.first;
     r.plausibleIdScore = plausible.second;
+
+    if (cfg.enableFreqPriors) {
+      const auto cand = FindPriorCandidates(r.freqHz, priors, cfg.freqPriorTolHz);
+      r.priorCandidates = JoinPipe(cand);
+      r.priorMatched = (!r.plausibleId.empty() && ContainsToken(cand, r.plausibleId));
+      if (cfg.requirePriorMatch && !cand.empty() && !r.priorMatched) {
+        ++plausibleRejected;
+        ++done;
+        Report(progress, 58 + (28 * done) / total, "decode-clusters");
+        continue;
+      }
+    }
     if (cfg.requirePlausibleId &&
         (r.plausibleId.empty() || r.plausibleIdScore < cfg.plausibleIdMinScore)) {
       ++plausibleRejected;

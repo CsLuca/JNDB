@@ -164,6 +164,16 @@ void ApplyPresetToConfig(const std::string& mode, ndb::DecoderConfig* cfg) {
     cfg->useAmtcFull = false;
     return;
   }
+  if (mode == "phase4-serious") {
+    cfg->useAmtcFull = true;
+    cfg->maxTrackGapFrames = 4;
+    cfg->enableCochannelSeparation = true;
+    cfg->cochannelMaxTracks = 2;
+    cfg->cochannelMaxGapFrames = 4;
+    cfg->cochannelMaxStepHz = 5.0f;
+    cfg->confidenceCalibration = "platt";
+    return;
+  }
 }
 
 std::wstring PresetHintFromSelection(int sel) {
@@ -176,6 +186,8 @@ std::wstring PresetHintFromSelection(int sel) {
       return L"Phase3 Balanced: light band-limit only, robust default for noisy audio.";
     case 4:
       return L"Phase3 Selective: band-limit + soft CFAR, more selective in interference.";
+    case 5:
+      return L"Phase4 Serious: AMTC-full + co-channel split + Platt confidence.";
     default:
       return L"Default: baseline profile for general-purpose decoding.";
   }
@@ -859,6 +871,8 @@ void StartDecode(AppState* app) {
     mode = "phase3-balanced";
   } else if (sel == 4) {
     mode = "phase3-selective";
+  } else if (sel == 5) {
+    mode = "phase4-serious";
   }
 
   app->worker = std::thread([app, inputPath, outputPath, metricsPath, mode]() {
@@ -1057,6 +1071,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       SendMessageW(app->presetCombo, CB_ADDSTRING, 0, (LPARAM)L"Relaxed");
       SendMessageW(app->presetCombo, CB_ADDSTRING, 0, (LPARAM)L"Phase3 Balanced");
       SendMessageW(app->presetCombo, CB_ADDSTRING, 0, (LPARAM)L"Phase3 Selective");
+      SendMessageW(app->presetCombo, CB_ADDSTRING, 0, (LPARAM)L"Phase4 Serious");
       SendMessageW(app->presetCombo, CB_SETCURSEL, 0, 0);
       app->presetHintText = CreateWindowW(
           L"STATIC", L"", WS_CHILD | WS_VISIBLE, m + 464, y + 34, 340, 28, hwnd, nullptr,
