@@ -138,6 +138,31 @@ void ApplyPresetToConfig(const std::string& mode, ndb::DecoderConfig* cfg) {
     cfg->thresholdK = 2.2f;
     return;
   }
+  if (mode == "phase3-balanced") {
+    cfg->enableBandLimit = true;
+    cfg->bandLowHz = 110.0f;
+    cfg->bandHighHz = 2000.0f;
+    cfg->enableAutoNotch = false;
+    cfg->enableImpulseBlanker = false;
+    cfg->enableCfar2d = false;
+    cfg->useAmtcFull = false;
+    return;
+  }
+  if (mode == "phase3-selective") {
+    cfg->enableBandLimit = true;
+    cfg->bandLowHz = 110.0f;
+    cfg->bandHighHz = 2000.0f;
+    cfg->enableAutoNotch = false;
+    cfg->enableImpulseBlanker = false;
+    cfg->enableCfar2d = true;
+    cfg->cfarTrainTime = 3;
+    cfg->cfarGuardTime = 1;
+    cfg->cfarTrainFreq = 4;
+    cfg->cfarGuardFreq = 1;
+    cfg->cfarScale = 1.35f;
+    cfg->useAmtcFull = false;
+    return;
+  }
 }
 
 std::wstring ToWide(const std::string& s) {
@@ -806,6 +831,10 @@ void StartDecode(AppState* app) {
     mode = "strict-dx";
   } else if (sel == 2) {
     mode = "relaxed";
+  } else if (sel == 3) {
+    mode = "phase3-balanced";
+  } else if (sel == 4) {
+    mode = "phase3-selective";
   }
 
   app->worker = std::thread([app, inputPath, outputPath, metricsPath, mode]() {
@@ -998,10 +1027,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     nullptr, nullptr, nullptr);
       app->presetCombo = CreateWindowW(
           L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | WS_VSCROLL | CBS_DROPDOWNLIST,
-          m + 520, y, 120, 120, hwnd, (HMENU)kIdPresetCombo, nullptr, nullptr);
+          m + 520, y, 168, 140, hwnd, (HMENU)kIdPresetCombo, nullptr, nullptr);
       SendMessageW(app->presetCombo, CB_ADDSTRING, 0, (LPARAM)L"Default");
       SendMessageW(app->presetCombo, CB_ADDSTRING, 0, (LPARAM)L"Strict DX");
       SendMessageW(app->presetCombo, CB_ADDSTRING, 0, (LPARAM)L"Relaxed");
+      SendMessageW(app->presetCombo, CB_ADDSTRING, 0, (LPARAM)L"Phase3 Balanced");
+      SendMessageW(app->presetCombo, CB_ADDSTRING, 0, (LPARAM)L"Phase3 Selective");
       SendMessageW(app->presetCombo, CB_SETCURSEL, 0, 0);
       y += 40;
       app->historyEdit = addRow(L"History", kIdHistoryEdit, kIdHistoryBrowse, y, L"Browse");
