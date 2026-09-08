@@ -28,6 +28,37 @@ struct CliArgs {
   ndb::DecoderConfig cfg;
 };
 
+bool ApplyModePreset(const std::string& mode, ndb::DecoderConfig* cfg, std::string* error) {
+  if (!cfg || !error) {
+    return false;
+  }
+  if (mode == "default") {
+    return true;
+  }
+  if (mode == "strict-dx") {
+    cfg->requirePlausibleId = true;
+    cfg->plausibleIdMinScore = 0.30f;
+    cfg->strictBeaconMode = true;
+    cfg->strictMinRepeats = 3;
+    cfg->dedupFreqTolHz = 1.5f;
+    cfg->clusterFreqTolHz = 2.0f;
+    cfg->clusterGapSec = 0.35f;
+    cfg->thresholdK = 2.6f;
+    return true;
+  }
+  if (mode == "relaxed") {
+    cfg->requirePlausibleId = false;
+    cfg->strictBeaconMode = false;
+    cfg->dedupFreqTolHz = 2.5f;
+    cfg->clusterFreqTolHz = 2.5f;
+    cfg->clusterGapSec = 0.6f;
+    cfg->thresholdK = 2.2f;
+    return true;
+  }
+  *error = "Invalid value for --mode (use: default, strict-dx, relaxed)";
+  return false;
+}
+
 void PrintUsage() {
   std::cout
       << "NDB Decoder - decode likely NDB Morse IDs from WAV\n\n"
@@ -62,6 +93,7 @@ void PrintUsage() {
       << "  --plausible-id-min <float> Plausible ID score threshold (default: 0.30)\n"
       << "  --strict-beacon            Require repeated ID hits before emitting\n"
       << "  --strict-min-repeats <int> Minimum hit_count for strict mode (default: 3)\n"
+      << "  --mode <preset>            Preset: default | strict-dx | relaxed\n"
       << "  --min-confidence <float>   Keep only rows with confidence >= value\n"
       << "  --metrics <path.json>      Write quality metrics JSON\n"
       << "  --no-progress              Disable progress output\n"
@@ -72,7 +104,8 @@ void PrintUsage() {
       << "  ndb_decode C:\\radio\\capture.wav C:\\radio\\out.csv\n"
       << "  ndb_decode capture.wav out.csv --max-seconds 180 --target-sr 12000\n"
       << "  ndb_decode capture.wav --min-confidence 0.7 --mad-factor 3.5\n"
-      << "  ndb_decode capture.wav out.csv --metrics run_metrics.json\n";
+      << "  ndb_decode capture.wav out.csv --metrics run_metrics.json\n"
+      << "  ndb_decode capture.wav out.csv --mode strict-dx\n";
 }
 
 bool WriteCsv(const std::string& path, const std::vector<ndb::DecodeResult>& results,
@@ -389,6 +422,16 @@ bool ParseArgs(int argc, char** argv, CliArgs* out, std::string* error) {
       std::string value;
       if (!parseOptionValue(token, &value) || !ParseInt(value, &out->cfg.strictMinRepeats)) {
         *error = "Invalid integer for --strict-min-repeats";
+        return false;
+      }
+      continue;
+    }
+    if (token == "--mode") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ApplyModePreset(value, &out->cfg, error)) {
+        if (error->empty()) {
+          *error = "Invalid value for --mode";
+        }
         return false;
       }
       continue;

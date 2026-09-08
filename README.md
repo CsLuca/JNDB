@@ -129,6 +129,7 @@ Note: inside MSYS2 bash, arguments starting with `/` can be path-converted by th
 - `--plausible-id-min <float>`: plausible ID minimum score (default `0.30`)
 - `--strict-beacon`: require repeated beacon observations before output
 - `--strict-min-repeats <int>`: minimum `hit_count` in strict mode (default `3`)
+- `--mode <preset>`: preset profile (`default`, `strict-dx`, `relaxed`)
 - `--min-confidence <float>`: output filter; keep rows with confidence >= value
 - `--metrics <path.json>`: write run quality metrics JSON for trend tracking
 - `--no-progress`: disable progress output
@@ -165,6 +166,19 @@ ndb_decode capture.wav results.csv --max-seconds 180 --target-sr 12000
 ```bash
 ndb_decode capture.wav results.csv --min-confidence 0.70 --mad-factor 3.5 --threshold-k 3.0
 ```
+
+### Strict DX preset
+
+```bash
+ndb_decode capture.wav results.csv --mode strict-dx
+```
+
+`strict-dx` applies conservative defaults for weak-signal reliability:
+
+- plausible ID required (`plausible_id_score >= 0.30`)
+- strict beacon mode enabled (`strict_min_repeats = 3`)
+- tighter cluster/dedup tolerances
+- slightly stricter thresholding
 
 ### Save quality metrics for comparison between versions
 
