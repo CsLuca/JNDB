@@ -38,3 +38,6 @@ benchmarks/phase0/history/
 benchmarks/phase0/runs/
 benchmarks/phase0/*.local.json
 benchmarks/phase4/ab_runs/
+benchmarks/phase5/runs/
+benchmarks/phase5/history/
+benchmarks/phase5/*.local.json

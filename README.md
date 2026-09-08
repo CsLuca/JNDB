@@ -274,6 +274,61 @@ Outputs are written under:
 - `benchmarks/phase4/ab_runs/phase4_ab_summary.json`
 - `benchmarks/phase4/ab_runs/phase4_ab_summary.csv`
 
+## Phase 5 external ground-truth validation
+
+Phase 5 adds automatic external validation against a beacon database (`ID/freq/area`) and supports two modes:
+
+- `known-list`: compares detected IDs with per-file expected ID shortlist
+- `blind`: compares decoded rows against time/frequency annotations
+
+Reference example files:
+
+- `benchmarks/phase5/beacon_db.example.csv`
+- `benchmarks/phase5/validation_manifest.example.json`
+
+Run (single variant):
+
+```bash
+python tools/benchmark_phase5_validation.py \
+  --manifest benchmarks/phase5/validation_manifest.local.json \
+  --beacon-db benchmarks/phase5/beacon_db.example.csv \
+  --mode known-list \
+  --decoder-a build_ucrt64/ndb_decode.exe \
+  --name-a current \
+  --config-a benchmarks/phase0/frozen_config_auto_tuned.json \
+  --out-dir benchmarks/phase5/runs/current \
+  --run \
+  --msys-bash C:/msys64/usr/bin/bash.exe
+```
+
+Run A/B between two versions/configs:
+
+```bash
+python tools/benchmark_phase5_validation.py \
+  --manifest benchmarks/phase5/validation_manifest.local.json \
+  --beacon-db benchmarks/phase5/beacon_db.example.csv \
+  --mode blind \
+  --decoder-a build_ucrt64/ndb_decode.exe --name-a baseline \
+  --decoder-b build_ucrt64/ndb_decode.exe --name-b candidate \
+  --config-a benchmarks/phase0/frozen_config_hmm_legacy.json \
+  --config-b benchmarks/phase0/frozen_config_auto_tuned.json \
+  --out-dir benchmarks/phase5/runs/ab_001 \
+  --run \
+  --msys-bash C:/msys64/usr/bin/bash.exe
+```
+
+Outputs include:
+
+- `phase5_validation_summary.json`
+- `<variant>/diff_report.csv` (detected vs expected, misses, false alarms)
+- `<variant>/confusion_matrix.csv` (truth ID vs predicted ID, including misses/none labels)
+- `<variant>/validation_report.json`
+
+Continuous A/B history is appended automatically when two variants are provided:
+
+- `history/ab_history.csv`
+- `history/ab_history.jsonl`
+
 ### Save quality metrics for comparison between versions
 
 ```bash
