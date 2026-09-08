@@ -48,6 +48,10 @@ constexpr int kIdCompareBrowse = 1016;
 constexpr int kIdExportPng = 1017;
 constexpr int kIdResetView = 1018;
 constexpr int kIdPresetCombo = 1019;
+constexpr int kIdCalibCombo = 1020;
+constexpr int kIdPriorEdit = 1021;
+constexpr int kIdPriorBrowse = 1022;
+constexpr int kIdRequirePrior = 1023;
 
 constexpr UINT kMsgProgress = WM_APP + 1;
 constexpr UINT kMsgDone = WM_APP + 2;
@@ -87,6 +91,9 @@ struct AppState {
   HWND outputEdit = nullptr;
   HWND metricsEdit = nullptr;
   HWND presetCombo = nullptr;
+  HWND calibCombo = nullptr;
+  HWND priorEdit = nullptr;
+  HWND priorCheck = nullptr;
   HWND runButton = nullptr;
   HWND progressBar = nullptr;
   HWND statusText = nullptr;
@@ -199,6 +206,16 @@ void UpdatePresetHint(AppState* app) {
   }
   const int sel = static_cast<int>(SendMessageW(app->presetCombo, CB_GETCURSEL, 0, 0));
   SetWindowTextW(app->presetHintText, PresetHintFromSelection(sel).c_str());
+}
+
+void ApplyPresetUiDefaults(AppState* app) {
+  if (!app || !app->presetCombo || !app->calibCombo) {
+    return;
+  }
+  const int sel = static_cast<int>(SendMessageW(app->presetCombo, CB_GETCURSEL, 0, 0));
+  if (sel == 5) {
+    SendMessageW(app->calibCombo, CB_SETCURSEL, 1, 0);
+  }
 }
 
 std::wstring ToWide(const std::string& s) {
@@ -347,6 +364,15 @@ void SetBusy(AppState* app, bool busy) {
   EnableWindow(app->inputEdit, busy ? FALSE : TRUE);
   EnableWindow(app->outputEdit, busy ? FALSE : TRUE);
   EnableWindow(app->metricsEdit, busy ? FALSE : TRUE);
+  if (app->calibCombo) {
+    EnableWindow(app->calibCombo, busy ? FALSE : TRUE);
+  }
+  if (app->priorEdit) {
+    EnableWindow(app->priorEdit, busy ? FALSE : TRUE);
+  }
+  if (app->priorCheck) {
+    EnableWindow(app->priorCheck, busy ? FALSE : TRUE);
+  }
 }
 
 std::wstring BuildSummary(const DecodeThreadResult& r) {
@@ -858,10 +884,17 @@ void StartDecode(AppState* app) {
   const std::string inputPath = ToUtf8(inW);
   const std::string outputPath = ToUtf8(outW);
   const std::string metricsPath = ToUtf8(metW);
+  const std::string priorPath = ToUtf8(GetText(app->priorEdit));
   int sel = 0;
   if (app->presetCombo) {
     sel = static_cast<int>(SendMessageW(app->presetCombo, CB_GETCURSEL, 0, 0));
   }
+  int calibSel = 0;
+  if (app->calibCombo) {
+    calibSel = static_cast<int>(SendMessageW(app->calibCombo, CB_GETCURSEL, 0, 0));
+  }
+  const bool requirePrior =
+      app->priorCheck && (SendMessageW(app->priorCheck, BM_GETCHECK, 0, 0) == BST_CHECKED);
   std::string mode = "default";
   if (sel == 1) {
     mode = "strict-dx";
@@ -875,7 +908,8 @@ void StartDecode(AppState* app) {
     mode = "phase4-serious";
   }
 
-  app->worker = std::thread([app, inputPath, outputPath, metricsPath, mode]() {
+  app->worker = std::thread([app, inputPath, outputPath, metricsPath, priorPath, mode, calibSel,
+                             requirePrior]() {
     auto* result = new DecodeThreadResult();
     result->outputPath = outputPath;
     result->metricsPath = metricsPath;
@@ -888,6 +922,21 @@ void StartDecode(AppState* app) {
 
     ndb::DecoderConfig cfg;
     ApplyPresetToConfig(mode, &cfg);
+    if (calibSel == 1) {
+      cfg.confidenceCalibration = "platt";
+    } else if (calibSel == 2) {
+      cfg.confidenceCalibration = "isotonic";
+    } else {
+      cfg.confidenceCalibration = "none";
+    }
+    if (!priorPath.empty()) {
+      cfg.enableFreqPriors = true;
+      cfg.freqPriorFile = priorPath;
+      cfg.requirePriorMatch = requirePrior;
+    } else {
+      cfg.enableFreqPriors = false;
+      cfg.requirePriorMatch = false;
+    }
     auto progress = [app](int percent, const std::string&) {
       PostMessageW(app->hwnd, kMsgProgress, static_cast<WPARAM>(percent), 0);
     };
@@ -1079,6 +1128,31 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       SendMessageW(app->presetHintText, WM_SETFONT, reinterpret_cast<WPARAM>(app->font), TRUE);
       UpdatePresetHint(app);
       y += 40;
+
+      CreateWindowW(L"STATIC", L"Calib", WS_CHILD | WS_VISIBLE, m, y + 6, 56, 22, hwnd, nullptr,
+                    nullptr, nullptr);
+      app->calibCombo = CreateWindowW(L"COMBOBOX", L"",
+                                      WS_CHILD | WS_VISIBLE | WS_VSCROLL | CBS_DROPDOWNLIST,
+                                      m + 100, y, 160, 140, hwnd, (HMENU)kIdCalibCombo, nullptr,
+                                      nullptr);
+      SendMessageW(app->calibCombo, CB_ADDSTRING, 0, (LPARAM)L"None");
+      SendMessageW(app->calibCombo, CB_ADDSTRING, 0, (LPARAM)L"Platt");
+      SendMessageW(app->calibCombo, CB_ADDSTRING, 0, (LPARAM)L"Isotonic");
+      SendMessageW(app->calibCombo, CB_SETCURSEL, 0, 0);
+      y += 40;
+
+      CreateWindowW(L"STATIC", L"Prior CSV", WS_CHILD | WS_VISIBLE, m, y + 6, 100, 22, hwnd,
+                    nullptr, nullptr, nullptr);
+      app->priorEdit = CreateWindowW(L"EDIT", L"",
+                                     WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
+                                     m + 100, y, 250, 30, hwnd, (HMENU)kIdPriorEdit, nullptr,
+                                     nullptr);
+      CreateWindowW(L"BUTTON", L"Browse", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, m + 358, y,
+                    96, 32, hwnd, (HMENU)kIdPriorBrowse, nullptr, nullptr);
+      app->priorCheck = CreateWindowW(L"BUTTON", L"Require prior match",
+                                      WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, m + 464, y + 5,
+                                      170, 24, hwnd, (HMENU)kIdRequirePrior, nullptr, nullptr);
+      y += 40;
       app->historyEdit = addRow(L"History", kIdHistoryEdit, kIdHistoryBrowse, y, L"Browse");
       y += 40;
       app->compareEdit = addRow(L"Compare", kIdCompareEdit, kIdCompareBrowse, y, L"Browse");
@@ -1115,7 +1189,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
       const HWND controls[] = {app->runButton, app->statusText, app->historyEdit,
                                app->compareEdit, app->inputEdit, app->outputEdit, app->metricsEdit,
-                               app->presetCombo};
+                               app->presetCombo, app->calibCombo, app->priorEdit, app->priorCheck};
       for (HWND c : controls) {
         SendMessageW(c, WM_SETFONT, reinterpret_cast<WPARAM>(app->font), TRUE);
       }
@@ -1168,6 +1242,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           if (!p.empty()) SetText(app->metricsEdit, p);
           return 0;
         }
+        case kIdPriorBrowse: {
+          const auto p = ChooseOpenFile(
+              hwnd, L"Open frequency prior CSV",
+              L"CSV files (*.csv)\0*.csv\0All files (*.*)\0*.*\0");
+          if (!p.empty()) {
+            SetText(app->priorEdit, p);
+          }
+          return 0;
+        }
         case kIdHistoryBrowse: {
           const auto p = ChooseOpenFile(
               hwnd, L"Open benchmark history CSV",
@@ -1206,6 +1289,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case kIdPresetCombo:
           if (HIWORD(wParam) == CBN_SELCHANGE) {
             UpdatePresetHint(app);
+            ApplyPresetUiDefaults(app);
           }
           return 0;
       }

@@ -96,6 +96,9 @@ Professional analytics dashboard (Windows GUI):
 - Includes compare overlay mode (second history CSV)
 - Hover tooltip on chart points with run id, timestamp, commit, branch, and exact metric value
 - Preset selector for decode profiles: `Default`, `Strict DX`, `Relaxed`
+- GUI controls for Phase 4 tuning:
+  - confidence calibration (`None`, `Platt`, `Isotonic`)
+  - frequency prior CSV path + `Require prior match`
 
 Tip: for automated flows and scripts, use CLI mode with explicit arguments.
 
@@ -245,6 +248,31 @@ Example:
 ```bash
 ndb_decode capture.wav out.csv --mode phase4-serious --freq-prior-file priors.csv
 ```
+
+Frequency prior CSV example is versioned at:
+
+- `benchmarks/phase4/priors.example.csv`
+
+Format:
+
+```text
+freq_hz,ID1|ID2|...
+377.0,ORI
+382.0,GAZ
+```
+
+### Phase 4 benchmark A/B script
+
+Run cross-comparison on calibration (`none|platt|isotonic`) and prior mode (`off|on`):
+
+```bash
+python tools/benchmark_phase4_calibration_priors.py
+```
+
+Outputs are written under:
+
+- `benchmarks/phase4/ab_runs/phase4_ab_summary.json`
+- `benchmarks/phase4/ab_runs/phase4_ab_summary.csv`
 
 ### Save quality metrics for comparison between versions
 

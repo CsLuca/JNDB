@@ -1,0 +1,6 @@
+# frequency priors example for Phase 4
+# format: freq_hz,ID1|ID2|ID3
+352.0,PLA
+375.0,GLA
+377.0,ORI
+382.0,GAZ
