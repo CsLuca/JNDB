@@ -493,6 +493,27 @@ Artifacts:
 - `session_001/snippets/snippet_index.csv`
 - `session_001/snippets/*.wav` (per-track evidence snippets)
 
+### Session-clean output (global unique by ID)
+
+Enable global de-duplication to one record per beacon ID for the session window:
+
+```bash
+ndb_decode capture.wav out.csv --session-clean --session-clean-strategy best-score --output-json out.json
+```
+
+Strategies:
+
+- `best-score`
+- `longest-coverage`
+- `weighted`
+
+When `--session-clean` is enabled:
+
+- CSV output contains the clean view
+- JSON output contains both views:
+  - `raw`
+  - `session_clean`
+
 ### Scenario presets
 
 Additional presets for operational contexts:

@@ -18,6 +18,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -35,6 +36,8 @@ struct CliArgs {
   std::optional<std::string> dashboardMode;
   std::optional<std::string> sessionExportDir;
   std::optional<std::string> configPath;
+  bool sessionClean = false;
+  std::string sessionCleanStrategy = "best-score";
   int streamPollMs = 1000;
   int streamIterations = 1;
   int streamTailSeconds = 0;
@@ -284,6 +287,8 @@ void PrintUsage() {
       << "  --diag-log <path.log>      Append diagnostic run logs\n"
       << "  --dashboard rich           Print minimal terminal dashboard (waterfall/tracks/timeline)\n"
       << "  --session-export <dir>     Export session evidence bundle (audio snippets + scores + params)\n"
+      << "  --session-clean            Enable global unique-by-ID output view\n"
+      << "  --session-clean-strategy <name> Merge strategy: best-score | longest-coverage | weighted\n"
       << "  --mode <preset>            Preset: default | strict-dx | relaxed | phase3-balanced | phase3-selective | phase4-serious | quiet | urban-noise | weak-signal-dx\n"
       << "  --min-confidence <float>   Keep only rows with confidence >= value\n"
       << "  --metrics <path.json>      Write quality metrics JSON\n"
@@ -390,6 +395,116 @@ bool WriteJson(const std::string& path, const std::vector<ndb::DecodeResult>& re
   return true;
 }
 
+std::vector<ndb::DecodeResult> BuildSessionClean(const std::vector<ndb::DecodeResult>& raw,
+                                                 const std::string& strategy) {
+  std::unordered_map<std::string, std::vector<const ndb::DecodeResult*>> byId;
+  for (const auto& r : raw) {
+    const std::string key = r.plausibleId.empty() ? r.text : r.plausibleId;
+    if (key.empty()) {
+      continue;
+    }
+    byId[key].push_back(&r);
+  }
+
+  std::vector<ndb::DecodeResult> out;
+  out.reserve(byId.size());
+
+  auto coverage = [](const ndb::DecodeResult& r) {
+    return std::max(0.0f, r.endSec - r.startSec);
+  };
+
+  for (auto& kv : byId) {
+    const auto& v = kv.second;
+    if (v.empty()) {
+      continue;
+    }
+
+    std::size_t best = 0;
+    auto scoreAt = [&](std::size_t i) {
+      const auto& r = *v[i];
+      if (strategy == "longest-coverage") {
+        return coverage(r);
+      }
+      if (strategy == "weighted") {
+        return 0.60f * r.compositeScore + 0.25f * r.confidence + 0.15f * coverage(r);
+      }
+      return r.compositeScore;
+    };
+    float bestScore = scoreAt(0);
+    for (std::size_t i = 1; i < v.size(); ++i) {
+      const float s = scoreAt(i);
+      if (s > bestScore) {
+        bestScore = s;
+        best = i;
+      }
+    }
+
+    ndb::DecodeResult merged = *v[best];
+    for (const auto* pr : v) {
+      merged.firstSeenSec = std::min(merged.firstSeenSec, pr->firstSeenSec);
+      merged.lastSeenSec = std::max(merged.lastSeenSec, pr->lastSeenSec);
+      merged.startSec = std::min(merged.startSec, pr->startSec);
+      merged.endSec = std::max(merged.endSec, pr->endSec);
+      if (pr != v[best]) {
+        merged.hitCount += std::max(1, pr->hitCount);
+      }
+    }
+    merged.text = kv.first;
+    merged.plausibleId = kv.first;
+    out.push_back(std::move(merged));
+  }
+
+  std::sort(out.begin(), out.end(), [](const ndb::DecodeResult& a, const ndb::DecodeResult& b) {
+    if (a.compositeScore != b.compositeScore) {
+      return a.compositeScore > b.compositeScore;
+    }
+    return a.freqHz < b.freqHz;
+  });
+  return out;
+}
+
+bool WriteJsonDual(const std::string& path, const std::vector<ndb::DecodeResult>& raw,
+                   const std::vector<ndb::DecodeResult>& clean, const ndb::DecodeStats& s,
+                   const std::string& cleanStrategy, std::string* error) {
+  std::ofstream out(path);
+  if (!out) {
+    *error = "Cannot write JSON output file: " + path;
+    return false;
+  }
+  out << "{\n";
+  out << "  \"schema_version\": \"jndb.decode.v2\",\n";
+  out << "  \"session_clean_strategy\": \"" << EscapeJson(cleanStrategy) << "\",\n";
+  out << "  \"stats\": {\n";
+  out << "    \"quality_score\": " << std::fixed << std::setprecision(3) << s.qualityScore << ",\n";
+  out << "    \"decoded_count\": " << s.decodedCount << ",\n";
+  out << "    \"track_count\": " << s.trackCount << "\n";
+  out << "  },\n";
+
+  auto writeList = [&](const char* key, const std::vector<ndb::DecodeResult>& results, bool trailComma) {
+    out << "  \"" << key << "\": [\n";
+    for (std::size_t i = 0; i < results.size(); ++i) {
+      const auto& r = results[i];
+      out << "    {\"track_id\": " << r.trackId << ", \"freq_hz\": " << std::fixed
+          << std::setprecision(2) << r.freqHz << ", \"text\": \"" << EscapeJson(r.text)
+          << "\", \"plausible_id\": \"" << EscapeJson(r.plausibleId)
+          << "\", \"confidence\": " << std::setprecision(3) << r.confidence
+          << ", \"composite_score\": " << r.compositeScore
+          << ", \"start_sec\": " << std::setprecision(3) << r.startSec
+          << ", \"end_sec\": " << r.endSec << "}";
+      if (i + 1 < results.size()) {
+        out << ',';
+      }
+      out << "\n";
+    }
+    out << "  ]" << (trailComma ? ",\n" : "\n");
+  };
+
+  writeList("raw", raw, true);
+  writeList("session_clean", clean, false);
+  out << "}\n";
+  return true;
+}
+
 void PrintRichDashboard(const std::vector<ndb::DecodeResult>& results, const ndb::DecodeStats& stats) {
   std::cout << "\n=== JNDB Dashboard (Rich) ===\n";
   std::cout << "Waterfall (synthetic density by confidence)\n";
@@ -414,7 +529,8 @@ void PrintRichDashboard(const std::vector<ndb::DecodeResult>& results, const ndb
 }
 
 bool ExportSessionEvidence(const std::string& dir, const ndb::WavData& wav,
-                           const std::vector<ndb::DecodeResult>& results,
+                           const std::vector<ndb::DecodeResult>& raw,
+                           const std::vector<ndb::DecodeResult>& clean,
                            const ndb::DecodeStats& stats, const CliArgs& args,
                            std::string* error) {
   const std::filesystem::path baseDir(dir);
@@ -439,13 +555,27 @@ bool ExportSessionEvidence(const std::string& dir, const ndb::WavData& wav,
   out << "  \"decode_threads\": " << args.cfg.decodeThreads << ",\n";
   out << "  \"seed\": " << args.cfg.deterministicSeed << ",\n";
   out << "  \"mode_stream\": " << (args.streamMode ? "true" : "false") << ",\n";
-  out << "  \"results\": [\n";
-  for (std::size_t i = 0; i < results.size(); ++i) {
-    const auto& r = results[i];
+  out << "  \"session_clean_enabled\": " << (args.sessionClean ? "true" : "false") << ",\n";
+  out << "  \"session_clean_strategy\": \"" << EscapeJson(args.sessionCleanStrategy) << "\",\n";
+  out << "  \"raw_results\": [\n";
+  for (std::size_t i = 0; i < raw.size(); ++i) {
+    const auto& r = raw[i];
     out << "    {\"track_id\":" << r.trackId << ",\"freq_hz\":" << std::fixed
         << std::setprecision(2) << r.freqHz << ",\"id\":\"" << EscapeJson(r.plausibleId)
         << "\",\"score\":" << std::setprecision(3) << r.compositeScore << "}";
-    if (i + 1 < results.size()) {
+    if (i + 1 < raw.size()) {
+      out << ',';
+    }
+    out << "\n";
+  }
+  out << "  ],\n";
+  out << "  \"session_clean_results\": [\n";
+  for (std::size_t i = 0; i < clean.size(); ++i) {
+    const auto& r = clean[i];
+    out << "    {\"track_id\":" << r.trackId << ",\"freq_hz\":" << std::fixed
+        << std::setprecision(2) << r.freqHz << ",\"id\":\"" << EscapeJson(r.plausibleId)
+        << "\",\"score\":" << std::setprecision(3) << r.compositeScore << "}";
+    if (i + 1 < clean.size()) {
       out << ',';
     }
     out << "\n";
@@ -510,7 +640,7 @@ bool ExportSessionEvidence(const std::string& dir, const ndb::WavData& wav,
   std::ofstream cue(cuePath.string());
   if (cue) {
     cue << "track_id,start_sec,end_sec,freq_hz,id,score,snippet_wav\n";
-    for (const auto& r : results) {
+    for (const auto& r : raw) {
       const std::string wavName = "track_" + std::to_string(r.trackId) + "_" +
                                   std::to_string(static_cast<int>(std::round(r.startSec * 1000.0f))) +
                                   "_" +
@@ -527,7 +657,7 @@ bool ExportSessionEvidence(const std::string& dir, const ndb::WavData& wav,
           << ',' << std::setprecision(2) << r.freqHz << ',' << r.plausibleId << ','
           << std::setprecision(3) << r.compositeScore << ',' << wavName << '\n';
     }
-    if (results.empty() && wav.sampleRate > 0 && !wav.samples.empty()) {
+    if (raw.empty() && wav.sampleRate > 0 && !wav.samples.empty()) {
       const float endSec = std::min(5.0f,
                                     static_cast<float>(wav.samples.size()) /
                                         static_cast<float>(wav.sampleRate));
@@ -636,6 +766,7 @@ bool ApplyConfigJson(const std::string& path, CliArgs* args, std::string* error)
   parseInt("stream_iterations", &args->streamIterations);
   parseInt("stream_tail_seconds", &args->streamTailSeconds);
   parseBool("stream", &args->streamMode);
+  parseBool("session_clean", &args->sessionClean);
 
   std::string mode;
   parseString("mode", &mode);
@@ -657,6 +788,16 @@ bool ApplyConfigJson(const std::string& path, CliArgs* args, std::string* error)
   parseString("diag_log", &diagLog);
   if (!diagLog.empty()) {
     args->diagnosticsLogPath = diagLog;
+  }
+  std::string scs;
+  parseString("session_clean_strategy", &scs);
+  if (!scs.empty()) {
+    if (scs != "best-score" && scs != "longest-coverage" && scs != "weighted") {
+      *error =
+          "Invalid value for session_clean_strategy in config (use: best-score, longest-coverage, weighted)";
+      return false;
+    }
+    args->sessionCleanStrategy = scs;
   }
   return true;
 }
@@ -1465,6 +1606,23 @@ bool ParseArgs(int argc, char** argv, CliArgs* out, std::string* error) {
       out->sessionExportDir = value;
       continue;
     }
+    if (token == "--session-clean") {
+      out->sessionClean = true;
+      continue;
+    }
+    if (token == "--session-clean-strategy") {
+      std::string value;
+      if (!parseOptionValue(token, &value)) {
+        return false;
+      }
+      if (value != "best-score" && value != "longest-coverage" && value != "weighted") {
+        *error =
+            "Invalid value for --session-clean-strategy (use: best-score, longest-coverage, weighted)";
+        return false;
+      }
+      out->sessionCleanStrategy = value;
+      continue;
+    }
     if (token == "--mode") {
       std::string value;
       if (!parseOptionValue(token, &value) || !ApplyModePreset(value, &out->cfg, error)) {
@@ -1604,19 +1762,24 @@ int main(int argc, char** argv) {
       results = std::move(filtered);
     }
 
+    const auto sessionClean = args.sessionClean
+                                  ? BuildSessionClean(results, args.sessionCleanStrategy)
+                                  : std::vector<ndb::DecodeResult>{};
+    const auto& effective = args.sessionClean ? sessionClean : results;
+
     if (args.outputPath.has_value()) {
-      if (!WriteCsv(*args.outputPath, results, &error)) {
+      if (!WriteCsv(*args.outputPath, effective, &error)) {
         std::cerr << error << '\n';
         return 3;
       }
       if (!args.quiet) {
-        std::cout << "Written " << results.size() << " rows to " << *args.outputPath << '\n';
+        std::cout << "Written " << effective.size() << " rows to " << *args.outputPath << '\n';
       }
     } else {
       if (!args.quiet) {
-        std::cout << "Detected candidates: " << results.size() << '\n';
+        std::cout << "Detected candidates: " << effective.size() << '\n';
       }
-      for (const auto& r : results) {
+      for (const auto& r : effective) {
         std::cout << "track=" << r.trackId << " freq=" << std::fixed << std::setprecision(2)
                   << r.freqHz << "Hz id=\"" << r.plausibleId << "\" pid="
                   << std::setprecision(3) << r.plausibleIdScore << " conf=" << r.confidence
@@ -1628,18 +1791,23 @@ int main(int argc, char** argv) {
     }
 
     if (args.outputJsonPath.has_value()) {
-      if (!WriteJson(*args.outputJsonPath, results, stats, &error)) {
+      const bool ok = args.sessionClean
+                          ? WriteJsonDual(*args.outputJsonPath, results, sessionClean, stats,
+                                          args.sessionCleanStrategy, &error)
+                          : WriteJson(*args.outputJsonPath, results, stats, &error);
+      if (!ok) {
         std::cerr << error << '\n';
         return 5;
       }
     }
 
     if (args.dashboardMode.has_value() && *args.dashboardMode == "rich") {
-      PrintRichDashboard(results, stats);
+      PrintRichDashboard(effective, stats);
     }
 
     if (args.sessionExportDir.has_value()) {
-      if (!ExportSessionEvidence(*args.sessionExportDir, wav, results, stats, args, &error)) {
+      if (!ExportSessionEvidence(*args.sessionExportDir, wav, results, sessionClean, stats, args,
+                                 &error)) {
         std::cerr << error << '\n';
         return 6;
       }
@@ -1656,11 +1824,11 @@ int main(int argc, char** argv) {
     }
 
     AppendDiagnostics(args.diagnosticsLogPath,
-                      "iter=" + std::to_string(iter) + " rows=" + std::to_string(results.size()) +
+                      "iter=" + std::to_string(iter) + " rows=" + std::to_string(effective.size()) +
                           " quality=" + std::to_string(stats.qualityScore));
 
     if (args.quiet) {
-      std::cout << "rows=" << results.size() << " quality=" << std::fixed << std::setprecision(2)
+      std::cout << "rows=" << effective.size() << " quality=" << std::fixed << std::setprecision(2)
                 << stats.qualityScore << " mean_conf=" << std::setprecision(3)
                 << stats.meanConfidence << " decode_ratio=" << stats.decodeRatio << '\n';
     } else {
