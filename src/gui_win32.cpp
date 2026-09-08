@@ -7,6 +7,8 @@
 
 #include <commctrl.h>
 #include <commdlg.h>
+#include <gdiplus.h>
+#include <windowsx.h>
 
 #include <algorithm>
 #include <atomic>
@@ -23,6 +25,7 @@
 
 #pragma comment(lib, "Comctl32.lib")
 #pragma comment(lib, "Comdlg32.lib")
+#pragma comment(lib, "Gdiplus.lib")
 
 namespace {
 
@@ -40,6 +43,10 @@ constexpr int kIdHistoryEdit = 1011;
 constexpr int kIdHistoryBrowse = 1012;
 constexpr int kIdHistoryRefresh = 1013;
 constexpr int kIdChartPanel = 1014;
+constexpr int kIdCompareEdit = 1015;
+constexpr int kIdCompareBrowse = 1016;
+constexpr int kIdExportPng = 1017;
+constexpr int kIdResetView = 1018;
 
 constexpr UINT kMsgProgress = WM_APP + 1;
 constexpr UINT kMsgDone = WM_APP + 2;
@@ -81,6 +88,7 @@ struct AppState {
   HWND statusText = nullptr;
   HWND summaryText = nullptr;
   HWND historyEdit = nullptr;
+  HWND compareEdit = nullptr;
   HWND chartPanel = nullptr;
 
   HFONT font = nullptr;
@@ -90,6 +98,12 @@ struct AppState {
   std::atomic<bool> running{false};
   std::thread worker;
   std::vector<HistoryEntry> history;
+  std::vector<HistoryEntry> historyCompare;
+  double chartZoom = 1.0;
+  int chartPanPx = 0;
+  bool dragging = false;
+  int dragStartX = 0;
+  int panStartPx = 0;
 };
 
 std::wstring ToWide(const std::string& s) {
@@ -163,6 +177,29 @@ std::wstring ChooseSaveFile(HWND owner, const wchar_t* title, const wchar_t* fil
     return fileName;
   }
   return L"";
+}
+
+int GetEncoderClsid(const WCHAR* format, CLSID* pClsid) {
+  UINT num = 0;
+  UINT size = 0;
+  Gdiplus::GetImageEncodersSize(&num, &size);
+  if (size == 0) {
+    return -1;
+  }
+  auto* pImageCodecInfo = reinterpret_cast<Gdiplus::ImageCodecInfo*>(malloc(size));
+  if (pImageCodecInfo == nullptr) {
+    return -1;
+  }
+  Gdiplus::GetImageEncoders(num, size, pImageCodecInfo);
+  for (UINT j = 0; j < num; ++j) {
+    if (wcscmp(pImageCodecInfo[j].MimeType, format) == 0) {
+      *pClsid = pImageCodecInfo[j].Clsid;
+      free(pImageCodecInfo);
+      return static_cast<int>(j);
+    }
+  }
+  free(pImageCodecInfo);
+  return -1;
 }
 
 bool WriteCsv(const std::string& path, const std::vector<ndb::DecodeResult>& results,
@@ -322,7 +359,9 @@ bool LoadHistoryCsv(const std::string& path, std::vector<HistoryEntry>* out, std
   return true;
 }
 
-void DrawMetricChart(HDC hdc, const RECT& rc, const std::vector<HistoryEntry>& history, const ChartDef& cd) {
+void DrawMetricChart(HDC hdc, const RECT& rc, const std::vector<HistoryEntry>& history,
+                     const std::vector<HistoryEntry>& compare, const ChartDef& cd,
+                     double zoom, int panPx) {
   HBRUSH panel = CreateSolidBrush(RGB(255, 255, 255));
   FillRect(hdc, &rc, panel);
   DeleteObject(panel);
@@ -343,7 +382,7 @@ void DrawMetricChart(HDC hdc, const RECT& rc, const std::vector<HistoryEntry>& h
   SetBkMode(hdc, TRANSPARENT);
   DrawTextW(hdc, cd.title.c_str(), -1, &titleRc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
 
-  if (history.size() < 2) {
+  if (history.size() < 2 && compare.size() < 2) {
     RECT msg = {rc.left + pad, rc.top + 28, rc.right - pad, rc.bottom - pad};
     SetTextColor(hdc, RGB(120, 128, 138));
     DrawTextW(hdc, L"Need >= 2 runs", -1, &msg, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
@@ -352,10 +391,18 @@ void DrawMetricChart(HDC hdc, const RECT& rc, const std::vector<HistoryEntry>& h
 
   double minV = std::numeric_limits<double>::max();
   double maxV = std::numeric_limits<double>::lowest();
-  for (const auto& e : history) {
-    const double v = e.*(cd.field);
-    minV = std::min(minV, v);
-    maxV = std::max(maxV, v);
+  auto includeRange = [&](const std::vector<HistoryEntry>& src) {
+    for (const auto& e : src) {
+      const double v = e.*(cd.field);
+      minV = std::min(minV, v);
+      maxV = std::max(maxV, v);
+    }
+  };
+  includeRange(history);
+  includeRange(compare);
+  if (minV == std::numeric_limits<double>::max()) {
+    minV = 0.0;
+    maxV = 1.0;
   }
   if (std::fabs(maxV - minV) < 1e-12) {
     maxV += 1.0;
@@ -373,31 +420,49 @@ void DrawMetricChart(HDC hdc, const RECT& rc, const std::vector<HistoryEntry>& h
   SelectObject(hdc, oldPen);
   DeleteObject(grid);
 
-  HPEN line = CreatePen(PS_SOLID, 2, cd.color);
-  oldPen = reinterpret_cast<HPEN>(SelectObject(hdc, line));
-  for (std::size_t i = 0; i < history.size(); ++i) {
-    const double v = history[i].*(cd.field);
-    const double t = static_cast<double>(i) / static_cast<double>(history.size() - 1);
-    const int x = plot.left + static_cast<int>(t * (plot.right - plot.left));
-    const double yn = (v - minV) / (maxV - minV);
-    const int y = plot.bottom - static_cast<int>(yn * (plot.bottom - plot.top));
-    if (i == 0) {
-      MoveToEx(hdc, x, y, nullptr);
-    } else {
-      LineTo(hdc, x, y);
+  auto drawSeries = [&](const std::vector<HistoryEntry>& src, COLORREF color, int dotR, bool dashed) {
+    if (src.size() < 2) {
+      return;
     }
-    HBRUSH dot = CreateSolidBrush(cd.color);
-    RECT dr = {x - 2, y - 2, x + 3, y + 3};
-    FillRect(hdc, &dr, dot);
-    DeleteObject(dot);
-  }
-  SelectObject(hdc, oldPen);
-  DeleteObject(line);
+    HPEN pen = CreatePen(dashed ? PS_DASH : PS_SOLID, 2, color);
+    auto oldP = reinterpret_cast<HPEN>(SelectObject(hdc, pen));
+    for (std::size_t i = 0; i < src.size(); ++i) {
+      const double v = src[i].*(cd.field);
+      double t = static_cast<double>(i) / static_cast<double>(src.size() - 1);
+      t = (t - 0.5) * zoom + 0.5;
+      const int x = plot.left + static_cast<int>(t * (plot.right - plot.left)) + panPx;
+      const double yn = (v - minV) / (maxV - minV);
+      const int y = plot.bottom - static_cast<int>(yn * (plot.bottom - plot.top));
+      if (i == 0) {
+        MoveToEx(hdc, x, y, nullptr);
+      } else {
+        LineTo(hdc, x, y);
+      }
+      HBRUSH dot = CreateSolidBrush(color);
+      RECT dr = {x - dotR, y - dotR, x + dotR + 1, y + dotR + 1};
+      FillRect(hdc, &dr, dot);
+      DeleteObject(dot);
+    }
+    SelectObject(hdc, oldP);
+    DeleteObject(pen);
+  };
 
-  const auto& last = history.back();
-  const auto& prev = history[history.size() - 2];
-  const double lv = last.*(cd.field);
-  const double pv = prev.*(cd.field);
+  drawSeries(compare, RGB(130, 130, 130), 1, true);
+  drawSeries(history, cd.color, 2, false);
+
+  double lv = 0.0;
+  double pv = 0.0;
+  if (history.size() >= 2) {
+    const auto& last = history.back();
+    const auto& prev = history[history.size() - 2];
+    lv = last.*(cd.field);
+    pv = prev.*(cd.field);
+  } else {
+    const auto& last = compare.back();
+    const auto& prev = compare[compare.size() - 2];
+    lv = last.*(cd.field);
+    pv = prev.*(cd.field);
+  }
   const double delta = lv - pv;
   bool good = cd.lowerIsBetter ? (delta <= 0.0) : (delta >= 0.0);
 
@@ -434,7 +499,8 @@ void DrawCharts(AppState* app, HDC hdc, const RECT& rc) {
       const int idx = r * cols + c;
       RECT cr = {rc.left + gap + c * (w + gap), rc.top + gap + r * (h + gap),
                  rc.left + gap + c * (w + gap) + w, rc.top + gap + r * (h + gap) + h};
-      DrawMetricChart(hdc, cr, app->history, defs[idx]);
+      DrawMetricChart(hdc, cr, app->history, app->historyCompare, defs[idx], app->chartZoom,
+                      app->chartPanPx);
     }
   }
 }
@@ -458,6 +524,62 @@ void RefreshHistory(AppState* app) {
   ss << L"History loaded: " << app->history.size() << L" runs";
   SetStatus(app, ss.str());
   InvalidateRect(app->chartPanel, nullptr, TRUE);
+}
+
+void RefreshCompareHistory(AppState* app) {
+  const std::string path = ToUtf8(GetText(app->compareEdit));
+  if (path.empty()) {
+    app->historyCompare.clear();
+    InvalidateRect(app->chartPanel, nullptr, TRUE);
+    return;
+  }
+  std::string error;
+  std::vector<HistoryEntry> hist;
+  if (!LoadHistoryCsv(path, &hist, &error)) {
+    SetSummary(app, L"Compare history load failed:\r\n" + ToWide(error));
+    return;
+  }
+  app->historyCompare = std::move(hist);
+  InvalidateRect(app->chartPanel, nullptr, TRUE);
+}
+
+void ExportChartPanelPng(AppState* app) {
+  if (!app || !app->chartPanel) {
+    return;
+  }
+  const std::wstring path = ChooseSaveFile(app->hwnd, L"Export dashboard PNG",
+                                           L"PNG files (*.png)\0*.png\0All files (*.*)\0*.*\0",
+                                           L"png");
+  if (path.empty()) {
+    return;
+  }
+
+  RECT rc;
+  GetClientRect(app->chartPanel, &rc);
+  const int w = rc.right - rc.left;
+  const int h = rc.bottom - rc.top;
+
+  HDC hdc = GetDC(app->chartPanel);
+  HDC memdc = CreateCompatibleDC(hdc);
+  HBITMAP bmp = CreateCompatibleBitmap(hdc, w, h);
+  auto oldBmp = reinterpret_cast<HBITMAP>(SelectObject(memdc, bmp));
+
+  DrawCharts(app, memdc, rc);
+
+  Gdiplus::Bitmap gbmp(bmp, nullptr);
+  CLSID pngClsid;
+  if (GetEncoderClsid(L"image/png", &pngClsid) < 0) {
+    MessageBoxW(app->hwnd, L"PNG encoder not available.", L"Export failed", MB_OK | MB_ICONERROR);
+  } else {
+    gbmp.Save(path.c_str(), &pngClsid, nullptr);
+    MessageBoxW(app->hwnd, L"Dashboard exported successfully.", L"Export complete",
+                MB_OK | MB_ICONINFORMATION);
+  }
+
+  SelectObject(memdc, oldBmp);
+  DeleteObject(bmp);
+  DeleteDC(memdc);
+  ReleaseDC(app->chartPanel, hdc);
 }
 
 void StartDecode(AppState* app) {
@@ -542,8 +664,32 @@ void OnDone(AppState* app, DecodeThreadResult* result) {
 }
 
 LRESULT CALLBACK ChartProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+  auto* app = reinterpret_cast<AppState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+  switch (msg) {
+    case WM_LBUTTONDOWN:
+      if (app) {
+        app->dragging = true;
+        app->dragStartX = GET_X_LPARAM(lParam);
+        app->panStartPx = app->chartPanPx;
+        SetCapture(hwnd);
+      }
+      return 0;
+    case WM_MOUSEMOVE:
+      if (app && app->dragging) {
+        const int x = GET_X_LPARAM(lParam);
+        app->chartPanPx = app->panStartPx + (x - app->dragStartX);
+        InvalidateRect(hwnd, nullptr, TRUE);
+      }
+      return 0;
+    case WM_LBUTTONUP:
+      if (app && app->dragging) {
+        app->dragging = false;
+        ReleaseCapture();
+      }
+      return 0;
+  }
+
   if (msg == WM_PAINT) {
-    auto* app = reinterpret_cast<AppState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
     PAINTSTRUCT ps;
     HDC hdc = BeginPaint(hwnd, &ps);
     RECT rc;
@@ -620,9 +766,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       app->metricsEdit = addRow(L"Metrics", kIdMetricsEdit, kIdMetricsBrowse, y, L"Browse");
       y += 40;
       app->historyEdit = addRow(L"History", kIdHistoryEdit, kIdHistoryBrowse, y, L"Browse");
+      y += 40;
+      app->compareEdit = addRow(L"Compare", kIdCompareEdit, kIdCompareBrowse, y, L"Browse");
 
       CreateWindowW(L"BUTTON", L"Refresh Charts", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, m + 260,
-                    y + 40, 194, 34, hwnd, (HMENU)kIdHistoryRefresh, nullptr, nullptr);
+                    y + 40, 130, 34, hwnd, (HMENU)kIdHistoryRefresh, nullptr, nullptr);
+      CreateWindowW(L"BUTTON", L"Reset View", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, m + 394, y + 40,
+                    120, 34, hwnd, (HMENU)kIdResetView, nullptr, nullptr);
+      CreateWindowW(L"BUTTON", L"Export PNG", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, m + 520, y + 40,
+                    120, 34, hwnd, (HMENU)kIdExportPng, nullptr, nullptr);
       app->runButton = CreateWindowW(L"BUTTON", L"Start Decode", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
                                      m + 100, y + 40, 152, 34, hwnd, (HMENU)kIdRun, nullptr, nullptr);
       y += 82;
@@ -641,13 +793,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                                        m, y, leftW - 8, 280, hwnd, (HMENU)kIdSummary, nullptr, nullptr);
       SendMessageW(app->summaryText, WM_SETFONT, reinterpret_cast<WPARAM>(app->fontMono), TRUE);
 
-      app->chartPanel = CreateWindowW(L"JNDBChartPanel", nullptr, WS_CHILD | WS_VISIBLE | WS_BORDER,
+      app->chartPanel = CreateWindowW(L"JNDBChartPanel", nullptr,
+                                      WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP,
                                       rightX, 16, rightW, 560, hwnd, (HMENU)kIdChartPanel, nullptr,
                                       nullptr);
       SetWindowLongPtrW(app->chartPanel, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(app));
 
       const HWND controls[] = {app->runButton, app->statusText, app->historyEdit,
-                               app->inputEdit, app->outputEdit, app->metricsEdit};
+                               app->compareEdit, app->inputEdit, app->outputEdit, app->metricsEdit};
       for (HWND c : controls) {
         SendMessageW(c, WM_SETFONT, reinterpret_cast<WPARAM>(app->font), TRUE);
       }
@@ -659,6 +812,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                   "benchmark_history.csv";
       SetText(app->historyEdit, hist.wstring());
       RefreshHistory(app);
+      RefreshCompareHistory(app);
       return 0;
     }
     case WM_COMMAND: {
@@ -709,8 +863,27 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           }
           return 0;
         }
+        case kIdCompareBrowse: {
+          const auto p = ChooseOpenFile(
+              hwnd, L"Open compare benchmark history CSV",
+              L"CSV files (*.csv)\0*.csv\0All files (*.*)\0*.*\0");
+          if (!p.empty()) {
+            SetText(app->compareEdit, p);
+            RefreshCompareHistory(app);
+          }
+          return 0;
+        }
         case kIdHistoryRefresh:
           RefreshHistory(app);
+          RefreshCompareHistory(app);
+          return 0;
+        case kIdResetView:
+          app->chartZoom = 1.0;
+          app->chartPanPx = 0;
+          InvalidateRect(app->chartPanel, nullptr, TRUE);
+          return 0;
+        case kIdExportPng:
+          ExportChartPanelPng(app);
           return 0;
         case kIdRun:
           StartDecode(app);
@@ -749,6 +922,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     }
     case WM_DESTROY:
       PostQuitMessage(0);
+      return 0;
+    case WM_MOUSEWHEEL:
+      if (app) {
+        const short z = GET_WHEEL_DELTA_WPARAM(wParam);
+        const double factor = z > 0 ? 1.12 : (1.0 / 1.12);
+        app->chartZoom = std::clamp(app->chartZoom * factor, 1.0, 8.0);
+        InvalidateRect(app->chartPanel, nullptr, TRUE);
+      }
       return 0;
   }
   return DefWindowProcW(hwnd, msg, wParam, lParam);

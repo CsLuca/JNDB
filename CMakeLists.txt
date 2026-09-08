@@ -28,5 +28,6 @@ if (WIN32)
   target_link_libraries(ndb_decode
     PRIVATE
       comctl32
+      gdiplus
   )
 endif()

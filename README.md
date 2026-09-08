@@ -87,6 +87,9 @@ Professional analytics dashboard (Windows GUI):
   - Quality score
 - Shows last-value delta (improving/worsening color-coded)
 - Refresh button for immediate comparison after each benchmark run
+- Supports zoom/pan exploration directly in charts
+- Exports dashboard to PNG for reports
+- Includes compare overlay mode (second history CSV)
 
 Tip: for automated flows and scripts, use CLI mode with explicit arguments.
 
