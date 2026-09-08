@@ -52,6 +52,25 @@ python tools/prepare_phase0_chunks.py \
 
 Then fill `annotations` for each chunk in the local manifest.
 
+### Semi-automatic annotation starter (recommended)
+
+After at least one benchmark run (`--run`), pre-seed annotation candidates from prediction CSV files:
+
+```bash
+python tools/seed_annotations_from_predictions.py \
+  --manifest benchmarks/phase0/gold_dataset_manifest.local.json \
+  --pred-dir benchmarks/phase0/results \
+  --min-confidence 0.7 \
+  --max-per-file 8
+```
+
+This fills each file `annotations` (or `_seed_candidates` if already annotated) with candidates marked:
+
+- `_seed_status: needs_review`
+- `_seed_confidence`
+
+Review each candidate and keep only valid ground truth events.
+
 ## Run benchmark (decode + evaluate)
 
 ```bash
