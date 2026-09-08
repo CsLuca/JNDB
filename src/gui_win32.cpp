@@ -91,6 +91,7 @@ struct AppState {
   HWND progressBar = nullptr;
   HWND statusText = nullptr;
   HWND summaryText = nullptr;
+  HWND presetHintText = nullptr;
   HWND historyEdit = nullptr;
   HWND compareEdit = nullptr;
   HWND chartPanel = nullptr;
@@ -163,6 +164,29 @@ void ApplyPresetToConfig(const std::string& mode, ndb::DecoderConfig* cfg) {
     cfg->useAmtcFull = false;
     return;
   }
+}
+
+std::wstring PresetHintFromSelection(int sel) {
+  switch (sel) {
+    case 1:
+      return L"Strict DX: conservative filter, repeated IDs required.";
+    case 2:
+      return L"Relaxed: wider detection, plausible-ID gate disabled.";
+    case 3:
+      return L"Phase3 Balanced: light band-limit only, robust default for noisy audio.";
+    case 4:
+      return L"Phase3 Selective: band-limit + soft CFAR, more selective in interference.";
+    default:
+      return L"Default: baseline profile for general-purpose decoding.";
+  }
+}
+
+void UpdatePresetHint(AppState* app) {
+  if (!app || !app->presetCombo || !app->presetHintText) {
+    return;
+  }
+  const int sel = static_cast<int>(SendMessageW(app->presetCombo, CB_GETCURSEL, 0, 0));
+  SetWindowTextW(app->presetHintText, PresetHintFromSelection(sel).c_str());
 }
 
 std::wstring ToWide(const std::string& s) {
@@ -1034,6 +1058,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       SendMessageW(app->presetCombo, CB_ADDSTRING, 0, (LPARAM)L"Phase3 Balanced");
       SendMessageW(app->presetCombo, CB_ADDSTRING, 0, (LPARAM)L"Phase3 Selective");
       SendMessageW(app->presetCombo, CB_SETCURSEL, 0, 0);
+      app->presetHintText = CreateWindowW(
+          L"STATIC", L"", WS_CHILD | WS_VISIBLE, m + 464, y + 34, 340, 28, hwnd, nullptr,
+          nullptr, nullptr);
+      SendMessageW(app->presetHintText, WM_SETFONT, reinterpret_cast<WPARAM>(app->font), TRUE);
+      UpdatePresetHint(app);
       y += 40;
       app->historyEdit = addRow(L"History", kIdHistoryEdit, kIdHistoryBrowse, y, L"Browse");
       y += 40;
@@ -1158,6 +1187,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           return 0;
         case kIdRun:
           StartDecode(app);
+          return 0;
+        case kIdPresetCombo:
+          if (HIWORD(wParam) == CBN_SELCHANGE) {
+            UpdatePresetHint(app);
+          }
           return 0;
       }
       return 0;
