@@ -56,6 +56,27 @@ ndb_decode /?
 ndb_decode <input.wav> [output.csv] [options]
 ```
 
+## GUI mode (Windows)
+
+If you start the program with no arguments on Windows, it opens a graphical interface.
+
+- Start from Explorer by double-clicking `ndb_decode.exe`
+- Or from terminal with no args:
+
+```powershell
+ndb_decode
+```
+
+GUI design goals:
+
+- Simple layout with only key actions: input WAV, output CSV, metrics JSON, start
+- Consistent controls and feedback
+- Large readable text and high-contrast neutral colors
+- Progress bar with live percent and compact quality summary
+- Responsive behavior (decode runs in background thread)
+
+Tip: for automated flows and scripts, use CLI mode with explicit arguments.
+
 ### Help switches
 
 - `/h`

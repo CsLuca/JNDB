@@ -13,7 +13,20 @@ add_executable(ndb_decode
   src/ndb_decoder.cpp
 )
 
+if (WIN32)
+  target_sources(ndb_decode PRIVATE
+    src/gui_win32.cpp
+  )
+endif()
+
 target_include_directories(ndb_decode
   PRIVATE
     src
 )
+
+if (WIN32)
+  target_link_libraries(ndb_decode
+    PRIVATE
+      comctl32
+  )
+endif()

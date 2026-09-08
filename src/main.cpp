@@ -1,6 +1,11 @@
 #include "ndb_decoder.hpp"
 #include "wav.hpp"
 
+#ifdef _WIN32
+#include "gui_win32.hpp"
+#include <windows.h>
+#endif
+
 #include <algorithm>
 #include <cstdlib>
 #include <fstream>
@@ -327,6 +332,12 @@ bool ParseArgs(int argc, char** argv, CliArgs* out, std::string* error) {
 }  // namespace
 
 int main(int argc, char** argv) {
+#ifdef _WIN32
+  if (argc == 1) {
+    return RunGuiApplication(GetModuleHandleW(nullptr), SW_SHOWDEFAULT);
+  }
+#endif
+
   if (argc < 2) {
     PrintUsage();
     return 1;
