@@ -441,6 +441,27 @@ std::vector<DecodeResult> DedupById(const std::vector<DecodeResult>& in, float f
   return out;
 }
 
+std::vector<DecodeResult> ApplyStrictBeaconMode(const std::vector<DecodeResult>& in,
+                                                int minRepeats,
+                                                int* rejectedCount) {
+  if (rejectedCount) {
+    *rejectedCount = 0;
+  }
+  if (minRepeats <= 1) {
+    return in;
+  }
+  std::vector<DecodeResult> out;
+  out.reserve(in.size());
+  for (const auto& r : in) {
+    if (r.hitCount >= minRepeats) {
+      out.push_back(r);
+    } else if (rejectedCount) {
+      ++(*rejectedCount);
+    }
+  }
+  return out;
+}
+
 }  // namespace
 
 std::vector<DecodeResult> DecodeNdbFromWav(const std::vector<float>& samples, int sampleRate,
@@ -589,10 +610,15 @@ std::vector<DecodeResult> DecodeNdbFromWav(const std::vector<float>& samples, in
   }
 
   auto dedup = DedupById(decoded, cfg.dedupFreqTolHz);
+  int strictRejected = 0;
+  if (cfg.strictBeaconMode) {
+    dedup = ApplyStrictBeaconMode(dedup, cfg.strictMinRepeats, &strictRejected);
+  }
   if (stats) {
     stats->filteredByFrequency = filteredByFreq;
     stats->dedupCount = static_cast<int>(dedup.size());
     stats->plausibleIdRejected = plausibleRejected;
+    stats->strictRejected = strictRejected;
   }
   Report(progress, 90, "dedup-id");
 

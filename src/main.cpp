@@ -60,6 +60,8 @@ void PrintUsage() {
       << "  --require-plausible-id     Keep only plausible cyclic 2-3 char beacon IDs\n"
       << "  --allow-any-id             Disable plausible ID filter\n"
       << "  --plausible-id-min <float> Plausible ID score threshold (default: 0.30)\n"
+      << "  --strict-beacon            Require repeated ID hits before emitting\n"
+      << "  --strict-min-repeats <int> Minimum hit_count for strict mode (default: 3)\n"
       << "  --min-confidence <float>   Keep only rows with confidence >= value\n"
       << "  --metrics <path.json>      Write quality metrics JSON\n"
       << "  --no-progress              Disable progress output\n"
@@ -111,6 +113,7 @@ bool WriteMetrics(const std::string& path, const ndb::DecodeStats& s, std::strin
   out << "  \"clustered_count\": " << s.clusteredCount << ",\n";
   out << "  \"dedup_count\": " << s.dedupCount << ",\n";
   out << "  \"plausible_id_rejected\": " << s.plausibleIdRejected << ",\n";
+  out << "  \"strict_rejected\": " << s.strictRejected << ",\n";
   out << "  \"decoded_count\": " << s.decodedCount << ",\n";
   out << "  \"mean_confidence\": " << std::fixed << std::setprecision(6) << s.meanConfidence
       << ",\n";
@@ -140,6 +143,7 @@ void PrintMetricsSummary(const ndb::DecodeStats& s) {
             << "  id_like_token_ratio: " << std::setprecision(3) << s.idLikeTokenRatio << "\n"
             << "  plausible_id_ratio : " << std::setprecision(3) << s.plausibleIdRatio << "\n"
             << "  mean_composite     : " << std::setprecision(3) << s.meanCompositeScore << "\n"
+            << "  strict_rejected    : " << s.strictRejected << "\n"
             << "  tracks(decoded/all): " << s.decodedCount << "/" << s.trackCount << "\n";
 }
 
@@ -373,6 +377,18 @@ bool ParseArgs(int argc, char** argv, CliArgs* out, std::string* error) {
       std::string value;
       if (!parseOptionValue(token, &value) || !ParseFloat(value, &out->cfg.plausibleIdMinScore)) {
         *error = "Invalid float for --plausible-id-min";
+        return false;
+      }
+      continue;
+    }
+    if (token == "--strict-beacon") {
+      out->cfg.strictBeaconMode = true;
+      continue;
+    }
+    if (token == "--strict-min-repeats") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseInt(value, &out->cfg.strictMinRepeats)) {
+        *error = "Invalid integer for --strict-min-repeats";
         return false;
       }
       continue;

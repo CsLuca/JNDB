@@ -127,6 +127,8 @@ Note: inside MSYS2 bash, arguments starting with `/` can be path-converted by th
 - `--require-plausible-id`: enforce plausible cyclic beacon ID filter (default on)
 - `--allow-any-id`: disable plausible ID gating
 - `--plausible-id-min <float>`: plausible ID minimum score (default `0.30`)
+- `--strict-beacon`: require repeated beacon observations before output
+- `--strict-min-repeats <int>`: minimum `hit_count` in strict mode (default `3`)
 - `--min-confidence <float>`: output filter; keep rows with confidence >= value
 - `--metrics <path.json>`: write run quality metrics JSON for trend tracking
 - `--no-progress`: disable progress output
@@ -196,12 +198,14 @@ Metrics JSON fields:
 - `track_count`, `decoded_count`, `candidate_bin_count`, `frame_count`
 - `clustered_count`, `dedup_count`, `mean_composite_score`
 - `plausible_id_rejected`, `plausible_id_ratio`
+- `strict_rejected`
 
 Phase 1 detection cleanup now includes:
 
 - frequency clustering and merge of overlapping tracks
 - repeated-ID dedup (`first_seen`, `last_seen`, `hit_count`)
 - plausible beacon ID extraction (2-3 uppercase tokens with cyclic repetition score)
+- optional strict beacon mode: emit only IDs observed at least `N` times
 - composite track score from:
   - energy
   - continuity

@@ -50,6 +50,8 @@ struct DecoderConfig {
   float dedupFreqTolHz = 2.0f;
   bool requirePlausibleId = true;
   float plausibleIdMinScore = 0.30f;
+  bool strictBeaconMode = false;
+  int strictMinRepeats = 3;
 };
 
 struct DecodeStats {
@@ -64,6 +66,7 @@ struct DecodeStats {
   int clusteredCount = 0;
   int dedupCount = 0;
   int plausibleIdRejected = 0;
+  int strictRejected = 0;
   int decodedCount = 0;
   float meanConfidence = 0.0f;
   float medianConfidence = 0.0f;
