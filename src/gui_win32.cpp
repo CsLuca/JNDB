@@ -3113,10 +3113,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       RegisterClassW(&cc);
 
       const int m = 16;
-      const int leftW = 860;
-      const int rightX = m + leftW + 12;
-      const int rightW = 1820 - rightX - m;
-      int y = 16;
+      const int fullW = 1820 - (2 * m);
+      const int leftW = fullW;
+      const int rightX = m;
+      const int rightW = fullW;
+      int y = 860;
 
       HWND title = CreateWindowW(L"STATIC", L"JNDB Professional Decoder", WS_CHILD | WS_VISIBLE,
                                  m, y, 520, 34, hwnd, nullptr, nullptr, nullptr);
@@ -3385,7 +3386,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
       app->chartPanel = CreateWindowW(L"JNDBChartPanel", nullptr,
                                       WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP,
-                                      rightX, 16, rightW, 860, hwnd, (HMENU)kIdChartPanel, nullptr,
+                                      rightX, 16, rightW, 820, hwnd, (HMENU)kIdChartPanel, nullptr,
                                       nullptr);
       SetWindowLongPtrW(app->chartPanel, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(app));
 
@@ -3951,7 +3952,7 @@ int RunGuiApplication(HINSTANCE instance, int nCmdShow) {
                                                                                               WS_CAPTION |
                                                                                               WS_SYSMENU |
                                                                                               WS_MINIMIZEBOX,
-                              CW_USEDEFAULT, CW_USEDEFAULT, 1860, 980, nullptr, nullptr, instance,
+                              CW_USEDEFAULT, CW_USEDEFAULT, 1860, 1760, nullptr, nullptr, instance,
                               &app);
   if (!hwnd) {
     return 1;
