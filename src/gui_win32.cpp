@@ -76,6 +76,9 @@ constexpr int kIdAutoBookmarkCheck = 1041;
 constexpr int kIdAutoBookmarkConfSlider = 1042;
 constexpr int kIdAutoBookmarkMidSlider = 1043;
 constexpr int kIdAutoBookmarkHighSlider = 1044;
+constexpr int kIdAutoMarkPresetDx = 1045;
+constexpr int kIdAutoMarkPresetBalanced = 1046;
+constexpr int kIdAutoMarkPresetWeak = 1047;
 
 constexpr UINT kMsgProgress = WM_APP + 1;
 constexpr UINT kMsgDone = WM_APP + 2;
@@ -628,6 +631,39 @@ void SetStatus(AppState* app, const std::wstring& s) {
 
 void SetSummary(AppState* app, const std::wstring& s) {
   SetText(app->summaryText, s);
+}
+
+void ApplyAutoMarkPreset(AppState* app, float minConf, float midThr, float highThr,
+                         const wchar_t* name) {
+  if (!app) {
+    return;
+  }
+  app->autoBookmarkMinConfidence = std::clamp(minConf, 0.30f, 0.95f);
+  app->autoBookmarkMidThreshold = std::clamp(midThr, 0.40f, 0.95f);
+  app->autoBookmarkHighThreshold = std::clamp(highThr, 0.45f, 0.98f);
+  if (app->autoBookmarkHighThreshold <= app->autoBookmarkMidThreshold) {
+    app->autoBookmarkHighThreshold = std::min(0.98f, app->autoBookmarkMidThreshold + 0.01f);
+  }
+
+  if (app->autoBookmarkConfSlider) {
+    SendMessageW(app->autoBookmarkConfSlider, TBM_SETPOS, TRUE,
+                 static_cast<LPARAM>(std::round(app->autoBookmarkMinConfidence * 100.0f)));
+  }
+  if (app->autoBookmarkMidSlider) {
+    SendMessageW(app->autoBookmarkMidSlider, TBM_SETPOS, TRUE,
+                 static_cast<LPARAM>(std::round(app->autoBookmarkMidThreshold * 100.0f)));
+  }
+  if (app->autoBookmarkHighSlider) {
+    SendMessageW(app->autoBookmarkHighSlider, TBM_SETPOS, TRUE,
+                 static_cast<LPARAM>(std::round(app->autoBookmarkHighThreshold * 100.0f)));
+  }
+
+  std::wstringstream ss;
+  ss << L"AutoMark preset " << name << L": min/mid/high " << std::fixed << std::setprecision(2)
+     << app->autoBookmarkMinConfidence << L"/" << app->autoBookmarkMidThreshold << L"/"
+     << app->autoBookmarkHighThreshold;
+  SetStatus(app, ss.str());
+  InvalidateRect(app->chartPanel, nullptr, TRUE);
 }
 
 void SetBusy(AppState* app, bool busy) {
@@ -3071,6 +3107,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                    static_cast<LPARAM>(std::round(app->autoBookmarkHighThreshold * 100.0f)));
       y += 36;
 
+      CreateWindowW(L"STATIC", L"AutoMark Preset", WS_CHILD | WS_VISIBLE, m + 1160, y + 6, 110, 22,
+                    hwnd, nullptr, nullptr, nullptr);
+      CreateWindowW(L"BUTTON", L"DX strict", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, m + 1276, y,
+                    92, 28, hwnd, (HMENU)kIdAutoMarkPresetDx, nullptr, nullptr);
+      CreateWindowW(L"BUTTON", L"Balanced", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, m + 1372, y,
+                    92, 28, hwnd, (HMENU)kIdAutoMarkPresetBalanced, nullptr, nullptr);
+      CreateWindowW(L"BUTTON", L"Weak-Sig", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, m + 1468, y,
+                    92, 28, hwnd, (HMENU)kIdAutoMarkPresetWeak, nullptr, nullptr);
+      y += 34;
+
       CreateWindowW(L"STATIC", L"Prior CSV", WS_CHILD | WS_VISIBLE, m, y + 6, 100, 22, hwnd,
                     nullptr, nullptr, nullptr);
       app->priorEdit = CreateWindowW(L"EDIT", L"",
@@ -3336,6 +3382,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           app->autoBookmarkEnabled =
               (SendMessageW(app->autoBookmarkCheck, BM_GETCHECK, 0, 0) == BST_CHECKED);
           InvalidateRect(app->chartPanel, nullptr, TRUE);
+          return 0;
+        case kIdAutoMarkPresetDx:
+          ApplyAutoMarkPreset(app, 0.78f, 0.74f, 0.88f, L"DX strict");
+          return 0;
+        case kIdAutoMarkPresetBalanced:
+          ApplyAutoMarkPreset(app, 0.65f, 0.65f, 0.85f, L"Balanced");
+          return 0;
+        case kIdAutoMarkPresetWeak:
+          ApplyAutoMarkPreset(app, 0.52f, 0.60f, 0.78f, L"Weak-Sig");
           return 0;
         case kIdPeakLockButton:
           app->peakLockEnabled = !app->peakLockEnabled;
