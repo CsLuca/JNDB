@@ -122,6 +122,11 @@ struct AppState {
   int waterfallH = 0;
   std::vector<ndb::DecodeResult> overlayRows;
   int decodeProgressPct = 0;
+  double waterfallZoom = 1.0;
+  int waterfallPanPx = 0;
+  bool waterfallDragging = false;
+  int waterfallDragStartX = 0;
+  int waterfallPanStartPx = 0;
   double chartZoom = 1.0;
   int chartPanPx = 0;
   bool dragging = false;
@@ -617,6 +622,38 @@ void EnsureWaterfallPreview(AppState* app) {
   }
 }
 
+RECT GetWaterfallPlotRect(const RECT& clientRc) {
+  const int outerGap = 10;
+  const int wfH = 360;
+  RECT wfRc = {clientRc.left + outerGap, clientRc.top + outerGap, clientRc.right - outerGap,
+               clientRc.top + wfH};
+  RECT plot = {wfRc.left + 14, wfRc.top + 34, wfRc.right - 14, wfRc.bottom - 34};
+  return plot;
+}
+
+void ComputeWaterfallSourceWindow(const AppState* app, int* srcX, int* srcW) {
+  if (!app || app->waterfallW <= 0) {
+    *srcX = 0;
+    *srcW = 0;
+    return;
+  }
+  if (app->running) {
+    const int curCol = std::clamp((app->decodeProgressPct * std::max(1, app->waterfallW - 1)) / 100,
+                                  0, std::max(0, app->waterfallW - 1));
+    const int win = std::max(120, app->waterfallW / 2);
+    *srcW = std::min(app->waterfallW, win);
+    *srcX = std::max(0, curCol - *srcW + 1);
+    return;
+  }
+
+  const double zoom = std::clamp(app->waterfallZoom, 1.0, 8.0);
+  *srcW = std::max(60, std::min(app->waterfallW,
+                                static_cast<int>(std::round(static_cast<double>(app->waterfallW) / zoom))));
+  const int maxPan = std::max(0, app->waterfallW - *srcW);
+  const int pan = std::clamp(app->waterfallPanPx, 0, maxPan);
+  *srcX = pan;
+}
+
 void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
   TRIVERTEX tv[2] = {
       {rc.left, rc.top, 0x0A00, 0x1400, 0x2200, 0x0000},
@@ -669,13 +706,7 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
   bmi.bmiHeader.biCompression = BI_RGB;
   int srcX = 0;
   int srcW = app->waterfallW;
-  if (app && app->running) {
-    const int curCol = std::clamp((app->decodeProgressPct * std::max(1, app->waterfallW - 1)) / 100,
-                                  0, std::max(0, app->waterfallW - 1));
-    const int win = std::max(120, app->waterfallW / 2);
-    srcW = std::min(app->waterfallW, win);
-    srcX = std::max(0, curCol - srcW + 1);
-  }
+  ComputeWaterfallSourceWindow(app, &srcX, &srcW);
 
   StretchDIBits(hdc, plot.left, plot.top, plot.right - plot.left, plot.bottom - plot.top,
                 srcX, 0, srcW, app->waterfallH, app->waterfallRgb.data(), &bmi, DIB_RGB_COLORS,
@@ -1154,6 +1185,8 @@ void RefreshWaterfallFromInput(AppState* app) {
   app->waterfallRgb.clear();
   app->waterfallW = 0;
   app->waterfallH = 0;
+  app->waterfallZoom = 1.0;
+  app->waterfallPanPx = 0;
 
   const std::wstring inW = GetText(app->inputEdit);
   if (inW.empty()) {
@@ -1349,9 +1382,19 @@ LRESULT CALLBACK ChartProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
   switch (msg) {
     case WM_LBUTTONDOWN:
       if (app) {
-        app->dragging = true;
-        app->dragStartX = GET_X_LPARAM(lParam);
-        app->panStartPx = app->chartPanPx;
+        const POINT p = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        const RECT wfPlot = GetWaterfallPlotRect(rc);
+        if (PtInRect(&wfPlot, p)) {
+          app->waterfallDragging = true;
+          app->waterfallDragStartX = p.x;
+          app->waterfallPanStartPx = app->waterfallPanPx;
+        } else {
+          app->dragging = true;
+          app->dragStartX = p.x;
+          app->panStartPx = app->chartPanPx;
+        }
         SetCapture(hwnd);
       }
       return 0;
@@ -1363,7 +1406,16 @@ LRESULT CALLBACK ChartProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           app->mouseLeaveArmed = true;
         }
         const POINT p = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
-        if (app->dragging) {
+        if (app->waterfallDragging) {
+          const int dx = app->waterfallDragStartX - p.x;
+          const int vis = std::max(60, static_cast<int>(std::round(
+                                       static_cast<double>(std::max(1, app->waterfallW)) /
+                                       std::max(1.0, app->waterfallZoom))));
+          const int maxPan = std::max(0, app->waterfallW - vis);
+          app->waterfallPanPx = std::clamp(app->waterfallPanStartPx + dx, 0, maxPan);
+          app->hoverActive = false;
+          InvalidateRect(hwnd, nullptr, TRUE);
+        } else if (app->dragging) {
           app->chartPanPx = app->panStartPx + (p.x - app->dragStartX);
           app->hoverActive = false;
           InvalidateRect(hwnd, nullptr, TRUE);
@@ -1383,8 +1435,9 @@ LRESULT CALLBACK ChartProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       }
       return 0;
     case WM_LBUTTONUP:
-      if (app && app->dragging) {
+      if (app && (app->dragging || app->waterfallDragging)) {
         app->dragging = false;
+        app->waterfallDragging = false;
         ReleaseCapture();
       }
       return 0;
@@ -1646,6 +1699,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case kIdResetView:
           app->chartZoom = 1.0;
           app->chartPanPx = 0;
+          app->waterfallZoom = 1.0;
+          app->waterfallPanPx = 0;
           InvalidateRect(app->chartPanel, nullptr, TRUE);
           return 0;
         case kIdExportPng:
@@ -1701,7 +1756,26 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       if (app) {
         const short z = GET_WHEEL_DELTA_WPARAM(wParam);
         const double factor = z > 0 ? 1.12 : (1.0 / 1.12);
-        app->chartZoom = std::clamp(app->chartZoom * factor, 1.0, 8.0);
+        POINT pScr = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        if (app->chartPanel) {
+          POINT pPanel = pScr;
+          ScreenToClient(app->chartPanel, &pPanel);
+          RECT rcPanel;
+          GetClientRect(app->chartPanel, &rcPanel);
+          RECT wfPlot = GetWaterfallPlotRect(rcPanel);
+          if (PtInRect(&wfPlot, pPanel)) {
+            app->waterfallZoom = std::clamp(app->waterfallZoom * factor, 1.0, 8.0);
+            const int vis = std::max(60, static_cast<int>(std::round(
+                                         static_cast<double>(std::max(1, app->waterfallW)) /
+                                         std::max(1.0, app->waterfallZoom))));
+            const int maxPan = std::max(0, app->waterfallW - vis);
+            app->waterfallPanPx = std::clamp(app->waterfallPanPx, 0, maxPan);
+          } else {
+            app->chartZoom = std::clamp(app->chartZoom * factor, 1.0, 8.0);
+          }
+        } else {
+          app->chartZoom = std::clamp(app->chartZoom * factor, 1.0, 8.0);
+        }
         InvalidateRect(app->chartPanel, nullptr, TRUE);
       }
       return 0;
