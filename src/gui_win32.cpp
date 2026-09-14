@@ -215,6 +215,13 @@ struct AppState {
   std::wstring waterfallHoverText;
   bool mouseLeaveArmed = false;
   bool suppressNextResetConfirm = false;
+  int baseClientW = 0;
+  int baseClientH = 0;
+  struct ChildLayout {
+    HWND hwnd = nullptr;
+    RECT rc = {0, 0, 0, 0};
+  };
+  std::vector<ChildLayout> childLayouts;
 };
 
 void InvalidateWaterfallCache(AppState* app);
@@ -784,6 +791,48 @@ void LoadUiState(AppState* app) {
   if (app->agcAutoCheck) {
     SendMessageW(app->agcAutoCheck, BM_SETCHECK,
                  app->agcAutoContrast ? BST_CHECKED : BST_UNCHECKED, 0);
+  }
+}
+
+void CaptureBaseChildLayout(AppState* app) {
+  if (!app || !app->hwnd) return;
+  RECT rcClient = {};
+  GetClientRect(app->hwnd, &rcClient);
+  app->baseClientW = std::max(1, static_cast<int>(rcClient.right - rcClient.left));
+  app->baseClientH = std::max(1, static_cast<int>(rcClient.bottom - rcClient.top));
+  app->childLayouts.clear();
+
+  HWND child = GetWindow(app->hwnd, GW_CHILD);
+  while (child) {
+    RECT r = {};
+    GetWindowRect(child, &r);
+    POINT tl = {r.left, r.top};
+    POINT br = {r.right, r.bottom};
+    ScreenToClient(app->hwnd, &tl);
+    ScreenToClient(app->hwnd, &br);
+    app->childLayouts.push_back(AppState::ChildLayout{child, RECT{tl.x, tl.y, br.x, br.y}});
+    child = GetWindow(child, GW_HWNDNEXT);
+  }
+}
+
+void ApplyResponsiveLayout(AppState* app) {
+  if (!app || !app->hwnd || app->baseClientW <= 0 || app->baseClientH <= 0 || app->childLayouts.empty()) {
+    return;
+  }
+  RECT rcClient = {};
+  GetClientRect(app->hwnd, &rcClient);
+  const int cw = std::max(1, static_cast<int>(rcClient.right - rcClient.left));
+  const int ch = std::max(1, static_cast<int>(rcClient.bottom - rcClient.top));
+  const double sx = static_cast<double>(cw) / static_cast<double>(app->baseClientW);
+  const double sy = static_cast<double>(ch) / static_cast<double>(app->baseClientH);
+
+  for (const auto& c : app->childLayouts) {
+    if (!IsWindow(c.hwnd)) continue;
+    const int x = static_cast<int>(std::round(c.rc.left * sx));
+    const int y = static_cast<int>(std::round(c.rc.top * sy));
+    const int w = std::max(24, static_cast<int>(std::round((c.rc.right - c.rc.left) * sx)));
+    const int h = std::max(20, static_cast<int>(std::round((c.rc.bottom - c.rc.top) * sy)));
+    MoveWindow(c.hwnd, x, y, w, h, TRUE);
   }
 }
 
@@ -3431,6 +3480,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       RefreshHistory(app);
       RefreshCompareHistory(app);
       RefreshWaterfallFromInput(app);
+      CaptureBaseChildLayout(app);
       return 0;
     }
     case WM_COMMAND: {
@@ -3835,6 +3885,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
       }
       break;
+    case WM_SIZE:
+      if (app) {
+        ApplyResponsiveLayout(app);
+      }
+      return 0;
     case kMsgProgress:
       if (app) {
         app->decodeProgressPct = static_cast<int>(wParam);
