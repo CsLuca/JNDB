@@ -681,6 +681,9 @@ void SaveUiState(AppState* app) {
   WritePrivateProfileStringW(L"view", L"colormap3d", std::to_wstring(app->colormap3d).c_str(), s);
   WritePrivateProfileStringW(L"view", L"peak_lock", app->peakLockEnabled ? L"1" : L"0", s);
 
+  WritePrivateProfileStringW(L"charts", L"zoom", std::to_wstring(app->chartZoom).c_str(), s);
+  WritePrivateProfileStringW(L"charts", L"pan", std::to_wstring(app->chartPanPx).c_str(), s);
+
   WritePrivateProfileStringW(L"agc", L"auto", app->agcAutoContrast ? L"1" : L"0", s);
   saveFloat(L"agc", L"floor", app->agcFloorOffsetDb);
   saveFloat(L"agc", L"span", app->agcSpanDb);
@@ -713,6 +716,8 @@ void LoadUiState(AppState* app) {
   app->shadingEnabled = IniReadBool(app->uiStatePath, L"view", L"shading", app->shadingEnabled);
   app->colormap3d = std::clamp(IniReadInt(app->uiStatePath, L"view", L"colormap3d", app->colormap3d), 0, 2);
   app->peakLockEnabled = IniReadBool(app->uiStatePath, L"view", L"peak_lock", app->peakLockEnabled);
+  app->chartZoom = std::clamp(static_cast<double>(IniReadFloat(app->uiStatePath, L"charts", L"zoom", static_cast<float>(app->chartZoom))), 1.0, 8.0);
+  app->chartPanPx = IniReadInt(app->uiStatePath, L"charts", L"pan", app->chartPanPx);
 
   app->agcAutoContrast = IniReadBool(app->uiStatePath, L"agc", L"auto", app->agcAutoContrast);
   app->agcFloorOffsetDb = std::clamp(IniReadFloat(app->uiStatePath, L"agc", L"floor", app->agcFloorOffsetDb), -30.0f, 30.0f);
