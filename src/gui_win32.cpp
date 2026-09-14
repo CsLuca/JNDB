@@ -1986,7 +1986,7 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
     }
     RECT hk = {map.left, map.top - 16, map.right, map.top - 1};
     SetTextColor(hdc, RGB(178, 206, 228));
-    DrawTextW(hdc, L"Hotkeys: A show auto, B/C add-clear, D del, N/P nav, 1..9 jump, E/I exp-imp",
+    DrawTextW(hdc, L"Hotkeys: A show auto, B/C add-clear, D del, N/P nav, 1..9 jump, E/I exp-imp, Ctrl+R reset",
               -1, &hk,
               DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
   }
@@ -2971,6 +2971,10 @@ LRESULT CALLBACK ChartProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         if (vk == 'I') {
           SendMessageW(GetParent(hwnd), WM_COMMAND, MAKEWPARAM(kIdBookmarkImport, BN_CLICKED), 0);
+          return 0;
+        }
+        if (vk == 'R' && (GetKeyState(VK_CONTROL) & 0x8000)) {
+          SendMessageW(GetParent(hwnd), WM_COMMAND, MAKEWPARAM(kIdResetUiSession, BN_CLICKED), 0);
           return 0;
         }
       }
