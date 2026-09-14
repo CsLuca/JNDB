@@ -702,6 +702,30 @@ void EnsureWaterfallPreview(AppState* app) {
     }
   }
 
+  // Selective denoise: smooth granular noise but preserve narrow CW/NDB ridges.
+  std::vector<float> den = norm;
+  for (int t = 1; t + 1 < spec.frameCount; ++t) {
+    for (int b = 2; b + 2 < spec.binCount; ++b) {
+      const std::size_t i = static_cast<std::size_t>(t * spec.binCount + b);
+      const float c = norm[i];
+      const float lx = std::fabs(c - norm[static_cast<std::size_t>(t * spec.binCount + (b - 1))]);
+      const float rx = std::fabs(c - norm[static_cast<std::size_t>(t * spec.binCount + (b + 1))]);
+      const float ty = std::fabs(c - norm[static_cast<std::size_t>((t - 1) * spec.binCount + b)]);
+      const float by = std::fabs(c - norm[static_cast<std::size_t>((t + 1) * spec.binCount + b)]);
+      const float edge = std::max(std::max(lx, rx), std::max(ty, by));
+      if (edge < 0.08f && c < 0.72f) {
+        const float h = 0.5f * c + 0.25f *
+                                     (norm[static_cast<std::size_t>(t * spec.binCount + (b - 1))] +
+                                      norm[static_cast<std::size_t>(t * spec.binCount + (b + 1))]);
+        const float v = 0.5f * c + 0.25f *
+                                     (norm[static_cast<std::size_t>((t - 1) * spec.binCount + b)] +
+                                      norm[static_cast<std::size_t>((t + 1) * spec.binCount + b)]);
+        den[i] = 0.55f * h + 0.45f * v;
+      }
+    }
+  }
+  norm.swap(den);
+
   auto rampHdsdr = [](float x) {
     x = std::clamp(x, 0.0f, 1.0f);
     struct Stop {
