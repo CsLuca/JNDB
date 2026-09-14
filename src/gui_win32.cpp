@@ -955,6 +955,14 @@ bool JumpToAdjacentBookmark(AppState* app, int dir) {
   return true;
 }
 
+bool JumpToBookmarkIndex(AppState* app, int index0) {
+  if (!app || index0 < 0 || index0 >= static_cast<int>(app->bookmarksSec.size())) {
+    return false;
+  }
+  SetWaterfallPanToTime(app, app->bookmarksSec[static_cast<std::size_t>(index0)]);
+  return true;
+}
+
 void UpdatePanadapterPersistence(AppState* app) {
   if (!app || app->waterfallW <= 0 || app->waterfallH <= 0 || app->waterfallDbRender.empty()) {
     return;
@@ -1393,11 +1401,19 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
     if (!app->bookmarksSec.empty() && app->previewWav.sampleRate > 0) {
       HPEN bmPen = CreatePen(PS_SOLID, 1, RGB(255, 178, 88));
       auto oldBm = reinterpret_cast<HPEN>(SelectObject(hdc, bmPen));
+      int bmIdx = 0;
       for (float tsec : app->bookmarksSec) {
         const float tn = std::clamp(tsec / std::max(0.1f, dur), 0.0f, 1.0f);
         const int xMap = map.left + static_cast<int>(tn * (map.right - map.left));
         MoveToEx(hdc, xMap, map.top + 1, nullptr);
         LineTo(hdc, xMap, map.bottom - 1);
+
+        if (bmIdx < 9) {
+          wchar_t nbuf[4] = {};
+          swprintf(nbuf, 4, L"%d", bmIdx + 1);
+          RECT nr = {xMap - 6, map.top - 14, xMap + 12, map.top - 1};
+          DrawTextW(hdc, nbuf, -1, &nr, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+        }
 
         if (tsec >= viewStart && tsec <= viewEnd) {
           const float vxn = (tsec - viewStart) / std::max(0.1f, viewDur);
@@ -1405,6 +1421,7 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
           MoveToEx(hdc, xPlot, plot.top + 2, nullptr);
           LineTo(hdc, xPlot, plot.bottom - 14);
         }
+        ++bmIdx;
       }
       SelectObject(hdc, oldBm);
       DeleteObject(bmPen);
@@ -1417,7 +1434,7 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
     DrawTextW(hdc, bss.str().c_str(), -1, &br, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
     RECT hk = {map.left, map.top - 16, map.right, map.top - 1};
     SetTextColor(hdc, RGB(178, 206, 228));
-    DrawTextW(hdc, L"Hotkeys: B add, C clear, N/P next-prev", -1, &hk,
+    DrawTextW(hdc, L"Hotkeys: B add, C clear, N/P nav, 1..9 jump", -1, &hk,
               DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
   }
 
@@ -2346,6 +2363,16 @@ LRESULT CALLBACK ChartProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (vk == 'P') {
           if (JumpToAdjacentBookmark(app, -1)) {
             SetStatus(app, L"Previous bookmark [P]");
+            InvalidateRect(hwnd, nullptr, TRUE);
+          }
+          return 0;
+        }
+        if (vk >= '1' && vk <= '9') {
+          const int idx = static_cast<int>(vk - '1');
+          if (JumpToBookmarkIndex(app, idx)) {
+            std::wstringstream ss;
+            ss << L"Bookmark " << (idx + 1) << L" [" << static_cast<wchar_t>(vk) << L"]";
+            SetStatus(app, ss.str());
             InvalidateRect(hwnd, nullptr, TRUE);
           }
           return 0;
