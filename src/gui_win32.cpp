@@ -1261,6 +1261,67 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
     DeleteObject(vpPen);
   }
 
+  // RF Zoom lane around peak-lock (local magnifier like SDR narrow view)
+  if (app->peakLockEnabled && app->peakLockBin >= 0 && srcW > 4 && !app->waterfallRgb.empty()) {
+    RECT zr = {plot.right - 190, plot.top + 26, plot.right - 10, plot.bottom - 24};
+    HBRUSH zbg = CreateSolidBrush(RGB(6, 12, 20));
+    FillRect(hdc, &zr, zbg);
+    DeleteObject(zbg);
+    HPEN zb = CreatePen(PS_SOLID, 1, RGB(72, 106, 140));
+    auto oldZ = reinterpret_cast<HPEN>(SelectObject(hdc, zb));
+    MoveToEx(hdc, zr.left, zr.top, nullptr);
+    LineTo(hdc, zr.right - 1, zr.top);
+    LineTo(hdc, zr.right - 1, zr.bottom - 1);
+    LineTo(hdc, zr.left, zr.bottom - 1);
+    LineTo(hdc, zr.left, zr.top);
+    SelectObject(hdc, oldZ);
+    DeleteObject(zb);
+
+    const int spanBins = std::max(18, std::min(44, app->waterfallH / 12));
+    const int row0 = std::max(0, app->peakLockBin - spanBins);
+    const int row1 = std::min(app->waterfallH - 1, app->peakLockBin + spanBins);
+    const int srcH = std::max(1, row1 - row0 + 1);
+    const int srcCols = std::max(1, srcW);
+    std::vector<std::uint8_t> lane(static_cast<std::size_t>(srcCols * srcH * 3), 0);
+    for (int yy = 0; yy < srcH; ++yy) {
+      const int row = row0 + yy;
+      for (int xx = 0; xx < srcCols; ++xx) {
+        const int col = std::clamp(srcX + xx, 0, app->waterfallW - 1);
+        const std::size_t sidx = static_cast<std::size_t>((row * app->waterfallW + col) * 3);
+        const std::size_t didx = static_cast<std::size_t>((yy * srcCols + xx) * 3);
+        lane[didx + 0] = app->waterfallRgb[sidx + 0];
+        lane[didx + 1] = app->waterfallRgb[sidx + 1];
+        lane[didx + 2] = app->waterfallRgb[sidx + 2];
+      }
+    }
+
+    BITMAPINFO lbi = {};
+    lbi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    lbi.bmiHeader.biWidth = srcCols;
+    lbi.bmiHeader.biHeight = -srcH;
+    lbi.bmiHeader.biPlanes = 1;
+    lbi.bmiHeader.biBitCount = 24;
+    lbi.bmiHeader.biCompression = BI_RGB;
+    StretchDIBits(hdc, zr.left + 6, zr.top + 16, zr.right - zr.left - 12, zr.bottom - zr.top - 24,
+                  0, 0, srcCols, srcH, lane.data(), &lbi, DIB_RGB_COLORS, SRCCOPY);
+
+    const int cy = zr.top + 16 + ((zr.bottom - zr.top - 24) * (app->peakLockBin - row0)) /
+                                std::max(1, srcH - 1);
+    HPEN lk = CreatePen(PS_SOLID, 2, RGB(170, 255, 186));
+    auto oldL = reinterpret_cast<HPEN>(SelectObject(hdc, lk));
+    MoveToEx(hdc, zr.left + 6, cy, nullptr);
+    LineTo(hdc, zr.right - 6, cy);
+    SelectObject(hdc, oldL);
+    DeleteObject(lk);
+
+    RECT zt = {zr.left + 8, zr.top + 2, zr.right - 8, zr.top + 16};
+    std::wstringstream zs;
+    zs << L"RF Zoom " << std::fixed << std::setprecision(3) << (app->peakLockHz / 1000.0f)
+       << L" kHz";
+    SetTextColor(hdc, RGB(170, 230, 198));
+    DrawTextW(hdc, zs.str().c_str(), -1, &zt, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+  }
+
   if (app && app->waterfallHoverActive && PtInRect(&plot, app->waterfallHoverPoint)) {
     HPEN cr = CreatePen(PS_SOLID, 1, RGB(255, 255, 180));
     auto oldCr = reinterpret_cast<HPEN>(SelectObject(hdc, cr));
