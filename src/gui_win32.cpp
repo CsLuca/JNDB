@@ -55,6 +55,7 @@ constexpr int kIdCalibCombo = 1020;
 constexpr int kIdPriorEdit = 1021;
 constexpr int kIdPriorBrowse = 1022;
 constexpr int kIdRequirePrior = 1023;
+constexpr int kIdWaterfallViewCombo = 1024;
 
 constexpr UINT kMsgProgress = WM_APP + 1;
 constexpr UINT kMsgDone = WM_APP + 2;
@@ -99,6 +100,7 @@ struct AppState {
   HWND calibCombo = nullptr;
   HWND priorEdit = nullptr;
   HWND priorCheck = nullptr;
+  HWND waterfallViewCombo = nullptr;
   HWND runButton = nullptr;
   HWND progressBar = nullptr;
   HWND statusText = nullptr;
@@ -122,6 +124,7 @@ struct AppState {
   int waterfallH = 0;
   std::vector<ndb::DecodeResult> overlayRows;
   int decodeProgressPct = 0;
+  int waterfallViewMode = 1;  // 0: 2D only, 1: 2D+3D, 2: 3D large
   double waterfallZoom = 1.0;
   int waterfallPanPx = 0;
   bool waterfallDragging = false;
@@ -655,6 +658,7 @@ void ComputeWaterfallSourceWindow(const AppState* app, int* srcX, int* srcW) {
 }
 
 void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
+  const int viewMode = app ? app->waterfallViewMode : 1;
   TRIVERTEX tv[2] = {
       {rc.left, rc.top, 0x0A00, 0x1400, 0x2200, 0x0000},
       {rc.right, rc.bottom, 0x1100, 0x2200, 0x3800, 0x0000},
@@ -794,6 +798,66 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
   }
   SelectObject(hdc, oldTickPen);
   DeleteObject(tickPen);
+
+  if (viewMode != 0 && app->waterfallW > 4 && app->waterfallH > 8) {
+    RECT mini;
+    if (viewMode == 2) {
+      mini = {plot.left + 8, plot.top + 8, plot.right - 8, plot.top + (plot.bottom - plot.top) / 2};
+    } else {
+      mini = {plot.right - (plot.right - plot.left) / 3, plot.top + 10, plot.right - 12,
+              plot.top + (plot.bottom - plot.top) / 2};
+    }
+    HBRUSH miniBg = CreateSolidBrush(RGB(10, 18, 30));
+    FillRect(hdc, &mini, miniBg);
+    DeleteObject(miniBg);
+    HPEN miniBorder = CreatePen(PS_SOLID, 1, RGB(60, 90, 124));
+    auto oldMiniPen = reinterpret_cast<HPEN>(SelectObject(hdc, miniBorder));
+    MoveToEx(hdc, mini.left, mini.top, nullptr);
+    LineTo(hdc, mini.right - 1, mini.top);
+    LineTo(hdc, mini.right - 1, mini.bottom - 1);
+    LineTo(hdc, mini.left, mini.bottom - 1);
+    LineTo(hdc, mini.left, mini.top);
+    SelectObject(hdc, oldMiniPen);
+    DeleteObject(miniBorder);
+
+    const int depth = 20;
+    const int stride = std::max(1, srcW / depth);
+    const int ampPx = std::max<int>(10, static_cast<int>((mini.bottom - mini.top) / 4));
+    const int depthStep =
+        std::max<int>(2, static_cast<int>((mini.bottom - mini.top) / (depth + 2)));
+    const int freqStep = std::max(1, app->waterfallH / 56);
+    std::vector<POINT> pts;
+    pts.reserve(static_cast<std::size_t>((app->waterfallH / freqStep) + 4));
+
+    for (int d = 0; d < depth; ++d) {
+      const int col = std::clamp(srcX + srcW - 1 - d * stride, 0, app->waterfallW - 1);
+      pts.clear();
+      for (int yb = 0; yb < app->waterfallH; yb += freqStep) {
+        const int x = mini.left + ((mini.right - mini.left - 8) * yb) / std::max(1, app->waterfallH - 1) + 4;
+        const std::size_t idx = static_cast<std::size_t>((yb * app->waterfallW + col) * 3);
+        const float lum = (0.11f * app->waterfallRgb[idx + 0] + 0.59f * app->waterfallRgb[idx + 1] +
+                           0.30f * app->waterfallRgb[idx + 2]) /
+                          255.0f;
+        const int base = mini.bottom - 6 - d * depthStep;
+        const int y = base - static_cast<int>(lum * ampPx);
+        pts.push_back(POINT{x, y});
+      }
+      if (pts.size() >= 2) {
+        const int g = std::clamp(150 + d * 5, 120, 240);
+        const int b = std::clamp(210 + d * 2, 170, 255);
+        HPEN ridge = CreatePen(PS_SOLID, 1, RGB(90, g, b));
+        auto oldR = reinterpret_cast<HPEN>(SelectObject(hdc, ridge));
+        Polyline(hdc, pts.data(), static_cast<int>(pts.size()));
+        SelectObject(hdc, oldR);
+        DeleteObject(ridge);
+      }
+    }
+
+    RECT miniLbl = {mini.left + 6, mini.top + 2, mini.right - 6, mini.top + 18};
+    SetTextColor(hdc, RGB(170, 205, 235));
+    DrawTextW(hdc, viewMode == 2 ? L"3D Intensity (Large)" : L"3D Intensity", -1, &miniLbl,
+              DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+  }
 
   if (!app->overlayRows.empty() && app->previewWav.sampleRate > 0) {
     const float nyq = 0.5f * static_cast<float>(app->previewWav.sampleRate);
@@ -1558,6 +1622,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       SendMessageW(app->calibCombo, CB_ADDSTRING, 0, (LPARAM)L"Platt");
       SendMessageW(app->calibCombo, CB_ADDSTRING, 0, (LPARAM)L"Isotonic");
       SendMessageW(app->calibCombo, CB_SETCURSEL, 0, 0);
+      CreateWindowW(L"STATIC", L"Waterfall", WS_CHILD | WS_VISIBLE, m + 280, y + 6, 70, 22, hwnd,
+                    nullptr, nullptr, nullptr);
+      app->waterfallViewCombo = CreateWindowW(
+          L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | WS_VSCROLL | CBS_DROPDOWNLIST, m + 352, y,
+          180, 120, hwnd, (HMENU)kIdWaterfallViewCombo, nullptr, nullptr);
+      SendMessageW(app->waterfallViewCombo, CB_ADDSTRING, 0, (LPARAM)L"2D only");
+      SendMessageW(app->waterfallViewCombo, CB_ADDSTRING, 0, (LPARAM)L"2D + 3D");
+      SendMessageW(app->waterfallViewCombo, CB_ADDSTRING, 0, (LPARAM)L"3D large");
+      SendMessageW(app->waterfallViewCombo, CB_SETCURSEL, 1, 0);
       y += 40;
 
       CreateWindowW(L"STATIC", L"Prior CSV", WS_CHILD | WS_VISIBLE, m, y + 6, 100, 22, hwnd,
@@ -1608,7 +1681,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
       const HWND controls[] = {app->runButton, app->statusText, app->historyEdit,
                                app->compareEdit, app->inputEdit, app->outputEdit, app->metricsEdit,
-                               app->presetCombo, app->calibCombo, app->priorEdit, app->priorCheck};
+                               app->presetCombo, app->calibCombo, app->waterfallViewCombo,
+                               app->priorEdit, app->priorCheck};
       for (HWND c : controls) {
         SendMessageW(c, WM_SETFONT, reinterpret_cast<WPARAM>(app->font), TRUE);
       }
@@ -1713,6 +1787,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           if (HIWORD(wParam) == CBN_SELCHANGE) {
             UpdatePresetHint(app);
             ApplyPresetUiDefaults(app);
+          }
+          return 0;
+        case kIdWaterfallViewCombo:
+          if (HIWORD(wParam) == CBN_SELCHANGE && app->waterfallViewCombo) {
+            const int sel = static_cast<int>(SendMessageW(app->waterfallViewCombo, CB_GETCURSEL, 0, 0));
+            app->waterfallViewMode = std::clamp(sel, 0, 2);
+            InvalidateRect(app->chartPanel, nullptr, TRUE);
           }
           return 0;
       }
