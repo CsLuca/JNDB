@@ -650,6 +650,10 @@ bool IniReadBool(const std::wstring& path, const wchar_t* section, const wchar_t
   return v != 0;
 }
 
+int IniReadInt(const std::wstring& path, const wchar_t* section, const wchar_t* key, int defVal) {
+  return static_cast<int>(GetPrivateProfileIntW(section, key, defVal, path.c_str()));
+}
+
 void SaveUiState(AppState* app) {
   if (!app || app->uiStatePath.empty()) {
     return;
@@ -666,6 +670,13 @@ void SaveUiState(AppState* app) {
   saveFloat(L"min_conf", app->autoBookmarkMinConfidence);
   saveFloat(L"mid_thr", app->autoBookmarkMidThreshold);
   saveFloat(L"high_thr", app->autoBookmarkHighThreshold);
+
+  WritePrivateProfileStringW(L"view", L"mode", std::to_wstring(app->waterfallViewMode).c_str(), s);
+  WritePrivateProfileStringW(L"view", L"yaw", std::to_wstring(app->yawDeg).c_str(), s);
+  WritePrivateProfileStringW(L"view", L"pitch", std::to_wstring(app->pitchDeg).c_str(), s);
+  WritePrivateProfileStringW(L"view", L"fps", std::to_wstring(app->waterfallFps).c_str(), s);
+  WritePrivateProfileStringW(L"view", L"zoom", std::to_wstring(app->waterfallZoom).c_str(), s);
+  WritePrivateProfileStringW(L"view", L"pan", std::to_wstring(app->waterfallPanPx).c_str(), s);
 }
 
 void LoadUiState(AppState* app) {
@@ -684,6 +695,13 @@ void LoadUiState(AppState* app) {
     app->autoBookmarkHighThreshold = std::min(0.98f, app->autoBookmarkMidThreshold + 0.01f);
   }
 
+  app->waterfallViewMode = std::clamp(IniReadInt(app->uiStatePath, L"view", L"mode", app->waterfallViewMode), 0, 2);
+  app->yawDeg = std::clamp(IniReadInt(app->uiStatePath, L"view", L"yaw", app->yawDeg), 10, 75);
+  app->pitchDeg = std::clamp(IniReadInt(app->uiStatePath, L"view", L"pitch", app->pitchDeg), 8, 60);
+  app->waterfallFps = std::clamp(IniReadInt(app->uiStatePath, L"view", L"fps", app->waterfallFps), 10, 120);
+  app->waterfallZoom = std::clamp(static_cast<double>(IniReadFloat(app->uiStatePath, L"view", L"zoom", static_cast<float>(app->waterfallZoom))), 1.0, 8.0);
+  app->waterfallPanPx = std::max(0, IniReadInt(app->uiStatePath, L"view", L"pan", app->waterfallPanPx));
+
   if (app->autoBookmarkCheck) {
     SendMessageW(app->autoBookmarkCheck, BM_SETCHECK,
                  app->autoBookmarkEnabled ? BST_CHECKED : BST_UNCHECKED, 0);
@@ -699,6 +717,18 @@ void LoadUiState(AppState* app) {
   if (app->autoBookmarkHighSlider) {
     SendMessageW(app->autoBookmarkHighSlider, TBM_SETPOS, TRUE,
                  static_cast<LPARAM>(std::round(app->autoBookmarkHighThreshold * 100.0f)));
+  }
+  if (app->waterfallViewCombo) {
+    SendMessageW(app->waterfallViewCombo, CB_SETCURSEL, app->waterfallViewMode, 0);
+  }
+  if (app->yawSlider) {
+    SendMessageW(app->yawSlider, TBM_SETPOS, TRUE, app->yawDeg);
+  }
+  if (app->pitchSlider) {
+    SendMessageW(app->pitchSlider, TBM_SETPOS, TRUE, app->pitchDeg);
+  }
+  if (app->waterfallFpsCombo) {
+    SendMessageW(app->waterfallFpsCombo, CB_SETCURSEL, app->waterfallFps >= 60 ? 1 : 0, 0);
   }
 }
 
@@ -2892,6 +2922,7 @@ LRESULT CALLBACK ChartProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         app->dragging = false;
         app->waterfallDragging = false;
         ReleaseCapture();
+        SaveUiState(app);
       }
       return 0;
     case WM_RBUTTONDOWN:
@@ -3346,6 +3377,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           app->chartPanPx = 0;
           app->waterfallZoom = 1.0;
           app->waterfallPanPx = 0;
+          SaveUiState(app);
           InvalidateRect(app->chartPanel, nullptr, TRUE);
           return 0;
         case kIdExportPng:
@@ -3364,6 +3396,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           if (HIWORD(wParam) == CBN_SELCHANGE && app->waterfallViewCombo) {
             const int sel = static_cast<int>(SendMessageW(app->waterfallViewCombo, CB_GETCURSEL, 0, 0));
             app->waterfallViewMode = std::clamp(sel, 0, 2);
+            SaveUiState(app);
             InvalidateRect(app->chartPanel, nullptr, TRUE);
           }
           return 0;
@@ -3431,6 +3464,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           if (app->running) {
             SetTimer(app->hwnd, kWaterfallTimerId, WaterfallTimerMs(app), nullptr);
           }
+          SaveUiState(app);
           InvalidateWaterfallCache(app);
           InvalidateRect(app->chartPanel, nullptr, TRUE);
           return 0;
@@ -3441,6 +3475,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (app->running) {
               SetTimer(app->hwnd, kWaterfallTimerId, WaterfallTimerMs(app), nullptr);
             }
+            SaveUiState(app);
             InvalidateRect(app->chartPanel, nullptr, TRUE);
           }
           return 0;
@@ -3566,11 +3601,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         HWND src = reinterpret_cast<HWND>(lParam);
         if (src == app->yawSlider) {
           app->yawDeg = static_cast<int>(SendMessageW(app->yawSlider, TBM_GETPOS, 0, 0));
+          SaveUiState(app);
           InvalidateRect(app->chartPanel, nullptr, TRUE);
           return 0;
         }
         if (src == app->pitchSlider) {
           app->pitchDeg = static_cast<int>(SendMessageW(app->pitchSlider, TBM_GETPOS, 0, 0));
+          SaveUiState(app);
           InvalidateRect(app->chartPanel, nullptr, TRUE);
           return 0;
         }
@@ -3705,6 +3742,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         } else {
           app->chartZoom = std::clamp(app->chartZoom * factor, 1.0, 8.0);
         }
+        SaveUiState(app);
         InvalidateRect(app->chartPanel, nullptr, TRUE);
       }
       return 0;
