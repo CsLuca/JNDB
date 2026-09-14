@@ -66,6 +66,7 @@ constexpr int kIdAgcFloorSlider = 1031;
 constexpr int kIdAgcSpanSlider = 1032;
 constexpr int kIdAgcGainSlider = 1033;
 constexpr int kIdAgcGammaSlider = 1034;
+constexpr int kIdAgcAutoCheck = 1035;
 
 constexpr UINT kMsgProgress = WM_APP + 1;
 constexpr UINT kMsgDone = WM_APP + 2;
@@ -120,6 +121,7 @@ struct AppState {
   HWND agcSpanSlider = nullptr;
   HWND agcGainSlider = nullptr;
   HWND agcGammaSlider = nullptr;
+  HWND agcAutoCheck = nullptr;
   HWND runButton = nullptr;
   HWND progressBar = nullptr;
   HWND statusText = nullptr;
@@ -162,6 +164,7 @@ struct AppState {
   float agcSpanDb = 22.0f;
   float agcGain = 1.35f;
   float agcGamma = 0.72f;
+  bool agcAutoContrast = true;
   double waterfallZoom = 1.0;
   int waterfallPanPx = 0;
   bool waterfallDragging = false;
@@ -676,6 +679,14 @@ void EnsureWaterfallPreview(AppState* app) {
 
   float floorDb = percentile(dbVals, 0.20f) + app->agcFloorOffsetDb;
   float spanDb = std::clamp(app->agcSpanDb, 8.0f, 80.0f);
+  if (app->agcAutoContrast) {
+    const float p10 = percentile(dbVals, 0.10f);
+    const float p85 = percentile(dbVals, 0.85f);
+    const float p995 = percentile(dbVals, 0.995f);
+    floorDb = 0.65f * floorDb + 0.35f * p10;
+    const float autoSpan = std::clamp((p995 - p85) + 24.0f, 10.0f, 56.0f);
+    spanDb = 0.55f * spanDb + 0.45f * autoSpan;
+  }
   float ceilDb = floorDb + spanDb;
   app->panMinDb = floorDb;
   app->panMaxDb = ceilDb;
@@ -2293,6 +2304,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       SendMessageW(app->agcGammaSlider, TBM_SETRANGEMAX, FALSE, 160);
       SendMessageW(app->agcGammaSlider, TBM_SETPOS, TRUE,
                    static_cast<LPARAM>(std::round(app->agcGamma * 100.0f)));
+      app->agcAutoCheck = CreateWindowW(L"BUTTON", L"Auto Contrast",
+                                        WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                                        m + 874, y + 4, 130, 24, hwnd,
+                                        (HMENU)kIdAgcAutoCheck, nullptr, nullptr);
+      SendMessageW(app->agcAutoCheck, BM_SETCHECK,
+                   app->agcAutoContrast ? BST_CHECKED : BST_UNCHECKED, 0);
       y += 36;
 
       CreateWindowW(L"STATIC", L"Prior CSV", WS_CHILD | WS_VISIBLE, m, y + 6, 100, 22, hwnd,
@@ -2347,7 +2364,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                                app->yawSlider, app->pitchSlider, app->shadingCheck,
                                app->colormapCombo, app->waterfallFpsCombo,
                                app->agcFloorSlider, app->agcSpanSlider, app->agcGainSlider,
-                               app->agcGammaSlider,
+                               app->agcGammaSlider, app->agcAutoCheck,
                                app->priorEdit, app->priorCheck};
       for (HWND c : controls) {
         SendMessageW(c, WM_SETFONT, reinterpret_cast<WPARAM>(app->font), TRUE);
@@ -2485,6 +2502,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           app->agcSpanDb = 20.0f;
           app->agcGain = 1.50f;
           app->agcGamma = 0.68f;
+          app->agcAutoContrast = true;
           if (app->waterfallViewCombo) {
             SendMessageW(app->waterfallViewCombo, CB_SETCURSEL, app->waterfallViewMode, 0);
           }
@@ -2518,6 +2536,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             SendMessageW(app->agcGammaSlider, TBM_SETPOS, TRUE,
                          static_cast<LPARAM>(std::round(app->agcGamma * 100.0f)));
           }
+          if (app->agcAutoCheck) {
+            SendMessageW(app->agcAutoCheck, BM_SETCHECK,
+                         app->agcAutoContrast ? BST_CHECKED : BST_UNCHECKED, 0);
+          }
           if (app->running) {
             SetTimer(app->hwnd, kWaterfallTimerId, WaterfallTimerMs(app), nullptr);
           }
@@ -2533,6 +2555,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
             InvalidateRect(app->chartPanel, nullptr, TRUE);
           }
+          return 0;
+        case kIdAgcAutoCheck:
+          app->agcAutoContrast =
+              (SendMessageW(app->agcAutoCheck, BM_GETCHECK, 0, 0) == BST_CHECKED);
+          InvalidateWaterfallCache(app);
+          InvalidateRect(app->chartPanel, nullptr, TRUE);
           return 0;
       }
       return 0;
