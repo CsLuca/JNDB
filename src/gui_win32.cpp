@@ -147,6 +147,7 @@ struct AppState {
   std::vector<float> panPeakDb;
   float panMinDb = -120.0f;
   float panMaxDb = -20.0f;
+  int panLastCol = -1;
   std::vector<ndb::DecodeResult> overlayRows;
   int decodeProgressPct = 0;
   double decodeProgressVisualPct = 0.0;
@@ -792,6 +793,39 @@ void ComputeWaterfallSourceWindow(const AppState* app, int* srcX, int* srcW) {
   const int maxPan = std::max(0, app->waterfallW - *srcW);
   const int pan = std::clamp(app->waterfallPanPx, 0, maxPan);
   *srcX = pan;
+}
+
+void UpdatePanadapterPersistence(AppState* app) {
+  if (!app || app->waterfallW <= 0 || app->waterfallH <= 0 || app->waterfallDbRender.empty()) {
+    return;
+  }
+  if (app->panInstantDb.size() != static_cast<std::size_t>(app->waterfallH)) {
+    app->panInstantDb.assign(static_cast<std::size_t>(app->waterfallH), app->panMinDb);
+  }
+  if (app->panAvgDb.size() != static_cast<std::size_t>(app->waterfallH)) {
+    app->panAvgDb.assign(static_cast<std::size_t>(app->waterfallH), app->panMinDb);
+  }
+  if (app->panPeakDb.size() != static_cast<std::size_t>(app->waterfallH)) {
+    app->panPeakDb.assign(static_cast<std::size_t>(app->waterfallH), app->panMinDb);
+  }
+
+  const int col = std::clamp(
+      static_cast<int>((std::clamp(app->decodeProgressVisualPct, 0.0, 100.0) / 100.0) *
+                       std::max(1, app->waterfallW - 1)),
+      0, app->waterfallW - 1);
+  if (col == app->panLastCol) {
+    return;
+  }
+  app->panLastCol = col;
+
+  for (int y = 0; y < app->waterfallH; ++y) {
+    const float inst = app->waterfallDbRender[static_cast<std::size_t>(y * app->waterfallW + col)];
+    app->panInstantDb[static_cast<std::size_t>(y)] = inst;
+    app->panAvgDb[static_cast<std::size_t>(y)] =
+        0.92f * app->panAvgDb[static_cast<std::size_t>(y)] + 0.08f * inst;
+    const float decayed = app->panPeakDb[static_cast<std::size_t>(y)] - 0.12f;
+    app->panPeakDb[static_cast<std::size_t>(y)] = std::max(decayed, inst);
+  }
 }
 
 void DrawPanadapter(HDC hdc, const RECT& rc, const AppState* app) {
@@ -1744,6 +1778,7 @@ void InvalidateWaterfallCache(AppState* app) {
   app->panInstantDb.clear();
   app->panAvgDb.clear();
   app->panPeakDb.clear();
+  app->panLastCol = -1;
   app->waterfallW = 0;
   app->waterfallH = 0;
 }
@@ -2524,6 +2559,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case kMsgProgress:
       if (app) {
         app->decodeProgressPct = static_cast<int>(wParam);
+        UpdatePanadapterPersistence(app);
         SendMessageW(app->progressBar, PBM_SETPOS, static_cast<int>(wParam), 0);
         std::wstringstream ss;
         ss << L"Processing... " << static_cast<int>(wParam) << L"%";
@@ -2601,6 +2637,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           app->decodeProgressVisualPct += 0.45;
         }
         app->decodeProgressVisualPct = std::clamp(app->decodeProgressVisualPct, 0.0, 100.0);
+        UpdatePanadapterPersistence(app);
         InvalidateRect(app->chartPanel, nullptr, TRUE);
       }
       return 0;
