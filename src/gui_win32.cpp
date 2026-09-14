@@ -56,6 +56,11 @@ constexpr int kIdPriorEdit = 1021;
 constexpr int kIdPriorBrowse = 1022;
 constexpr int kIdRequirePrior = 1023;
 constexpr int kIdWaterfallViewCombo = 1024;
+constexpr int kIdYawSlider = 1025;
+constexpr int kIdPitchSlider = 1026;
+constexpr int kIdShadingCheck = 1027;
+constexpr int kIdColormapCombo = 1028;
+constexpr int kIdWaterfallDxPreset = 1029;
 
 constexpr UINT kMsgProgress = WM_APP + 1;
 constexpr UINT kMsgDone = WM_APP + 2;
@@ -101,6 +106,10 @@ struct AppState {
   HWND priorEdit = nullptr;
   HWND priorCheck = nullptr;
   HWND waterfallViewCombo = nullptr;
+  HWND yawSlider = nullptr;
+  HWND pitchSlider = nullptr;
+  HWND shadingCheck = nullptr;
+  HWND colormapCombo = nullptr;
   HWND runButton = nullptr;
   HWND progressBar = nullptr;
   HWND statusText = nullptr;
@@ -125,6 +134,10 @@ struct AppState {
   std::vector<ndb::DecodeResult> overlayRows;
   int decodeProgressPct = 0;
   int waterfallViewMode = 1;  // 0: 2D only, 1: 2D+3D, 2: 3D large
+  int yawDeg = 36;
+  int pitchDeg = 24;
+  bool shadingEnabled = true;
+  int colormap3d = 0;
   double waterfallZoom = 1.0;
   int waterfallPanPx = 0;
   bool waterfallDragging = false;
@@ -820,42 +833,101 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
     SelectObject(hdc, oldMiniPen);
     DeleteObject(miniBorder);
 
-    const int depth = 20;
+    const int depth = (viewMode == 2) ? 34 : 22;
+    const int freqSamples = (viewMode == 2) ? 78 : 52;
     const int stride = std::max(1, srcW / depth);
-    const int ampPx = std::max<int>(10, static_cast<int>((mini.bottom - mini.top) / 4));
-    const int depthStep =
-        std::max<int>(2, static_cast<int>((mini.bottom - mini.top) / (depth + 2)));
-    const int freqStep = std::max(1, app->waterfallH / 56);
-    std::vector<POINT> pts;
-    pts.reserve(static_cast<std::size_t>((app->waterfallH / freqStep) + 4));
+    const int ampPx = std::max<int>(12, static_cast<int>((mini.bottom - mini.top) / 3));
+    const int pad = 8;
+    const float sx = static_cast<float>(std::max(60L, (mini.right - mini.left - pad * 2))) * 0.62f;
+    const float sy = static_cast<float>(std::max(40L, (mini.bottom - mini.top - pad * 2))) * 0.36f;
+    const float ox = static_cast<float>(mini.left + pad + 24);
+    const float oy = static_cast<float>(mini.bottom - pad - 6);
 
+    const float yaw = static_cast<float>(app->yawDeg) * 3.1415926f / 180.0f;
+    const float pitch = static_cast<float>(app->pitchDeg) * 3.1415926f / 180.0f;
+    const float cy = std::cos(yaw);
+    const float syaw = std::sin(yaw);
+    const float cp = std::cos(pitch);
+    const float sp = std::sin(pitch);
+
+    auto project = [&](float u, float v, float z) {
+      const float x = (u - 0.5f) * 2.0f;
+      const float y = (v - 0.5f) * 2.0f;
+      const float zz = z;
+      const float xr = cy * x - syaw * y;
+      const float yr = syaw * x + cy * y;
+      const float zr = cp * zz - sp * yr;
+      const float yr2 = sp * zz + cp * yr;
+      const float px = ox + xr * sx;
+      const float py = oy - (0.55f * yr2 * sy + zr * static_cast<float>(ampPx));
+      return POINT{static_cast<LONG>(std::round(px)), static_cast<LONG>(std::round(py))};
+    };
+
+    std::vector<std::vector<POINT>> mesh(static_cast<std::size_t>(depth),
+                                         std::vector<POINT>(static_cast<std::size_t>(freqSamples)));
     for (int d = 0; d < depth; ++d) {
       const int col = std::clamp(srcX + srcW - 1 - d * stride, 0, app->waterfallW - 1);
-      pts.clear();
-      for (int yb = 0; yb < app->waterfallH; yb += freqStep) {
-        const int x = mini.left + ((mini.right - mini.left - 8) * yb) / std::max(1, app->waterfallH - 1) + 4;
+      const float v = static_cast<float>(d) / static_cast<float>(std::max(1, depth - 1));
+      for (int i = 0; i < freqSamples; ++i) {
+        const int yb = (i * std::max(1, app->waterfallH - 1)) / std::max(1, freqSamples - 1);
+        const float u = static_cast<float>(i) / static_cast<float>(std::max(1, freqSamples - 1));
         const std::size_t idx = static_cast<std::size_t>((yb * app->waterfallW + col) * 3);
         const float lum = (0.11f * app->waterfallRgb[idx + 0] + 0.59f * app->waterfallRgb[idx + 1] +
                            0.30f * app->waterfallRgb[idx + 2]) /
                           255.0f;
-        const int base = mini.bottom - 6 - d * depthStep;
-        const int y = base - static_cast<int>(lum * ampPx);
-        pts.push_back(POINT{x, y});
+        const float z = std::pow(std::clamp(lum, 0.0f, 1.0f), 0.75f);
+        mesh[static_cast<std::size_t>(d)][static_cast<std::size_t>(i)] = project(u, v, z);
       }
-      if (pts.size() >= 2) {
-        const int g = std::clamp(150 + d * 5, 120, 240);
-        const int b = std::clamp(210 + d * 2, 170, 255);
-        HPEN ridge = CreatePen(PS_SOLID, 1, RGB(90, g, b));
-        auto oldR = reinterpret_cast<HPEN>(SelectObject(hdc, ridge));
-        Polyline(hdc, pts.data(), static_cast<int>(pts.size()));
-        SelectObject(hdc, oldR);
-        DeleteObject(ridge);
+    }
+
+    auto mapColor = [&](int d) {
+      const float t = static_cast<float>(d) / static_cast<float>(std::max(1, depth - 1));
+      int r = 90;
+      int g = 170;
+      int b = 235;
+      if (app->colormap3d == 1) {
+        r = static_cast<int>(40 + 210 * t);
+        g = static_cast<int>(180 - 70 * t);
+        b = static_cast<int>(220 - 170 * t);
+      } else if (app->colormap3d == 2) {
+        r = static_cast<int>(70 + 170 * t);
+        g = static_cast<int>(90 + 130 * t);
+        b = static_cast<int>(255 - 210 * t);
       }
+      if (app->shadingEnabled) {
+        const float shade = 0.72f + 0.28f * t;
+        r = static_cast<int>(std::clamp(r * shade, 0.0f, 255.0f));
+        g = static_cast<int>(std::clamp(g * shade, 0.0f, 255.0f));
+        b = static_cast<int>(std::clamp(b * shade, 0.0f, 255.0f));
+      }
+      return RGB(r, g, b);
+    };
+
+    for (int d = depth - 1; d >= 0; --d) {
+      HPEN rowPen = CreatePen(PS_SOLID, 1, mapColor(d));
+      auto oldR = reinterpret_cast<HPEN>(SelectObject(hdc, rowPen));
+      Polyline(hdc, mesh[static_cast<std::size_t>(d)].data(), freqSamples);
+      SelectObject(hdc, oldR);
+      DeleteObject(rowPen);
+    }
+
+    const int colStep = std::max(2, depth / 7);
+    for (int d = 0; d < depth; d += colStep) {
+      HPEN colPen = CreatePen(PS_SOLID, 1, RGB(76, 122, 178));
+      auto oldC = reinterpret_cast<HPEN>(SelectObject(hdc, colPen));
+      for (int i = 1; i < freqSamples; ++i) {
+        MoveToEx(hdc, mesh[static_cast<std::size_t>(d)][static_cast<std::size_t>(i - 1)].x,
+                 mesh[static_cast<std::size_t>(d)][static_cast<std::size_t>(i - 1)].y, nullptr);
+        LineTo(hdc, mesh[static_cast<std::size_t>(d)][static_cast<std::size_t>(i)].x,
+               mesh[static_cast<std::size_t>(d)][static_cast<std::size_t>(i)].y);
+      }
+      SelectObject(hdc, oldC);
+      DeleteObject(colPen);
     }
 
     RECT miniLbl = {mini.left + 6, mini.top + 2, mini.right - 6, mini.top + 18};
     SetTextColor(hdc, RGB(170, 205, 235));
-    DrawTextW(hdc, viewMode == 2 ? L"3D Intensity (Large)" : L"3D Intensity", -1, &miniLbl,
+    DrawTextW(hdc, viewMode == 2 ? L"3D Surface (Large)" : L"3D Surface", -1, &miniLbl,
               DT_LEFT | DT_SINGLELINE | DT_VCENTER);
   }
 
@@ -1560,9 +1632,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       RegisterClassW(&cc);
 
       const int m = 16;
-      const int leftW = 470;
+      const int leftW = 820;
       const int rightX = m + leftW + 12;
-      const int rightW = 950 - rightX - m;
+      const int rightW = 1520 - rightX - m;
       int y = 16;
 
       HWND title = CreateWindowW(L"STATIC", L"JNDB Professional Decoder", WS_CHILD | WS_VISIBLE,
@@ -1633,6 +1705,43 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       SendMessageW(app->waterfallViewCombo, CB_SETCURSEL, 1, 0);
       y += 40;
 
+      CreateWindowW(L"STATIC", L"Yaw", WS_CHILD | WS_VISIBLE, m, y + 6, 36, 22, hwnd, nullptr,
+                    nullptr, nullptr);
+      app->yawSlider = CreateWindowW(TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | TBS_AUTOTICKS,
+                                     m + 40, y, 160, 28, hwnd, (HMENU)kIdYawSlider, nullptr,
+                                     nullptr);
+      SendMessageW(app->yawSlider, TBM_SETRANGEMIN, FALSE, 10);
+      SendMessageW(app->yawSlider, TBM_SETRANGEMAX, FALSE, 75);
+      SendMessageW(app->yawSlider, TBM_SETPOS, TRUE, app->yawDeg);
+
+      CreateWindowW(L"STATIC", L"Pitch", WS_CHILD | WS_VISIBLE, m + 212, y + 6, 40, 22, hwnd,
+                    nullptr, nullptr, nullptr);
+      app->pitchSlider = CreateWindowW(TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | TBS_AUTOTICKS,
+                                       m + 256, y, 160, 28, hwnd, (HMENU)kIdPitchSlider, nullptr,
+                                       nullptr);
+      SendMessageW(app->pitchSlider, TBM_SETRANGEMIN, FALSE, 8);
+      SendMessageW(app->pitchSlider, TBM_SETRANGEMAX, FALSE, 60);
+      SendMessageW(app->pitchSlider, TBM_SETPOS, TRUE, app->pitchDeg);
+
+      app->shadingCheck = CreateWindowW(L"BUTTON", L"Directional shading",
+                                        WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, m + 430, y + 4,
+                                        150, 24, hwnd, (HMENU)kIdShadingCheck, nullptr, nullptr);
+      SendMessageW(app->shadingCheck, BM_SETCHECK, BST_CHECKED, 0);
+
+      CreateWindowW(L"STATIC", L"3D Colormap", WS_CHILD | WS_VISIBLE, m + 588, y + 6, 88, 22,
+                    hwnd, nullptr, nullptr, nullptr);
+      app->colormapCombo = CreateWindowW(L"COMBOBOX", L"",
+                                         WS_CHILD | WS_VISIBLE | WS_VSCROLL | CBS_DROPDOWNLIST,
+                                         m + 676, y, 120, 110, hwnd,
+                                         (HMENU)kIdColormapCombo, nullptr, nullptr);
+      SendMessageW(app->colormapCombo, CB_ADDSTRING, 0, (LPARAM)L"Aurora");
+      SendMessageW(app->colormapCombo, CB_ADDSTRING, 0, (LPARAM)L"Magma");
+      SendMessageW(app->colormapCombo, CB_ADDSTRING, 0, (LPARAM)L"Neon");
+      SendMessageW(app->colormapCombo, CB_SETCURSEL, 0, 0);
+      CreateWindowW(L"BUTTON", L"3D DX Weak Preset", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                    m + 808, y, 156, 30, hwnd, (HMENU)kIdWaterfallDxPreset, nullptr, nullptr);
+      y += 38;
+
       CreateWindowW(L"STATIC", L"Prior CSV", WS_CHILD | WS_VISIBLE, m, y + 6, 100, 22, hwnd,
                     nullptr, nullptr, nullptr);
       app->priorEdit = CreateWindowW(L"EDIT", L"",
@@ -1670,19 +1779,20 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
       app->summaryText = CreateWindowW(L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_MULTILINE |
                                                      ES_READONLY | WS_VSCROLL,
-                                       m, y, leftW - 8, 280, hwnd, (HMENU)kIdSummary, nullptr, nullptr);
+                                       m, y, leftW - 8, 440, hwnd, (HMENU)kIdSummary, nullptr, nullptr);
       SendMessageW(app->summaryText, WM_SETFONT, reinterpret_cast<WPARAM>(app->fontMono), TRUE);
 
       app->chartPanel = CreateWindowW(L"JNDBChartPanel", nullptr,
                                       WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP,
-                                      rightX, 16, rightW, 560, hwnd, (HMENU)kIdChartPanel, nullptr,
+                                      rightX, 16, rightW, 760, hwnd, (HMENU)kIdChartPanel, nullptr,
                                       nullptr);
       SetWindowLongPtrW(app->chartPanel, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(app));
 
       const HWND controls[] = {app->runButton, app->statusText, app->historyEdit,
                                app->compareEdit, app->inputEdit, app->outputEdit, app->metricsEdit,
                                app->presetCombo, app->calibCombo, app->waterfallViewCombo,
-                               app->priorEdit, app->priorCheck};
+                               app->yawSlider, app->pitchSlider, app->shadingCheck,
+                               app->colormapCombo, app->priorEdit, app->priorCheck};
       for (HWND c : controls) {
         SendMessageW(c, WM_SETFONT, reinterpret_cast<WPARAM>(app->font), TRUE);
       }
@@ -1796,9 +1906,60 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             InvalidateRect(app->chartPanel, nullptr, TRUE);
           }
           return 0;
+        case kIdShadingCheck:
+          app->shadingEnabled =
+              (SendMessageW(app->shadingCheck, BM_GETCHECK, 0, 0) == BST_CHECKED);
+          InvalidateRect(app->chartPanel, nullptr, TRUE);
+          return 0;
+        case kIdColormapCombo:
+          if (HIWORD(wParam) == CBN_SELCHANGE && app->colormapCombo) {
+            const int sel = static_cast<int>(SendMessageW(app->colormapCombo, CB_GETCURSEL, 0, 0));
+            app->colormap3d = std::clamp(sel, 0, 2);
+            InvalidateRect(app->chartPanel, nullptr, TRUE);
+          }
+          return 0;
+        case kIdWaterfallDxPreset:
+          app->waterfallViewMode = 2;
+          app->yawDeg = 44;
+          app->pitchDeg = 31;
+          app->shadingEnabled = true;
+          app->colormap3d = 1;
+          if (app->waterfallViewCombo) {
+            SendMessageW(app->waterfallViewCombo, CB_SETCURSEL, app->waterfallViewMode, 0);
+          }
+          if (app->yawSlider) {
+            SendMessageW(app->yawSlider, TBM_SETPOS, TRUE, app->yawDeg);
+          }
+          if (app->pitchSlider) {
+            SendMessageW(app->pitchSlider, TBM_SETPOS, TRUE, app->pitchDeg);
+          }
+          if (app->shadingCheck) {
+            SendMessageW(app->shadingCheck, BM_SETCHECK,
+                         app->shadingEnabled ? BST_CHECKED : BST_UNCHECKED, 0);
+          }
+          if (app->colormapCombo) {
+            SendMessageW(app->colormapCombo, CB_SETCURSEL, app->colormap3d, 0);
+          }
+          InvalidateRect(app->chartPanel, nullptr, TRUE);
+          return 0;
       }
       return 0;
     }
+    case WM_HSCROLL:
+      if (app) {
+        HWND src = reinterpret_cast<HWND>(lParam);
+        if (src == app->yawSlider) {
+          app->yawDeg = static_cast<int>(SendMessageW(app->yawSlider, TBM_GETPOS, 0, 0));
+          InvalidateRect(app->chartPanel, nullptr, TRUE);
+          return 0;
+        }
+        if (src == app->pitchSlider) {
+          app->pitchDeg = static_cast<int>(SendMessageW(app->pitchSlider, TBM_GETPOS, 0, 0));
+          InvalidateRect(app->chartPanel, nullptr, TRUE);
+          return 0;
+        }
+      }
+      break;
     case kMsgProgress:
       if (app) {
         app->decodeProgressPct = static_cast<int>(wParam);
@@ -1893,7 +2054,7 @@ int RunGuiApplication(HINSTANCE instance, int nCmdShow) {
                                                                                               WS_CAPTION |
                                                                                               WS_SYSMENU |
                                                                                               WS_MINIMIZEBOX,
-                              CW_USEDEFAULT, CW_USEDEFAULT, 980, 640, nullptr, nullptr, instance,
+                              CW_USEDEFAULT, CW_USEDEFAULT, 1560, 860, nullptr, nullptr, instance,
                               &app);
   if (!hwnd) {
     return 1;
