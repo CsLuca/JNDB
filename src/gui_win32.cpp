@@ -179,8 +179,10 @@ struct AppState {
   int peakLockBin = -1;
   float peakLockHz = 0.0f;
   std::vector<float> bookmarksSec;
+  std::vector<std::uint8_t> bookmarkAuto;
   bool autoBookmarkEnabled = true;
   float autoBookmarkMinConfidence = 0.65f;
+  bool showAutoBookmarks = true;
   double waterfallZoom = 1.0;
   int waterfallPanPx = 0;
   bool waterfallDragging = false;
@@ -497,7 +499,7 @@ bool WriteMetrics(const std::string& path, const ndb::DecodeStats& s, std::strin
 }
 
 bool WriteBookmarksCsv(const std::string& path, const std::vector<float>& bookmarksSec,
-                       std::string* error) {
+                       const std::vector<std::uint8_t>& bookmarkAuto, std::string* error) {
   std::ofstream out(path);
   if (!out) {
     if (error) {
@@ -505,17 +507,26 @@ bool WriteBookmarksCsv(const std::string& path, const std::vector<float>& bookma
     }
     return false;
   }
-  out << "index,time_sec\n";
+  out << "index,time_sec,type\n";
   for (std::size_t i = 0; i < bookmarksSec.size(); ++i) {
-    out << (i + 1) << ',' << std::fixed << std::setprecision(3) << bookmarksSec[i] << '\n';
+    const bool isAuto = (i < bookmarkAuto.size() && bookmarkAuto[i] != 0);
+    out << (i + 1) << ',' << std::fixed << std::setprecision(3) << bookmarksSec[i] << ','
+        << (isAuto ? "auto" : "manual") << '\n';
   }
   return true;
 }
 
-bool ReadBookmarksCsv(const std::string& path, std::vector<float>* bookmarksSec, std::string* error) {
+bool ReadBookmarksCsv(const std::string& path, std::vector<float>* bookmarksSec,
+                      std::vector<std::uint8_t>* bookmarkAuto, std::string* error) {
   if (!bookmarksSec) {
     if (error) {
       *error = "Internal error: bookmarks target is null";
+    }
+    return false;
+  }
+  if (!bookmarkAuto) {
+    if (error) {
+      *error = "Internal error: bookmark auto target is null";
     }
     return false;
   }
@@ -527,7 +538,11 @@ bool ReadBookmarksCsv(const std::string& path, std::vector<float>* bookmarksSec,
     return false;
   }
   std::string line;
-  std::vector<float> parsed;
+  struct Rec {
+    float t = 0.0f;
+    std::uint8_t autoFlag = 0;
+  };
+  std::vector<Rec> parsed;
   bool headerSkipped = false;
   while (std::getline(in, line)) {
     if (line.empty()) {
@@ -539,22 +554,38 @@ bool ReadBookmarksCsv(const std::string& path, std::vector<float>* bookmarksSec,
         continue;
       }
     }
-    const std::size_t c = line.find(',');
-    std::string t = (c == std::string::npos) ? line : line.substr(c + 1);
+    const std::size_t c0 = line.find(',');
+    const std::size_t c1 = (c0 == std::string::npos) ? std::string::npos : line.find(',', c0 + 1);
+    std::string t = (c0 == std::string::npos)
+                        ? line
+                        : (c1 == std::string::npos ? line.substr(c0 + 1) : line.substr(c0 + 1, c1 - c0 - 1));
+    std::string type = (c1 == std::string::npos) ? "manual" : line.substr(c1 + 1);
     try {
       float v = std::stof(t);
       if (std::isfinite(v) && v >= 0.0f) {
-        parsed.push_back(v);
+        Rec r;
+        r.t = v;
+        r.autoFlag = (type.find("auto") != std::string::npos || type.find("AUTO") != std::string::npos)
+                         ? 1
+                         : 0;
+        parsed.push_back(r);
       }
     } catch (...) {
     }
   }
-  std::sort(parsed.begin(), parsed.end());
-  parsed.erase(std::unique(parsed.begin(), parsed.end(), [](float a, float b) {
-                 return std::fabs(a - b) <= 0.05f;
-               }),
-               parsed.end());
-  *bookmarksSec = std::move(parsed);
+  std::sort(parsed.begin(), parsed.end(), [](const Rec& a, const Rec& b) { return a.t < b.t; });
+  std::vector<float> tOut;
+  std::vector<std::uint8_t> aOut;
+  for (const auto& r : parsed) {
+    if (!tOut.empty() && std::fabs(tOut.back() - r.t) <= 0.05f) {
+      aOut.back() = static_cast<std::uint8_t>(aOut.back() & r.autoFlag);
+      continue;
+    }
+    tOut.push_back(r.t);
+    aOut.push_back(r.autoFlag);
+  }
+  *bookmarksSec = std::move(tOut);
+  *bookmarkAuto = std::move(aOut);
   return true;
 }
 
@@ -942,16 +973,19 @@ void AddBookmarkAtCurrent(AppState* app) {
   if (dur <= 0.0f) {
     return;
   }
-  for (float t : app->bookmarksSec) {
-    if (std::fabs(t - tSec) <= 0.08f) {
+  for (std::size_t i = 0; i < app->bookmarksSec.size(); ++i) {
+    if (std::fabs(app->bookmarksSec[i] - tSec) <= 0.08f) {
+      if (i < app->bookmarkAuto.size()) {
+        app->bookmarkAuto[i] = 0;
+      }
       return;
     }
   }
   app->bookmarksSec.push_back(std::clamp(tSec, 0.0f, dur));
-  std::sort(app->bookmarksSec.begin(), app->bookmarksSec.end());
+  app->bookmarkAuto.push_back(0);
 }
 
-void AddBookmarkAtTime(AppState* app, float tSec) {
+void AddBookmarkAtTime(AppState* app, float tSec, bool automatic) {
   if (!app) {
     return;
   }
@@ -959,13 +993,40 @@ void AddBookmarkAtTime(AppState* app, float tSec) {
   if (dur <= 0.0f) {
     return;
   }
-  for (float t : app->bookmarksSec) {
-    if (std::fabs(t - tSec) <= 0.08f) {
+  for (std::size_t i = 0; i < app->bookmarksSec.size(); ++i) {
+    if (std::fabs(app->bookmarksSec[i] - tSec) <= 0.08f) {
+      if (i < app->bookmarkAuto.size() && !automatic) {
+        app->bookmarkAuto[i] = 0;
+      }
       return;
     }
   }
   app->bookmarksSec.push_back(std::clamp(tSec, 0.0f, dur));
-  std::sort(app->bookmarksSec.begin(), app->bookmarksSec.end());
+  app->bookmarkAuto.push_back(automatic ? 1 : 0);
+
+  std::vector<std::size_t> idx(app->bookmarksSec.size());
+  for (std::size_t i = 0; i < idx.size(); ++i) idx[i] = i;
+  std::sort(idx.begin(), idx.end(), [&](std::size_t a, std::size_t b) {
+    return app->bookmarksSec[a] < app->bookmarksSec[b];
+  });
+  std::vector<float> t2;
+  std::vector<std::uint8_t> a2;
+  t2.reserve(idx.size());
+  a2.reserve(idx.size());
+  for (std::size_t i : idx) {
+    t2.push_back(app->bookmarksSec[i]);
+    a2.push_back((i < app->bookmarkAuto.size()) ? app->bookmarkAuto[i] : 0);
+  }
+  app->bookmarksSec.swap(t2);
+  app->bookmarkAuto.swap(a2);
+}
+
+bool BookmarkVisible(const AppState* app, std::size_t idx) {
+  if (!app || idx >= app->bookmarksSec.size()) {
+    return false;
+  }
+  const bool isAuto = (idx < app->bookmarkAuto.size() && app->bookmarkAuto[idx] != 0);
+  return (!isAuto) || app->showAutoBookmarks;
 }
 
 bool JumpToBookmarkFromMapClick(AppState* app, const RECT& mapRc, POINT p) {
@@ -979,7 +1040,9 @@ bool JumpToBookmarkFromMapClick(AppState* app, const RECT& mapRc, POINT p) {
 
   float bestT = -1.0f;
   int bestDx = 999999;
-  for (float tsec : app->bookmarksSec) {
+  for (std::size_t i = 0; i < app->bookmarksSec.size(); ++i) {
+    if (!BookmarkVisible(app, i)) continue;
+    const float tsec = app->bookmarksSec[i];
     const float tn = std::clamp(tsec / std::max(0.1f, dur), 0.0f, 1.0f);
     const int x = mapRc.left + static_cast<int>(tn * (mapRc.right - mapRc.left - 1));
     const int dx = std::abs(p.x - x);
@@ -1012,6 +1075,7 @@ bool RemoveBookmarkFromMapClick(AppState* app, const RECT& mapRc, POINT p) {
   std::size_t bestIdx = 0;
   int bestDx = 999999;
   for (std::size_t i = 0; i < app->bookmarksSec.size(); ++i) {
+    if (!BookmarkVisible(app, i)) continue;
     const float tn = std::clamp(app->bookmarksSec[i] / std::max(0.1f, dur), 0.0f, 1.0f);
     const int x = mapRc.left + static_cast<int>(tn * (mapRc.right - mapRc.left - 1));
     const int dx = std::abs(p.x - x);
@@ -1024,6 +1088,9 @@ bool RemoveBookmarkFromMapClick(AppState* app, const RECT& mapRc, POINT p) {
     return false;
   }
   app->bookmarksSec.erase(app->bookmarksSec.begin() + static_cast<std::ptrdiff_t>(bestIdx));
+  if (bestIdx < app->bookmarkAuto.size()) {
+    app->bookmarkAuto.erase(app->bookmarkAuto.begin() + static_cast<std::ptrdiff_t>(bestIdx));
+  }
   return true;
 }
 
@@ -1049,31 +1116,52 @@ bool JumpToAdjacentBookmark(AppState* app, int dir) {
   }
   const float now = CurrentBookmarkTimeSec(app);
   if (dir >= 0) {
-    for (float t : app->bookmarksSec) {
+    for (std::size_t i = 0; i < app->bookmarksSec.size(); ++i) {
+      if (!BookmarkVisible(app, i)) continue;
+      const float t = app->bookmarksSec[i];
       if (t > now + 0.05f) {
         SetWaterfallPanToTime(app, t);
         return true;
       }
     }
-    SetWaterfallPanToTime(app, app->bookmarksSec.front());
-    return true;
+    for (std::size_t i = 0; i < app->bookmarksSec.size(); ++i) {
+      if (BookmarkVisible(app, i)) {
+        SetWaterfallPanToTime(app, app->bookmarksSec[i]);
+        return true;
+      }
+    }
+    return false;
   }
-  for (auto it = app->bookmarksSec.rbegin(); it != app->bookmarksSec.rend(); ++it) {
-    if (*it < now - 0.05f) {
-      SetWaterfallPanToTime(app, *it);
+  for (std::size_t i = app->bookmarksSec.size(); i-- > 0;) {
+    if (!BookmarkVisible(app, i)) continue;
+    if (app->bookmarksSec[i] < now - 0.05f) {
+      SetWaterfallPanToTime(app, app->bookmarksSec[i]);
       return true;
     }
   }
-  SetWaterfallPanToTime(app, app->bookmarksSec.back());
-  return true;
+  for (std::size_t i = app->bookmarksSec.size(); i-- > 0;) {
+    if (BookmarkVisible(app, i)) {
+      SetWaterfallPanToTime(app, app->bookmarksSec[i]);
+      return true;
+    }
+  }
+  return false;
 }
 
 bool JumpToBookmarkIndex(AppState* app, int index0) {
-  if (!app || index0 < 0 || index0 >= static_cast<int>(app->bookmarksSec.size())) {
+  if (!app || index0 < 0) {
     return false;
   }
-  SetWaterfallPanToTime(app, app->bookmarksSec[static_cast<std::size_t>(index0)]);
-  return true;
+  int visIdx = 0;
+  for (std::size_t i = 0; i < app->bookmarksSec.size(); ++i) {
+    if (!BookmarkVisible(app, i)) continue;
+    if (visIdx == index0) {
+      SetWaterfallPanToTime(app, app->bookmarksSec[i]);
+      return true;
+    }
+    ++visIdx;
+  }
+  return false;
 }
 
 bool RemoveBookmarkNearestCurrent(AppState* app) {
@@ -1084,13 +1172,20 @@ bool RemoveBookmarkNearestCurrent(AppState* app) {
   std::size_t bestIdx = 0;
   float bestDt = std::numeric_limits<float>::max();
   for (std::size_t i = 0; i < app->bookmarksSec.size(); ++i) {
+    if (!BookmarkVisible(app, i)) continue;
     const float dt = std::fabs(app->bookmarksSec[i] - now);
     if (dt < bestDt) {
       bestDt = dt;
       bestIdx = i;
     }
   }
+  if (bestDt == std::numeric_limits<float>::max()) {
+    return false;
+  }
   app->bookmarksSec.erase(app->bookmarksSec.begin() + static_cast<std::ptrdiff_t>(bestIdx));
+  if (bestIdx < app->bookmarkAuto.size()) {
+    app->bookmarkAuto.erase(app->bookmarkAuto.begin() + static_cast<std::ptrdiff_t>(bestIdx));
+  }
   return true;
 }
 
@@ -1530,10 +1625,17 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
     DeleteObject(vpPen);
 
     if (!app->bookmarksSec.empty() && app->previewWav.sampleRate > 0) {
-      HPEN bmPen = CreatePen(PS_SOLID, 1, RGB(255, 178, 88));
-      auto oldBm = reinterpret_cast<HPEN>(SelectObject(hdc, bmPen));
+      HPEN bmManual = CreatePen(PS_SOLID, 1, RGB(255, 178, 88));
+      HPEN bmAuto = CreatePen(PS_SOLID, 1, RGB(120, 212, 255));
+      auto oldBm = reinterpret_cast<HPEN>(SelectObject(hdc, bmManual));
       int bmIdx = 0;
-      for (float tsec : app->bookmarksSec) {
+      int shownCount = 0;
+      int autoCount = 0;
+      for (std::size_t i = 0; i < app->bookmarksSec.size(); ++i) {
+        if (!BookmarkVisible(app, i)) continue;
+        const float tsec = app->bookmarksSec[i];
+        const bool isAuto = (i < app->bookmarkAuto.size() && app->bookmarkAuto[i] != 0);
+        SelectObject(hdc, isAuto ? bmAuto : bmManual);
         const float tn = std::clamp(tsec / std::max(0.1f, dur), 0.0f, 1.0f);
         const int xMap = map.left + static_cast<int>(tn * (map.right - map.left));
         MoveToEx(hdc, xMap, map.top + 1, nullptr);
@@ -1552,22 +1654,27 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
           MoveToEx(hdc, xPlot, plot.top + 2, nullptr);
           LineTo(hdc, xPlot, plot.bottom - 14);
         }
+        ++shownCount;
+        autoCount += isAuto ? 1 : 0;
         ++bmIdx;
       }
       SelectObject(hdc, oldBm);
-      DeleteObject(bmPen);
-    }
+      DeleteObject(bmManual);
+      DeleteObject(bmAuto);
 
-    std::wstringstream bss;
-    bss << L"Bookmarks: " << app->bookmarksSec.size() << L"  Auto: "
-        << (app->autoBookmarkEnabled ? L"ON" : L"OFF") << L" @"
-        << std::fixed << std::setprecision(2) << app->autoBookmarkMinConfidence;
-    RECT br = {map.left, map.top - 16, map.left + 180, map.top - 1};
-    SetTextColor(hdc, RGB(255, 196, 120));
-    DrawTextW(hdc, bss.str().c_str(), -1, &br, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+      std::wstringstream bss;
+      bss << L"Bookmarks: " << shownCount << L" (M" << (shownCount - autoCount) << L"/A" << autoCount
+          << L")  Auto: " << (app->autoBookmarkEnabled ? L"ON" : L"OFF") << L" @"
+          << std::fixed << std::setprecision(2) << app->autoBookmarkMinConfidence << L"  ShowA: "
+          << (app->showAutoBookmarks ? L"ON" : L"OFF");
+      RECT br = {map.left, map.top - 16, map.left + 520, map.top - 1};
+      SetTextColor(hdc, RGB(255, 196, 120));
+      DrawTextW(hdc, bss.str().c_str(), -1, &br, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+    }
     RECT hk = {map.left, map.top - 16, map.right, map.top - 1};
     SetTextColor(hdc, RGB(178, 206, 228));
-    DrawTextW(hdc, L"Hotkeys: B/C add-clear, D del, N/P nav, 1..9 jump, E/I exp-imp", -1, &hk,
+    DrawTextW(hdc, L"Hotkeys: A show auto, B/C add-clear, D del, N/P nav, 1..9 jump, E/I exp-imp",
+              -1, &hk,
               DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
   }
 
@@ -2220,6 +2327,7 @@ void RefreshWaterfallFromInput(AppState* app) {
   app->previewWav = ndb::WavData();
   app->overlayRows.clear();
   app->bookmarksSec.clear();
+  app->bookmarkAuto.clear();
   InvalidateWaterfallCache(app);
   app->waterfallZoom = 1.0;
   app->waterfallPanPx = 0;
@@ -2421,7 +2529,7 @@ void OnDone(AppState* app, DecodeThreadResult* result) {
         const std::size_t before = app->bookmarksSec.size();
       for (const auto& r : result->decodedRows) {
         if (r.confidence >= app->autoBookmarkMinConfidence) {
-          AddBookmarkAtTime(app, std::max(0.0f, r.startSec));
+          AddBookmarkAtTime(app, std::max(0.0f, r.startSec), true);
         }
       }
       if (app->bookmarksSec.size() > before) {
@@ -2498,7 +2606,15 @@ LRESULT CALLBACK ChartProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         if (vk == 'C') {
           app->bookmarksSec.clear();
+          app->bookmarkAuto.clear();
           SetStatus(app, L"Bookmarks cleared [C]");
+          InvalidateRect(hwnd, nullptr, TRUE);
+          return 0;
+        }
+        if (vk == 'A') {
+          app->showAutoBookmarks = !app->showAutoBookmarks;
+          SetStatus(app, app->showAutoBookmarks ? L"Show auto bookmarks [A]: ON"
+                                                : L"Show auto bookmarks [A]: OFF");
           InvalidateRect(hwnd, nullptr, TRUE);
           return 0;
         }
@@ -3150,6 +3266,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         case kIdBookmarkClear:
           app->bookmarksSec.clear();
+          app->bookmarkAuto.clear();
           SetStatus(app, L"Bookmarks cleared");
           InvalidateRect(app->chartPanel, nullptr, TRUE);
           return 0;
@@ -3161,7 +3278,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
           }
           std::string err;
-          if (!WriteBookmarksCsv(ToUtf8(p), app->bookmarksSec, &err)) {
+          if (!WriteBookmarksCsv(ToUtf8(p), app->bookmarksSec, app->bookmarkAuto, &err)) {
             SetStatus(app, L"Bookmark export failed");
             MessageBoxW(hwnd, ToWide(err).c_str(), L"Bookmarks", MB_OK | MB_ICONERROR);
             return 0;
@@ -3177,17 +3294,27 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           }
           std::string err;
           std::vector<float> loaded;
-          if (!ReadBookmarksCsv(ToUtf8(p), &loaded, &err)) {
+          std::vector<std::uint8_t> loadedAuto;
+          if (!ReadBookmarksCsv(ToUtf8(p), &loaded, &loadedAuto, &err)) {
             SetStatus(app, L"Bookmark import failed");
             MessageBoxW(hwnd, ToWide(err).c_str(), L"Bookmarks", MB_OK | MB_ICONERROR);
             return 0;
           }
           const float dur = PreviewDurationSec(app);
           if (dur > 0.0f) {
-            loaded.erase(std::remove_if(loaded.begin(), loaded.end(), [&](float t) { return t > dur; }),
-                         loaded.end());
+            for (std::size_t i = 0; i < loaded.size();) {
+              if (loaded[i] > dur) {
+                loaded.erase(loaded.begin() + static_cast<std::ptrdiff_t>(i));
+                if (i < loadedAuto.size()) {
+                  loadedAuto.erase(loadedAuto.begin() + static_cast<std::ptrdiff_t>(i));
+                }
+              } else {
+                ++i;
+              }
+            }
           }
           app->bookmarksSec = std::move(loaded);
+          app->bookmarkAuto = std::move(loadedAuto);
           std::wstringstream ss;
           ss << L"Bookmarks imported: " << app->bookmarksSec.size();
           SetStatus(app, ss.str());
