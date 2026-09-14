@@ -1165,6 +1165,7 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
   const float fMinTicks = 80.0f;
   const float fMaxTicks = std::min(2200.0f, nyqTicks - 20.0f);
   const int tickCount = 5;
+  const int minorPerMajor = 4;
   HPEN tickPen = CreatePen(PS_SOLID, 1, RGB(110, 140, 168));
   auto oldTickPen = reinterpret_cast<HPEN>(SelectObject(hdc, tickPen));
   SetTextColor(hdc, RGB(176, 202, 226));
@@ -1179,6 +1180,22 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
     RECT tr = {plot.left + 10, y - 9, plot.left + 92, y + 9};
     DrawTextW(hdc, ss.str().c_str(), -1, &tr, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
   }
+
+  HPEN minorPen = CreatePen(PS_SOLID, 1, RGB(74, 102, 128));
+  auto oldMinorPen = reinterpret_cast<HPEN>(SelectObject(hdc, minorPen));
+  for (int i = 0; i < tickCount - 1; ++i) {
+    const int y0 = plot.bottom - ((plot.bottom - plot.top) * i) / (tickCount - 1);
+    const int y1 = plot.bottom - ((plot.bottom - plot.top) * (i + 1)) / (tickCount - 1);
+    for (int m = 1; m <= minorPerMajor; ++m) {
+      const float a = static_cast<float>(m) / static_cast<float>(minorPerMajor + 1);
+      const int y = y0 + static_cast<int>(a * (y1 - y0));
+      MoveToEx(hdc, plot.left, y, nullptr);
+      LineTo(hdc, plot.left + 4, y);
+    }
+  }
+  SelectObject(hdc, oldMinorPen);
+  DeleteObject(minorPen);
+
   SelectObject(hdc, oldTickPen);
   DeleteObject(tickPen);
 
@@ -1601,7 +1618,19 @@ WaterfallReadout HitTestWaterfall(const AppState* app, const RECT& rc, POINT mou
   const float yn = static_cast<float>(mouse.y - plot.top) /
                    std::max<int>(1, static_cast<int>(plot.bottom - plot.top));
   const int xCol = std::clamp(srcX + static_cast<int>(xn * srcW), 0, app->waterfallW - 1);
-  const int yRow = std::clamp(static_cast<int>(yn * app->waterfallH), 0, app->waterfallH - 1);
+  int yPix = mouse.y;
+  const int tickCount = 5;
+  const int snapPx = 7;
+  for (int i = 0; i < tickCount; ++i) {
+    const int yMajor = plot.bottom - ((plot.bottom - plot.top) * i) / (tickCount - 1);
+    if (std::abs(yPix - yMajor) <= snapPx) {
+      yPix = yMajor;
+      break;
+    }
+  }
+  const float ynSnap = static_cast<float>(yPix - plot.top) /
+                       std::max<int>(1, static_cast<int>(plot.bottom - plot.top));
+  const int yRow = std::clamp(static_cast<int>(ynSnap * app->waterfallH), 0, app->waterfallH - 1);
 
   const float nyq = 0.5f * static_cast<float>(app->previewWav.sampleRate);
   const float fMin = 80.0f;
@@ -1628,7 +1657,7 @@ WaterfallReadout HitTestWaterfall(const AppState* app, const RECT& rc, POINT mou
      << L"SNR~: " << std::fixed << std::setprecision(1) << snrDb << L" dB";
 
   out.ok = true;
-  out.pt = mouse;
+  out.pt = POINT{mouse.x, yPix};
   out.text = ss.str();
   return out;
 }
