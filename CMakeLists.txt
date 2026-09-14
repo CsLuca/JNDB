@@ -37,5 +37,6 @@ if (WIN32)
     PRIVATE
       comctl32
       gdiplus
+      msimg32
   )
 endif()

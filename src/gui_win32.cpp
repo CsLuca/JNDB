@@ -2,6 +2,7 @@
 
 #include "gui_win32.hpp"
 
+#include "dsp.hpp"
 #include "ndb_decoder.hpp"
 #include "wav.hpp"
 
@@ -13,6 +14,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -26,6 +28,7 @@
 #pragma comment(lib, "Comctl32.lib")
 #pragma comment(lib, "Comdlg32.lib")
 #pragma comment(lib, "Gdiplus.lib")
+#pragma comment(lib, "Msimg32.lib")
 
 namespace {
 
@@ -55,6 +58,7 @@ constexpr int kIdRequirePrior = 1023;
 
 constexpr UINT kMsgProgress = WM_APP + 1;
 constexpr UINT kMsgDone = WM_APP + 2;
+constexpr UINT_PTR kWaterfallTimerId = 0x4E44;
 
 struct DecodeThreadResult {
   bool ok = false;
@@ -63,6 +67,7 @@ struct DecodeThreadResult {
   std::string metricsPath;
   ndb::DecodeStats stats;
   std::size_t rowCount = 0;
+  std::vector<ndb::DecodeResult> decodedRows;
 };
 
 struct HistoryEntry {
@@ -111,6 +116,12 @@ struct AppState {
   std::thread worker;
   std::vector<HistoryEntry> history;
   std::vector<HistoryEntry> historyCompare;
+  ndb::WavData previewWav;
+  std::vector<std::uint8_t> waterfallRgb;
+  int waterfallW = 0;
+  int waterfallH = 0;
+  std::vector<ndb::DecodeResult> overlayRows;
+  int decodeProgressPct = 0;
   double chartZoom = 1.0;
   int chartPanPx = 0;
   bool dragging = false;
@@ -222,6 +233,22 @@ void ApplyPresetToConfig(const std::string& mode, ndb::DecoderConfig* cfg) {
     cfg->thresholdK = 2.6f;
     return;
   }
+  if (mode == "step3-fusion") {
+    cfg->useAmtcFull = true;
+    cfg->maxTrackGapFrames = 5;
+    cfg->requirePlausibleId = true;
+    cfg->plausibleIdMinScore = 0.30f;
+    cfg->confidenceCalibration = "platt";
+    cfg->thresholdK = 2.6f;
+    cfg->enableGlrt = true;
+    cfg->glrtPfa = 0.10f;
+    cfg->glrtMinSnrDb = -3.0f;
+    cfg->scoreFusionWGlrt = 0.35f;
+    cfg->scoreFusionWCyclo = 0.35f;
+    cfg->scoreFusionWDecoder = 0.30f;
+    cfg->scoreFusionBias = 0.0f;
+    return;
+  }
 }
 
 std::wstring PresetHintFromSelection(int sel) {
@@ -242,6 +269,8 @@ std::wstring PresetHintFromSelection(int sel) {
       return L"Urban Noise: notch + blanker + CFAR for interference-heavy RF.";
     case 8:
       return L"Weak-signal DX: strict repeats + AMTC-full for marginal IDs.";
+    case 9:
+      return L"Step3 Fusion: GLRT + cyclo-like + decoder confidence fusion.";
     default:
       return L"Default: baseline profile for general-purpose decoding.";
   }
@@ -535,6 +564,241 @@ bool LoadHistoryCsv(const std::string& path, std::vector<HistoryEntry>* out, std
   return true;
 }
 
+void EnsureWaterfallPreview(AppState* app) {
+  if (!app || app->previewWav.samples.empty() || app->waterfallW > 0 || app->waterfallH > 0) {
+    return;
+  }
+
+  const int fft = 512;
+  const int hop = 128;
+  const auto spec = ndb::ComputeSpectrogram(app->previewWav.samples, app->previewWav.sampleRate, fft, hop);
+  if (spec.frameCount <= 0 || spec.binCount <= 1) {
+    return;
+  }
+
+  app->waterfallW = std::max(1, spec.frameCount);
+  app->waterfallH = std::max(1, spec.binCount - 1);
+  app->waterfallRgb.assign(static_cast<std::size_t>(app->waterfallW * app->waterfallH * 3), 0);
+
+  std::vector<float> lv(static_cast<std::size_t>(spec.frameCount * spec.binCount), 0.0f);
+  float minV = std::numeric_limits<float>::max();
+  float maxV = std::numeric_limits<float>::lowest();
+  for (int t = 0; t < spec.frameCount; ++t) {
+    for (int b = 1; b < spec.binCount; ++b) {
+      const float v = std::log10(1e-9f + spec.At(t, b));
+      lv[static_cast<std::size_t>(t * spec.binCount + b)] = v;
+      minV = std::min(minV, v);
+      maxV = std::max(maxV, v);
+    }
+  }
+  if (maxV <= minV + 1e-9f) {
+    maxV = minV + 1.0f;
+  }
+
+  auto ramp = [](float x) {
+    x = std::clamp(x, 0.0f, 1.0f);
+    const float r = std::clamp(1.8f * x - 0.5f, 0.0f, 1.0f);
+    const float g = std::clamp(1.6f * x, 0.0f, 1.0f);
+    const float b = std::clamp(1.2f - 1.5f * x, 0.0f, 1.0f);
+    return RGB(static_cast<int>(255.0f * r), static_cast<int>(255.0f * g), static_cast<int>(255.0f * b));
+  };
+
+  for (int t = 0; t < app->waterfallW; ++t) {
+    for (int y = 0; y < app->waterfallH; ++y) {
+      const int b = app->waterfallH - y;
+      const float v = lv[static_cast<std::size_t>(t * spec.binCount + b)];
+      const float n = (v - minV) / (maxV - minV);
+      const COLORREF c = ramp(std::pow(std::clamp(n, 0.0f, 1.0f), 0.75f));
+      const std::size_t idx = static_cast<std::size_t>((y * app->waterfallW + t) * 3);
+      app->waterfallRgb[idx + 0] = GetBValue(c);
+      app->waterfallRgb[idx + 1] = GetGValue(c);
+      app->waterfallRgb[idx + 2] = GetRValue(c);
+    }
+  }
+}
+
+void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
+  TRIVERTEX tv[2] = {
+      {rc.left, rc.top, 0x0A00, 0x1400, 0x2200, 0x0000},
+      {rc.right, rc.bottom, 0x1100, 0x2200, 0x3800, 0x0000},
+  };
+  GRADIENT_RECT gr = {0, 1};
+  GradientFill(hdc, tv, 2, &gr, 1, GRADIENT_FILL_RECT_V);
+
+  HBRUSH panel = CreateSolidBrush(RGB(12, 24, 38));
+  FillRect(hdc, &rc, panel);
+  DeleteObject(panel);
+
+  HPEN border = CreatePen(PS_SOLID, 1, RGB(35, 55, 75));
+  auto oldPen = reinterpret_cast<HPEN>(SelectObject(hdc, border));
+  MoveToEx(hdc, rc.left, rc.top, nullptr);
+  LineTo(hdc, rc.right - 1, rc.top);
+  LineTo(hdc, rc.right - 1, rc.bottom - 1);
+  LineTo(hdc, rc.left, rc.bottom - 1);
+  LineTo(hdc, rc.left, rc.top);
+  SelectObject(hdc, oldPen);
+  DeleteObject(border);
+
+  SetBkMode(hdc, TRANSPARENT);
+  SetTextColor(hdc, RGB(208, 224, 240));
+  RECT titleRc = {rc.left + 10, rc.top + 6, rc.right - 10, rc.top + 28};
+  DrawTextW(hdc, L"NDB Waterfall Preview", -1, &titleRc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+
+  RECT plot = {rc.left + 14, rc.top + 34, rc.right - 14, rc.bottom - 34};
+  if (!app || app->previewWav.samples.empty()) {
+    SetTextColor(hdc, RGB(130, 150, 170));
+    DrawTextW(hdc, L"Open an input WAV to render waterfall.", -1, &plot,
+              DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    return;
+  }
+
+  EnsureWaterfallPreview(app);
+  if (app->waterfallRgb.empty() || app->waterfallW <= 0 || app->waterfallH <= 0) {
+    SetTextColor(hdc, RGB(130, 150, 170));
+    DrawTextW(hdc, L"Waterfall unavailable for this file.", -1, &plot,
+              DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    return;
+  }
+
+  BITMAPINFO bmi = {};
+  bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+  bmi.bmiHeader.biWidth = app->waterfallW;
+  bmi.bmiHeader.biHeight = -app->waterfallH;
+  bmi.bmiHeader.biPlanes = 1;
+  bmi.bmiHeader.biBitCount = 24;
+  bmi.bmiHeader.biCompression = BI_RGB;
+  int srcX = 0;
+  int srcW = app->waterfallW;
+  if (app && app->running) {
+    const int curCol = std::clamp((app->decodeProgressPct * std::max(1, app->waterfallW - 1)) / 100,
+                                  0, std::max(0, app->waterfallW - 1));
+    const int win = std::max(120, app->waterfallW / 2);
+    srcW = std::min(app->waterfallW, win);
+    srcX = std::max(0, curCol - srcW + 1);
+  }
+
+  StretchDIBits(hdc, plot.left, plot.top, plot.right - plot.left, plot.bottom - plot.top,
+                srcX, 0, srcW, app->waterfallH, app->waterfallRgb.data(), &bmi, DIB_RGB_COLORS,
+                SRCCOPY);
+
+  if (app && app->running) {
+    const int p = std::clamp(app->decodeProgressPct, 0, 100);
+    const int xSweep = plot.left + ((plot.right - plot.left) * p) / 100;
+    HPEN sweep = CreatePen(PS_SOLID, 2, RGB(255, 245, 160));
+    auto oldSweep = reinterpret_cast<HPEN>(SelectObject(hdc, sweep));
+    MoveToEx(hdc, xSweep, plot.top, nullptr);
+    LineTo(hdc, xSweep, plot.bottom);
+    SelectObject(hdc, oldSweep);
+    DeleteObject(sweep);
+
+    RECT pbox = {plot.right - 130, plot.top + 8, plot.right - 10, plot.top + 30};
+    HBRUSH bb = CreateSolidBrush(RGB(18, 30, 46));
+    FillRect(hdc, &pbox, bb);
+    DeleteObject(bb);
+    HPEN bp = CreatePen(PS_SOLID, 1, RGB(68, 102, 138));
+    auto oldBp = reinterpret_cast<HPEN>(SelectObject(hdc, bp));
+    MoveToEx(hdc, pbox.left, pbox.top, nullptr);
+    LineTo(hdc, pbox.right - 1, pbox.top);
+    LineTo(hdc, pbox.right - 1, pbox.bottom - 1);
+    LineTo(hdc, pbox.left, pbox.bottom - 1);
+    LineTo(hdc, pbox.left, pbox.top);
+    SelectObject(hdc, oldBp);
+    DeleteObject(bp);
+    std::wstringstream ps;
+    ps << L"Scan " << p << L"%";
+    SetTextColor(hdc, RGB(220, 235, 250));
+    DrawTextW(hdc, ps.str().c_str(), -1, &pbox, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+  }
+
+  HBRUSH glaze = CreateSolidBrush(RGB(255, 255, 255));
+  BLENDFUNCTION bf = {AC_SRC_OVER, 0, 20, 0};
+  RECT topBand = {plot.left, plot.top, plot.right,
+                  plot.top + std::max<int>(8, static_cast<int>((plot.bottom - plot.top) / 10))};
+  HDC memdc = CreateCompatibleDC(hdc);
+  HBITMAP membmp = CreateCompatibleBitmap(hdc, topBand.right - topBand.left, topBand.bottom - topBand.top);
+  auto oldBmp = reinterpret_cast<HBITMAP>(SelectObject(memdc, membmp));
+  RECT memRect = {0, 0, topBand.right - topBand.left, topBand.bottom - topBand.top};
+  FillRect(memdc, &memRect, glaze);
+  AlphaBlend(hdc, topBand.left, topBand.top, topBand.right - topBand.left, topBand.bottom - topBand.top,
+             memdc, 0, 0, topBand.right - topBand.left, topBand.bottom - topBand.top, bf);
+  SelectObject(memdc, oldBmp);
+  DeleteObject(membmp);
+  DeleteDC(memdc);
+  DeleteObject(glaze);
+
+  HPEN axis = CreatePen(PS_SOLID, 1, RGB(88, 118, 148));
+  oldPen = reinterpret_cast<HPEN>(SelectObject(hdc, axis));
+  MoveToEx(hdc, plot.left, plot.bottom, nullptr);
+  LineTo(hdc, plot.right, plot.bottom);
+  MoveToEx(hdc, plot.left, plot.top, nullptr);
+  LineTo(hdc, plot.left, plot.bottom);
+  SelectObject(hdc, oldPen);
+  DeleteObject(axis);
+
+  SetTextColor(hdc, RGB(166, 194, 220));
+  RECT xLab = {plot.left, plot.bottom + 2, plot.right, plot.bottom + 20};
+  DrawTextW(hdc, L"Time ->", -1, &xLab, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
+  RECT yLab = {plot.left, plot.top - 2, plot.left + 140, plot.top + 16};
+  DrawTextW(hdc, L"Frequency (kHz)", -1, &yLab, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+
+  const float nyqTicks = app && app->previewWav.sampleRate > 0
+                             ? 0.5f * static_cast<float>(app->previewWav.sampleRate)
+                             : 4000.0f;
+  const float fMinTicks = 80.0f;
+  const float fMaxTicks = std::min(2200.0f, nyqTicks - 20.0f);
+  const int tickCount = 5;
+  HPEN tickPen = CreatePen(PS_SOLID, 1, RGB(110, 140, 168));
+  auto oldTickPen = reinterpret_cast<HPEN>(SelectObject(hdc, tickPen));
+  SetTextColor(hdc, RGB(176, 202, 226));
+  for (int i = 0; i < tickCount; ++i) {
+    const float u = static_cast<float>(i) / static_cast<float>(tickCount - 1);
+    const int y = plot.bottom - static_cast<int>(u * (plot.bottom - plot.top));
+    MoveToEx(hdc, plot.left, y, nullptr);
+    LineTo(hdc, plot.left + 6, y);
+    const float fHz = fMinTicks + u * (fMaxTicks - fMinTicks);
+    std::wstringstream ss;
+    ss << std::fixed << std::setprecision(2) << (fHz / 1000.0f) << L" kHz";
+    RECT tr = {plot.left + 10, y - 9, plot.left + 92, y + 9};
+    DrawTextW(hdc, ss.str().c_str(), -1, &tr, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+  }
+  SelectObject(hdc, oldTickPen);
+  DeleteObject(tickPen);
+
+  if (!app->overlayRows.empty() && app->previewWav.sampleRate > 0) {
+    const float nyq = 0.5f * static_cast<float>(app->previewWav.sampleRate);
+    const float fMin = 80.0f;
+    const float fMax = std::min(2200.0f, nyq - 20.0f);
+    HPEN trk = CreatePen(PS_SOLID, 2, RGB(255, 221, 87));
+    auto oldT = reinterpret_cast<HPEN>(SelectObject(hdc, trk));
+    SetTextColor(hdc, RGB(255, 235, 130));
+    SetBkMode(hdc, TRANSPARENT);
+    const float dur = static_cast<float>(app->previewWav.samples.size()) /
+                      static_cast<float>(std::max(1, app->previewWav.sampleRate));
+    const float viewStart = (static_cast<float>(srcX) / std::max(1, app->waterfallW - 1)) * dur;
+    const float viewDur = (static_cast<float>(srcW) / std::max(1, app->waterfallW)) * dur;
+    const float viewEnd = viewStart + viewDur;
+    for (const auto& r : app->overlayRows) {
+      if (r.endSec < viewStart || r.startSec > viewEnd) {
+        continue;
+      }
+      const float f = std::clamp(r.freqHz, fMin, fMax);
+      const float yN = 1.0f - (f - fMin) / std::max(1.0f, (fMax - fMin));
+      const int y = plot.top + static_cast<int>(yN * (plot.bottom - plot.top));
+      const float x0n = std::clamp((r.startSec - viewStart) / std::max(0.1f, viewDur), 0.0f, 1.0f);
+      const float x1n = std::clamp((r.endSec - viewStart) / std::max(0.1f, viewDur), 0.0f, 1.0f);
+      const int x0 = plot.left + static_cast<int>(x0n * (plot.right - plot.left));
+      const int x1 = plot.left + static_cast<int>(x1n * (plot.right - plot.left));
+      MoveToEx(hdc, x0, y, nullptr);
+      LineTo(hdc, std::max(x0 + 1, x1), y);
+      RECT lbl = {x0 + 4, y - 14, std::min<int>(plot.right - 4, x0 + 120), y + 2};
+      const std::wstring tag = ToWide(!r.plausibleId.empty() ? r.plausibleId : r.text);
+      DrawTextW(hdc, tag.c_str(), -1, &lbl, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+    }
+    SelectObject(hdc, oldT);
+    DeleteObject(trk);
+  }
+}
+
 void DrawMetricChart(HDC hdc, const RECT& rc, const std::vector<HistoryEntry>& history,
                      const std::vector<HistoryEntry>& compare, const ChartDef& cd,
                      double zoom, int panPx) {
@@ -713,11 +977,15 @@ HitPoint HitTestCharts(const AppState* app, const RECT& rc, POINT mouse) {
       {L"Quality Score", RGB(0, 105, 92), &HistoryEntry::quality, false},
   };
 
+  const int outerGap = 10;
+  const int wfH = 360;
+  RECT chartsRc = {rc.left, rc.top + wfH + outerGap, rc.right, rc.bottom};
+
   const int cols = 2;
   const int rows = 3;
   const int gap = 10;
-  const int w = (rc.right - rc.left - gap * (cols + 1)) / cols;
-  const int h = (rc.bottom - rc.top - gap * (rows + 1)) / rows;
+  const int w = (chartsRc.right - chartsRc.left - gap * (cols + 1)) / cols;
+  const int h = (chartsRc.bottom - chartsRc.top - gap * (rows + 1)) / rows;
 
   auto trySeries = [&](const std::vector<HistoryEntry>& src, const ChartDef& cd, const RECT& plot,
                        const RECT& chartRc, bool isCompare) {
@@ -776,8 +1044,9 @@ HitPoint HitTestCharts(const AppState* app, const RECT& rc, POINT mouse) {
   for (int r = 0; r < rows; ++r) {
     for (int c = 0; c < cols; ++c) {
       const int idx = r * cols + c;
-      RECT cr = {rc.left + gap + c * (w + gap), rc.top + gap + r * (h + gap),
-                 rc.left + gap + c * (w + gap) + w, rc.top + gap + r * (h + gap) + h};
+      RECT cr = {chartsRc.left + gap + c * (w + gap), chartsRc.top + gap + r * (h + gap),
+                 chartsRc.left + gap + c * (w + gap) + w,
+                 chartsRc.top + gap + r * (h + gap) + h};
       if (mouse.x < cr.left || mouse.x > cr.right || mouse.y < cr.top || mouse.y > cr.bottom) {
         continue;
       }
@@ -810,17 +1079,24 @@ void DrawCharts(AppState* app, HDC hdc, const RECT& rc) {
       {L"Quality Score", RGB(0, 105, 92), &HistoryEntry::quality, false},
   };
 
+  const int outerGap = 10;
+  const int wfH = 360;
+  RECT wfRc = {rc.left + outerGap, rc.top + outerGap, rc.right - outerGap, rc.top + wfH};
+  DrawWaterfallCard(app, hdc, wfRc);
+
+  RECT chartsRc = {rc.left, rc.top + wfH + outerGap, rc.right, rc.bottom};
   const int cols = 2;
   const int rows = 3;
   const int gap = 10;
-  const int w = (rc.right - rc.left - gap * (cols + 1)) / cols;
-  const int h = (rc.bottom - rc.top - gap * (rows + 1)) / rows;
+  const int w = (chartsRc.right - chartsRc.left - gap * (cols + 1)) / cols;
+  const int h = (chartsRc.bottom - chartsRc.top - gap * (rows + 1)) / rows;
 
   for (int r = 0; r < rows; ++r) {
     for (int c = 0; c < cols; ++c) {
       const int idx = r * cols + c;
-      RECT cr = {rc.left + gap + c * (w + gap), rc.top + gap + r * (h + gap),
-                 rc.left + gap + c * (w + gap) + w, rc.top + gap + r * (h + gap) + h};
+      RECT cr = {chartsRc.left + gap + c * (w + gap), chartsRc.top + gap + r * (h + gap),
+                 chartsRc.left + gap + c * (w + gap) + w,
+                 chartsRc.top + gap + r * (h + gap) + h};
       DrawMetricChart(hdc, cr, app->history, app->historyCompare, defs[idx], app->chartZoom,
                       app->chartPanPx);
     }
@@ -866,6 +1142,30 @@ void RefreshCompareHistory(AppState* app) {
     return;
   }
   app->historyCompare = std::move(hist);
+  InvalidateRect(app->chartPanel, nullptr, TRUE);
+}
+
+void RefreshWaterfallFromInput(AppState* app) {
+  if (!app) {
+    return;
+  }
+  app->previewWav = ndb::WavData();
+  app->overlayRows.clear();
+  app->waterfallRgb.clear();
+  app->waterfallW = 0;
+  app->waterfallH = 0;
+
+  const std::wstring inW = GetText(app->inputEdit);
+  if (inW.empty()) {
+    InvalidateRect(app->chartPanel, nullptr, TRUE);
+    return;
+  }
+
+  ndb::WavData wav;
+  std::string err;
+  if (ndb::ReadWavMono16(ToUtf8(inW), &wav, &err)) {
+    app->previewWav = std::move(wav);
+  }
   InvalidateRect(app->chartPanel, nullptr, TRUE);
 }
 
@@ -923,6 +1223,8 @@ void StartDecode(AppState* app) {
   }
 
   app->running = true;
+  app->decodeProgressPct = 0;
+  SetTimer(app->hwnd, kWaterfallTimerId, 33, nullptr);
   SetBusy(app, true);
   SendMessageW(app->progressBar, PBM_SETPOS, 0, 0);
   SetStatus(app, L"Starting...");
@@ -959,6 +1261,8 @@ void StartDecode(AppState* app) {
     mode = "urban-noise";
   } else if (sel == 8) {
     mode = "weak-signal-dx";
+  } else if (sel == 9) {
+    mode = "step3-fusion";
   }
 
   app->worker = std::thread([app, inputPath, outputPath, metricsPath, priorPath, mode, calibSel,
@@ -995,6 +1299,7 @@ void StartDecode(AppState* app) {
     };
     auto rows = ndb::DecodeNdbFromWav(wav.samples, wav.sampleRate, cfg, &result->stats, progress);
     result->rowCount = rows.size();
+    result->decodedRows = rows;
 
     if (!WriteCsv(outputPath, rows, &result->error)) {
       PostMessageW(app->hwnd, kMsgDone, 0, reinterpret_cast<LPARAM>(result));
@@ -1015,6 +1320,8 @@ void StartDecode(AppState* app) {
 
 void OnDone(AppState* app, DecodeThreadResult* result) {
   app->running = false;
+  app->decodeProgressPct = 100;
+  KillTimer(app->hwnd, kWaterfallTimerId);
   SetBusy(app, false);
   SendMessageW(app->progressBar, PBM_SETPOS, 100, 0);
 
@@ -1023,6 +1330,8 @@ void OnDone(AppState* app, DecodeThreadResult* result) {
     SetSummary(app, ToWide(result->error));
     MessageBoxW(app->hwnd, ToWide(result->error).c_str(), L"Decode failed", MB_ICONERROR | MB_OK);
   } else {
+    app->overlayRows = result->decodedRows;
+    InvalidateRect(app->chartPanel, nullptr, TRUE);
     SetStatus(app, L"Completed");
     SetSummary(app, BuildSummary(*result));
     std::wstring msg = L"CSV saved:\n" + ToWide(result->outputPath);
@@ -1177,6 +1486,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       SendMessageW(app->presetCombo, CB_ADDSTRING, 0, (LPARAM)L"Quiet");
       SendMessageW(app->presetCombo, CB_ADDSTRING, 0, (LPARAM)L"Urban Noise");
       SendMessageW(app->presetCombo, CB_ADDSTRING, 0, (LPARAM)L"Weak-signal DX");
+      SendMessageW(app->presetCombo, CB_ADDSTRING, 0, (LPARAM)L"Step3 Fusion");
       SendMessageW(app->presetCombo, CB_SETCURSEL, 0, 0);
       app->presetHintText = CreateWindowW(
           L"STATIC", L"", WS_CHILD | WS_VISIBLE, m + 464, y + 34, 340, 28, hwnd, nullptr,
@@ -1258,6 +1568,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       SetText(app->historyEdit, hist.wstring());
       RefreshHistory(app);
       RefreshCompareHistory(app);
+      RefreshWaterfallFromInput(app);
       return 0;
     }
     case WM_COMMAND: {
@@ -1282,6 +1593,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
               js += L"_metrics.json";
               SetText(app->metricsEdit, js);
             }
+            RefreshWaterfallFromInput(app);
           }
           return 0;
         }
@@ -1353,10 +1665,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     }
     case kMsgProgress:
       if (app) {
+        app->decodeProgressPct = static_cast<int>(wParam);
         SendMessageW(app->progressBar, PBM_SETPOS, static_cast<int>(wParam), 0);
         std::wstringstream ss;
         ss << L"Processing... " << static_cast<int>(wParam) << L"%";
         SetStatus(app, ss.str());
+        InvalidateRect(app->chartPanel, nullptr, TRUE);
       }
       return 0;
     case kMsgDone:
@@ -1388,6 +1702,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         const short z = GET_WHEEL_DELTA_WPARAM(wParam);
         const double factor = z > 0 ? 1.12 : (1.0 / 1.12);
         app->chartZoom = std::clamp(app->chartZoom * factor, 1.0, 8.0);
+        InvalidateRect(app->chartPanel, nullptr, TRUE);
+      }
+      return 0;
+    case WM_TIMER:
+      if (app && wParam == kWaterfallTimerId && app->running) {
         InvalidateRect(app->chartPanel, nullptr, TRUE);
       }
       return 0;
