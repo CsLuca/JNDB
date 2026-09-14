@@ -907,6 +907,52 @@ SequenceDecode DecodeMorseClassicTiming(const std::vector<Run>& runs, int dotSam
   return out;
 }
 
+std::vector<Run> BuildRunsClassicV2(const std::vector<float>& env, int dotSamples,
+                                    const DecoderConfig& cfg) {
+  if (env.empty() || dotSamples <= 0) {
+    return {};
+  }
+  const int smooth = std::max(1, dotSamples / 3);
+  const auto x = Boxcar(env, smooth);
+  const float baseThr = RobustMadThreshold(x, cfg.thresholdK);
+
+  const float hys = 0.10f;
+  const int holdoff = std::max(1, dotSamples / 5);
+  const int updateStep = std::max(4, dotSamples / 4);
+  float signalMax = std::max(baseThr, 1e-6f);
+  int stepCtr = 0;
+  int sinceChange = holdoff + 1;
+  int state = 0;
+
+  std::vector<int> bits;
+  bits.reserve(x.size());
+  for (float v : x) {
+    ++stepCtr;
+    ++sinceChange;
+    if (v > signalMax) {
+      signalMax = v;
+    }
+    if (stepCtr >= updateStep) {
+      signalMax = std::max(signalMax * 0.995f, baseThr);
+      stepCtr = 0;
+    }
+
+    const float autoThr = std::max(baseThr, 0.66f * signalMax);
+    const float thr = 0.55f * autoThr + 0.45f * baseThr;
+    const float hi = thr * (1.0f + hys);
+    const float lo = thr * (1.0f - hys);
+    const int candidate = state ? (v > lo ? 1 : 0) : (v >= hi ? 1 : 0);
+    if (candidate != state) {
+      if (sinceChange > holdoff) {
+        state = candidate;
+        sinceChange = 0;
+      }
+    }
+    bits.push_back(state);
+  }
+  return RunLengthEncode(bits);
+}
+
 SequenceDecode DecodeMorseAuto(const std::vector<Run>& runs, int dotSamples, const DecoderConfig& cfg) {
   const auto hmm = DecodeMorseViterbiHmm(runs, dotSamples, cfg);
   const auto hsmm = DecodeMorseHsmmExplicit(runs, dotSamples, cfg);
@@ -918,10 +964,11 @@ SequenceDecode DecodeMorseAuto(const std::vector<Run>& runs, int dotSamples, con
   return hmm;
 }
 
-SequenceDecode DecodeMorseAb(const std::vector<Run>& runs, int dotSamples, const DecoderConfig& cfg) {
+SequenceDecode DecodeMorseAb(const std::vector<Run>& runs, const std::vector<Run>& classicRuns,
+                             int dotSamples, const DecoderConfig& cfg) {
   const auto hmm = DecodeMorseViterbiHmm(runs, dotSamples, cfg);
   const auto hsmm = DecodeMorseHsmmExplicit(runs, dotSamples, cfg);
-  const auto classic = DecodeMorseClassicTiming(runs, dotSamples, cfg);
+  const auto classic = DecodeMorseClassicTiming(classicRuns.empty() ? runs : classicRuns, dotSamples, cfg);
   const float sh = DecodeTextHeuristicScore(hmm.text, hmm.confidence, hmm.avgLogLike);
   const float ss = DecodeTextHeuristicScore(hsmm.text, hsmm.confidence, hsmm.avgLogLike);
   const float sc = DecodeTextHeuristicScore(classic.text, classic.confidence, classic.avgLogLike);
@@ -1728,6 +1775,7 @@ std::vector<DecodeResult> DecodeNdbFromWav(const std::vector<float>& samples, in
     }
     const auto bits = BinaryByThreshold(boxed, thr);
     const auto runs = RunLengthEncode(bits);
+    const auto classicRuns = BuildRunsClassicV2(env, dotSamples, cfg);
     if (debugTracks) {
       dbg.dotSamples = dotSamples;
       dbg.threshold = thr;
@@ -1762,9 +1810,9 @@ std::vector<DecodeResult> DecodeNdbFromWav(const std::vector<float>& samples, in
     } else if (cfg.decoderModel == "hsmm") {
       decodedText = DecodeMorseHsmmExplicit(runs, dotSamples, cfg);
     } else if (cfg.decoderModel == "classic") {
-      decodedText = DecodeMorseClassicTiming(runs, dotSamples, cfg);
+      decodedText = DecodeMorseClassicTiming(classicRuns.empty() ? runs : classicRuns, dotSamples, cfg);
     } else if (cfg.decoderModel == "ab") {
-      decodedText = DecodeMorseAb(runs, dotSamples, cfg);
+      decodedText = DecodeMorseAb(runs, classicRuns, dotSamples, cfg);
     } else {
       decodedText = DecodeMorseAuto(runs, dotSamples, cfg);
     }
