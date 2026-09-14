@@ -67,6 +67,7 @@ constexpr int kIdAgcSpanSlider = 1032;
 constexpr int kIdAgcGainSlider = 1033;
 constexpr int kIdAgcGammaSlider = 1034;
 constexpr int kIdAgcAutoCheck = 1035;
+constexpr int kIdPeakLockButton = 1036;
 
 constexpr UINT kMsgProgress = WM_APP + 1;
 constexpr UINT kMsgDone = WM_APP + 2;
@@ -122,6 +123,7 @@ struct AppState {
   HWND agcGainSlider = nullptr;
   HWND agcGammaSlider = nullptr;
   HWND agcAutoCheck = nullptr;
+  HWND peakLockButton = nullptr;
   HWND runButton = nullptr;
   HWND progressBar = nullptr;
   HWND statusText = nullptr;
@@ -165,6 +167,9 @@ struct AppState {
   float agcGain = 1.35f;
   float agcGamma = 0.72f;
   bool agcAutoContrast = true;
+  bool peakLockEnabled = false;
+  int peakLockBin = -1;
+  float peakLockHz = 0.0f;
   double waterfallZoom = 1.0;
   int waterfallPanPx = 0;
   bool waterfallDragging = false;
@@ -863,7 +868,7 @@ void UpdatePanadapterPersistence(AppState* app) {
   }
 }
 
-void DrawPanadapter(HDC hdc, const RECT& rc, const AppState* app) {
+void DrawPanadapter(HDC hdc, const RECT& rc, AppState* app) {
   HBRUSH bg = CreateSolidBrush(RGB(9, 16, 26));
   FillRect(hdc, &rc, bg);
   DeleteObject(bg);
@@ -980,6 +985,22 @@ void DrawPanadapter(HDC hdc, const RECT& rc, const AppState* app) {
     if (peaks.size() > 5) {
       peaks.resize(5);
     }
+
+    if (app->peakLockEnabled && !peaks.empty()) {
+      int bestBin = peaks.front().bin;
+      float bestDist = std::numeric_limits<float>::max();
+      for (const auto& p : peaks) {
+        const float d = std::fabs(static_cast<float>(p.bin - std::max(0, app->peakLockBin)));
+        if (d < bestDist) {
+          bestDist = d;
+          bestBin = p.bin;
+        }
+      }
+      app->peakLockBin = bestBin;
+      app->peakLockHz = (static_cast<float>(bestBin) /
+                         std::max(1.0f, static_cast<float>(app->waterfallH))) * nyq;
+    }
+
     for (const auto& p : peaks) {
       const int x = xForBin(p.bin);
       HPEN mk = CreatePen(PS_DASH, 1, RGB(255, 240, 150));
@@ -995,6 +1016,23 @@ void DrawPanadapter(HDC hdc, const RECT& rc, const AppState* app) {
       RECT lr = {x + 3, plot.top + 2, x + 68, plot.top + 16};
       SetTextColor(hdc, RGB(250, 232, 140));
       DrawTextW(hdc, ss.str().c_str(), -1, &lr, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+    }
+
+    if (app->peakLockEnabled && app->peakLockBin >= 0) {
+      const int lx = xForBin(std::clamp(app->peakLockBin, 0, std::max(0, app->waterfallH - 1)));
+      HPEN lk = CreatePen(PS_SOLID, 2, RGB(120, 255, 170));
+      auto oldLk = reinterpret_cast<HPEN>(SelectObject(hdc, lk));
+      MoveToEx(hdc, lx, plot.top + 1, nullptr);
+      LineTo(hdc, lx, plot.bottom - 1);
+      SelectObject(hdc, oldLk);
+      DeleteObject(lk);
+
+      RECT lb = {lx + 6, plot.bottom - 16, lx + 130, plot.bottom - 2};
+      std::wstringstream ls;
+      ls << L"LOCK " << std::fixed << std::setprecision(3) << (app->peakLockHz / 1000.0f)
+         << L" kHz";
+      SetTextColor(hdc, RGB(160, 255, 192));
+      DrawTextW(hdc, ls.str().c_str(), -1, &lb, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
     }
   }
 }
@@ -2310,6 +2348,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                                         (HMENU)kIdAgcAutoCheck, nullptr, nullptr);
       SendMessageW(app->agcAutoCheck, BM_SETCHECK,
                    app->agcAutoContrast ? BST_CHECKED : BST_UNCHECKED, 0);
+      app->peakLockButton = CreateWindowW(L"BUTTON", L"Peak Lock: OFF",
+                                          WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                          m + 1010, y, 140, 30, hwnd,
+                                          (HMENU)kIdPeakLockButton, nullptr, nullptr);
       y += 36;
 
       CreateWindowW(L"STATIC", L"Prior CSV", WS_CHILD | WS_VISIBLE, m, y + 6, 100, 22, hwnd,
@@ -2365,6 +2407,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                                app->colormapCombo, app->waterfallFpsCombo,
                                app->agcFloorSlider, app->agcSpanSlider, app->agcGainSlider,
                                app->agcGammaSlider, app->agcAutoCheck,
+                               app->peakLockButton,
                                app->priorEdit, app->priorCheck};
       for (HWND c : controls) {
         SendMessageW(c, WM_SETFONT, reinterpret_cast<WPARAM>(app->font), TRUE);
@@ -2560,6 +2603,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           app->agcAutoContrast =
               (SendMessageW(app->agcAutoCheck, BM_GETCHECK, 0, 0) == BST_CHECKED);
           InvalidateWaterfallCache(app);
+          InvalidateRect(app->chartPanel, nullptr, TRUE);
+          return 0;
+        case kIdPeakLockButton:
+          app->peakLockEnabled = !app->peakLockEnabled;
+          if (!app->peakLockEnabled) {
+            app->peakLockBin = -1;
+            app->peakLockHz = 0.0f;
+          }
+          if (app->peakLockButton) {
+            SetWindowTextW(app->peakLockButton,
+                           app->peakLockEnabled ? L"Peak Lock: ON" : L"Peak Lock: OFF");
+          }
           InvalidateRect(app->chartPanel, nullptr, TRUE);
           return 0;
       }
