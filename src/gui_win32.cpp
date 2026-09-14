@@ -72,6 +72,8 @@ constexpr int kIdBookmarkAdd = 1037;
 constexpr int kIdBookmarkClear = 1038;
 constexpr int kIdBookmarkExport = 1039;
 constexpr int kIdBookmarkImport = 1040;
+constexpr int kIdAutoBookmarkCheck = 1041;
+constexpr int kIdAutoBookmarkConfSlider = 1042;
 
 constexpr UINT kMsgProgress = WM_APP + 1;
 constexpr UINT kMsgDone = WM_APP + 2;
@@ -128,6 +130,8 @@ struct AppState {
   HWND agcGammaSlider = nullptr;
   HWND agcAutoCheck = nullptr;
   HWND peakLockButton = nullptr;
+  HWND autoBookmarkCheck = nullptr;
+  HWND autoBookmarkConfSlider = nullptr;
   HWND runButton = nullptr;
   HWND progressBar = nullptr;
   HWND statusText = nullptr;
@@ -175,6 +179,8 @@ struct AppState {
   int peakLockBin = -1;
   float peakLockHz = 0.0f;
   std::vector<float> bookmarksSec;
+  bool autoBookmarkEnabled = true;
+  float autoBookmarkMinConfidence = 0.65f;
   double waterfallZoom = 1.0;
   int waterfallPanPx = 0;
   bool waterfallDragging = false;
@@ -945,6 +951,23 @@ void AddBookmarkAtCurrent(AppState* app) {
   std::sort(app->bookmarksSec.begin(), app->bookmarksSec.end());
 }
 
+void AddBookmarkAtTime(AppState* app, float tSec) {
+  if (!app) {
+    return;
+  }
+  const float dur = PreviewDurationSec(app);
+  if (dur <= 0.0f) {
+    return;
+  }
+  for (float t : app->bookmarksSec) {
+    if (std::fabs(t - tSec) <= 0.08f) {
+      return;
+    }
+  }
+  app->bookmarksSec.push_back(std::clamp(tSec, 0.0f, dur));
+  std::sort(app->bookmarksSec.begin(), app->bookmarksSec.end());
+}
+
 bool JumpToBookmarkFromMapClick(AppState* app, const RECT& mapRc, POINT p) {
   if (!app || app->bookmarksSec.empty() || app->waterfallW <= 0 || !PtInRect(&mapRc, p)) {
     return false;
@@ -1492,7 +1515,9 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
     }
 
     std::wstringstream bss;
-    bss << L"Bookmarks: " << app->bookmarksSec.size();
+    bss << L"Bookmarks: " << app->bookmarksSec.size() << L"  Auto: "
+        << (app->autoBookmarkEnabled ? L"ON" : L"OFF") << L" @"
+        << std::fixed << std::setprecision(2) << app->autoBookmarkMinConfidence;
     RECT br = {map.left, map.top - 16, map.left + 180, map.top - 1};
     SetTextColor(hdc, RGB(255, 196, 120));
     DrawTextW(hdc, bss.str().c_str(), -1, &br, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
@@ -2348,8 +2373,24 @@ void OnDone(AppState* app, DecodeThreadResult* result) {
     MessageBoxW(app->hwnd, ToWide(result->error).c_str(), L"Decode failed", MB_ICONERROR | MB_OK);
   } else {
     app->overlayRows = result->decodedRows;
+    if (app->autoBookmarkEnabled) {
+        const std::size_t before = app->bookmarksSec.size();
+      for (const auto& r : result->decodedRows) {
+        if (r.confidence >= app->autoBookmarkMinConfidence) {
+          AddBookmarkAtTime(app, std::max(0.0f, r.startSec));
+        }
+      }
+      if (app->bookmarksSec.size() > before) {
+        std::wstringstream ss;
+        ss << L"Completed + auto marks (" << (app->bookmarksSec.size() - before) << L")";
+        SetStatus(app, ss.str());
+      } else {
+        SetStatus(app, L"Completed");
+      }
+    } else {
+      SetStatus(app, L"Completed");
+    }
     InvalidateRect(app->chartPanel, nullptr, TRUE);
-    SetStatus(app, L"Completed");
     SetSummary(app, BuildSummary(*result));
     std::wstring msg = L"CSV saved:\n" + ToWide(result->outputPath);
     if (!result->metricsPath.empty()) {
@@ -2736,6 +2777,21 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                                           WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                                           m + 1010, y, 140, 30, hwnd,
                                           (HMENU)kIdPeakLockButton, nullptr, nullptr);
+      app->autoBookmarkCheck = CreateWindowW(L"BUTTON", L"Auto Marks",
+                                             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                                             m + 1160, y + 4, 100, 24, hwnd,
+                                             (HMENU)kIdAutoBookmarkCheck, nullptr, nullptr);
+      SendMessageW(app->autoBookmarkCheck, BM_SETCHECK,
+                   app->autoBookmarkEnabled ? BST_CHECKED : BST_UNCHECKED, 0);
+      app->autoBookmarkConfSlider = CreateWindowW(TRACKBAR_CLASSW, L"",
+                                                  WS_CHILD | WS_VISIBLE | TBS_AUTOTICKS, m + 1262,
+                                                  y, 110, 28, hwnd,
+                                                  (HMENU)kIdAutoBookmarkConfSlider, nullptr,
+                                                  nullptr);
+      SendMessageW(app->autoBookmarkConfSlider, TBM_SETRANGEMIN, FALSE, 30);
+      SendMessageW(app->autoBookmarkConfSlider, TBM_SETRANGEMAX, FALSE, 95);
+      SendMessageW(app->autoBookmarkConfSlider, TBM_SETPOS, TRUE,
+                   static_cast<LPARAM>(std::round(app->autoBookmarkMinConfidence * 100.0f)));
       y += 36;
 
       CreateWindowW(L"STATIC", L"Prior CSV", WS_CHILD | WS_VISIBLE, m, y + 6, 100, 22, hwnd,
@@ -2799,7 +2855,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                                app->colormapCombo, app->waterfallFpsCombo,
                                app->agcFloorSlider, app->agcSpanSlider, app->agcGainSlider,
                                app->agcGammaSlider, app->agcAutoCheck,
-                               app->peakLockButton,
+                               app->peakLockButton, app->autoBookmarkCheck,
+                               app->autoBookmarkConfSlider,
                                app->priorEdit, app->priorCheck};
       for (HWND c : controls) {
         SendMessageW(c, WM_SETFONT, reinterpret_cast<WPARAM>(app->font), TRUE);
@@ -2997,6 +3054,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           InvalidateWaterfallCache(app);
           InvalidateRect(app->chartPanel, nullptr, TRUE);
           return 0;
+        case kIdAutoBookmarkCheck:
+          app->autoBookmarkEnabled =
+              (SendMessageW(app->autoBookmarkCheck, BM_GETCHECK, 0, 0) == BST_CHECKED);
+          InvalidateRect(app->chartPanel, nullptr, TRUE);
+          return 0;
         case kIdPeakLockButton:
           app->peakLockEnabled = !app->peakLockEnabled;
           if (!app->peakLockEnabled) {
@@ -3111,6 +3173,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           app->agcGamma = static_cast<float>(v) / 100.0f;
           InvalidateWaterfallCache(app);
           InvalidateRect(app->chartPanel, nullptr, TRUE);
+          return 0;
+        }
+        if (src == app->autoBookmarkConfSlider) {
+          const int v = static_cast<int>(SendMessageW(app->autoBookmarkConfSlider, TBM_GETPOS, 0, 0));
+          app->autoBookmarkMinConfidence = static_cast<float>(v) / 100.0f;
+          std::wstringstream ss;
+          ss << L"Auto mark min conf: " << std::fixed << std::setprecision(2)
+             << app->autoBookmarkMinConfidence;
+          SetStatus(app, ss.str());
           return 0;
         }
       }
