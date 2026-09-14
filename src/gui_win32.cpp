@@ -157,10 +157,10 @@ struct AppState {
   bool shadingEnabled = true;
   int colormap3d = 0;
   int waterfallFps = 30;
-  float agcFloorOffsetDb = 0.0f;
-  float agcSpanDb = 28.0f;
-  float agcGain = 1.15f;
-  float agcGamma = 0.82f;
+  float agcFloorOffsetDb = -3.0f;
+  float agcSpanDb = 22.0f;
+  float agcGain = 1.35f;
+  float agcGamma = 0.72f;
   double waterfallZoom = 1.0;
   int waterfallPanPx = 0;
   bool waterfallDragging = false;
@@ -684,7 +684,7 @@ void EnsureWaterfallPreview(AppState* app) {
     for (int b = 1; b < spec.binCount; ++b) {
       float n = (lv[static_cast<std::size_t>(t * spec.binCount + b)] - floorDb) /
                 std::max(1.0f, (ceilDb - floorDb));
-      n = std::clamp(n * app->agcGain, 0.0f, 1.0f);
+      n = std::clamp((n - 0.015f) * app->agcGain, 0.0f, 1.0f);
       n = std::pow(std::clamp(n, 0.0f, 1.0f), std::clamp(app->agcGamma, 0.40f, 1.60f));
       norm[static_cast<std::size_t>(t * spec.binCount + b)] = n;
     }
@@ -696,7 +696,7 @@ void EnsureWaterfallPreview(AppState* app) {
     for (int t = 0; t < spec.frameCount; ++t) {
       const std::size_t idx = static_cast<std::size_t>(t * spec.binCount + b);
       const float cur = norm[idx];
-      prev = std::max(cur, prev * 0.965f);
+      prev = std::max(cur, prev * 0.975f);
       norm[idx] = prev;
     }
   }
@@ -2054,7 +2054,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                                           nullptr);
       SendMessageW(app->agcFloorSlider, TBM_SETRANGEMIN, FALSE, -30);
       SendMessageW(app->agcFloorSlider, TBM_SETRANGEMAX, FALSE, 30);
-      SendMessageW(app->agcFloorSlider, TBM_SETPOS, TRUE, 0);
+      SendMessageW(app->agcFloorSlider, TBM_SETPOS, TRUE, static_cast<LPARAM>(app->agcFloorOffsetDb));
 
       CreateWindowW(L"STATIC", L"Span", WS_CHILD | WS_VISIBLE, m + 244, y + 6, 36, 22, hwnd,
                     nullptr, nullptr, nullptr);
@@ -2063,7 +2063,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                                          28, hwnd, (HMENU)kIdAgcSpanSlider, nullptr, nullptr);
       SendMessageW(app->agcSpanSlider, TBM_SETRANGEMIN, FALSE, 8);
       SendMessageW(app->agcSpanSlider, TBM_SETRANGEMAX, FALSE, 80);
-      SendMessageW(app->agcSpanSlider, TBM_SETPOS, TRUE, 28);
+      SendMessageW(app->agcSpanSlider, TBM_SETPOS, TRUE, static_cast<LPARAM>(app->agcSpanDb));
 
       CreateWindowW(L"STATIC", L"Gain", WS_CHILD | WS_VISIBLE, m + 450, y + 6, 36, 22, hwnd,
                     nullptr, nullptr, nullptr);
@@ -2072,7 +2072,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                                          28, hwnd, (HMENU)kIdAgcGainSlider, nullptr, nullptr);
       SendMessageW(app->agcGainSlider, TBM_SETRANGEMIN, FALSE, 50);
       SendMessageW(app->agcGainSlider, TBM_SETRANGEMAX, FALSE, 250);
-      SendMessageW(app->agcGainSlider, TBM_SETPOS, TRUE, 115);
+      SendMessageW(app->agcGainSlider, TBM_SETPOS, TRUE,
+                   static_cast<LPARAM>(std::round(app->agcGain * 100.0f)));
 
       CreateWindowW(L"STATIC", L"Gamma", WS_CHILD | WS_VISIBLE, m + 656, y + 6, 44, 22, hwnd,
                     nullptr, nullptr, nullptr);
@@ -2082,7 +2083,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                                           nullptr);
       SendMessageW(app->agcGammaSlider, TBM_SETRANGEMIN, FALSE, 40);
       SendMessageW(app->agcGammaSlider, TBM_SETRANGEMAX, FALSE, 160);
-      SendMessageW(app->agcGammaSlider, TBM_SETPOS, TRUE, 82);
+      SendMessageW(app->agcGammaSlider, TBM_SETPOS, TRUE,
+                   static_cast<LPARAM>(std::round(app->agcGamma * 100.0f)));
       y += 36;
 
       CreateWindowW(L"STATIC", L"Prior CSV", WS_CHILD | WS_VISIBLE, m, y + 6, 100, 22, hwnd,
@@ -2271,10 +2273,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           app->shadingEnabled = true;
           app->colormap3d = 1;
           app->waterfallFps = 60;
-          app->agcFloorOffsetDb = -4.0f;
-          app->agcSpanDb = 24.0f;
-          app->agcGain = 1.35f;
-          app->agcGamma = 0.74f;
+          app->agcFloorOffsetDb = -6.0f;
+          app->agcSpanDb = 20.0f;
+          app->agcGain = 1.50f;
+          app->agcGamma = 0.68f;
           if (app->waterfallViewCombo) {
             SendMessageW(app->waterfallViewCombo, CB_SETCURSEL, app->waterfallViewMode, 0);
           }
