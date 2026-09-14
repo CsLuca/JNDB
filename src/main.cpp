@@ -33,6 +33,7 @@ struct CliArgs {
   std::optional<std::string> outputJsonPath;
   std::optional<std::string> metricsPath;
   std::optional<std::string> diagnosticsLogPath;
+  std::optional<std::string> symbolDebugJsonPath;
   std::optional<std::string> dashboardMode;
   std::optional<std::string> sessionExportDir;
   std::optional<std::string> configPath;
@@ -146,10 +147,51 @@ bool ApplyModePreset(const std::string& mode, ndb::DecoderConfig* cfg, std::stri
     cfg->plausibleIdMinScore = 0.35f;
     cfg->confidenceCalibration = "platt";
     cfg->thresholdK = 2.6f;
+    cfg->enableGlrt = true;
+    cfg->glrtPfa = 0.10f;
+    cfg->glrtMinSnrDb = -3.0f;
+    cfg->scoreFusionWGlrt = 0.35f;
+    cfg->scoreFusionWCyclo = 0.35f;
+    cfg->scoreFusionWDecoder = 0.30f;
+    cfg->scoreFusionBias = 0.0f;
+    return true;
+  }
+  if (mode == "step3-fusion") {
+    cfg->useAmtcFull = true;
+    cfg->maxTrackGapFrames = 5;
+    cfg->requirePlausibleId = true;
+    cfg->plausibleIdMinScore = 0.30f;
+    cfg->confidenceCalibration = "platt";
+    cfg->thresholdK = 2.6f;
+    cfg->enableGlrt = true;
+    cfg->glrtPfa = 0.10f;
+    cfg->glrtMinSnrDb = -3.0f;
+    cfg->scoreFusionWGlrt = 0.35f;
+    cfg->scoreFusionWCyclo = 0.35f;
+    cfg->scoreFusionWDecoder = 0.30f;
+    cfg->scoreFusionBias = 0.0f;
+    return true;
+  }
+  if (mode == "step4-mht") {
+    cfg->useAmtcFull = false;
+    cfg->useMhtLite = true;
+    cfg->mhtBeamWidth = 6;
+    cfg->mhtPerTrackCandidates = 3;
+    cfg->mhtMaxNewTracksPerFrame = 4;
+    cfg->maxTrackGapFrames = 5;
+    cfg->requirePlausibleId = true;
+    cfg->plausibleIdMinScore = 0.30f;
+    cfg->enableGlrt = true;
+    cfg->glrtPfa = 0.10f;
+    cfg->glrtMinSnrDb = -3.0f;
+    cfg->scoreFusionWGlrt = 0.35f;
+    cfg->scoreFusionWCyclo = 0.35f;
+    cfg->scoreFusionWDecoder = 0.30f;
+    cfg->scoreFusionBias = 0.0f;
     return true;
   }
   *error =
-      "Invalid value for --mode (use: default, strict-dx, relaxed, phase3-balanced, phase3-selective, phase4-serious, quiet, urban-noise, weak-signal-dx)";
+      "Invalid value for --mode (use: default, strict-dx, relaxed, phase3-balanced, phase3-selective, phase4-serious, quiet, urban-noise, weak-signal-dx, step3-fusion, step4-mht)";
   return false;
 }
 
@@ -202,6 +244,11 @@ void PrintUsage() {
       << "  --sustain-penalty <float>  Track sustain bonus term (default: 0.02)\n"
       << "  --amtc-lite                Use AMTC-lite greedy tracker (default)\n"
       << "  --amtc-full                Use AMTC-full DP tracker\n"
+      << "  --mht-lite                 Use MHT-lite top-K tracker\n"
+      << "  --no-mht-lite              Disable MHT-lite tracker\n"
+      << "  --mht-beam-width <int>     Beam size for MHT-lite hypotheses (default: 6)\n"
+      << "  --mht-per-track-cands <int> Best candidate continuations per track (default: 3)\n"
+      << "  --mht-max-new-tracks <int> Max new tracks spawned per frame (default: 4)\n"
       << "  --max-track-gap <int>      Max gap frames for AMTC-full (default: 3)\n"
       << "  --envelope-alpha <float>   Envelope smoother alpha (default: 0.05)\n"
       << "  --band-limit               Enable front-end band-limit\n"
@@ -224,6 +271,14 @@ void PrintUsage() {
       << "  --cfar-train-freq <int>    2D-CFAR train cells in freq (default: 6)\n"
       << "  --cfar-guard-freq <int>    2D-CFAR guard cells in freq (default: 1)\n"
       << "  --cfar-scale <float>       2D-CFAR noise scaling (default: 2.8)\n"
+      << "  --glrt                     Enable GLRT/Neyman-Pearson candidate gate\n"
+      << "  --no-glrt                  Disable GLRT candidate gate (default off)\n"
+      << "  --glrt-pfa <float>         GLRT target false alarm probability (default: 0.10)\n"
+      << "  --glrt-min-snr-db <float>  GLRT minimum per-cell SNR in dB (default: -3.0)\n"
+      << "  --score-fusion-w-glrt <float>    Fusion weight for GLRT-like score (default: 0.35)\n"
+      << "  --score-fusion-w-cyclo <float>   Fusion weight for cyclo score proxy (default: 0.35)\n"
+      << "  --score-fusion-w-decoder <float> Fusion weight for decoder confidence (default: 0.30)\n"
+      << "  --score-fusion-bias <float>      Additive bias before normalization (default: 0.0)\n"
       << "  --min-dot-ms <int>         Min dot length ms (default: 40)\n"
       << "  --max-dot-ms <int>         Max dot length ms (default: 220)\n"
       << "  --target-sr <int>          Target sample rate after decimation (default: 8000)\n"
@@ -246,7 +301,7 @@ void PrintUsage() {
       << "  --plausible-id-min <float> Plausible ID score threshold (default: 0.30)\n"
       << "  --strict-beacon            Require repeated ID hits before emitting\n"
       << "  --strict-min-repeats <int> Minimum hit_count for strict mode (default: 3)\n"
-      << "  --decoder-model <name>     Decoder model: auto | hmm | hsmm (default: auto)\n"
+      << "  --decoder-model <name>     Decoder model: auto | hmm | hsmm | classic | ab (default: auto)\n"
       << "  --hmm-on-intra <float>     HMM P(on->intra) base weight (default: 0.73)\n"
       << "  --hmm-on-char <float>      HMM P(on->char-gap) base weight (default: 0.20)\n"
       << "  --hmm-on-word <float>      HMM P(on->word-gap) base weight (default: 0.07)\n"
@@ -275,6 +330,7 @@ void PrintUsage() {
       << "  --freq-prior-file <path>   Optional frequency prior CSV: freq_hz,ID1|ID2|...\n"
       << "  --freq-prior-tol <float>   Frequency tolerance for prior shortlist (default: 2.5)\n"
       << "  --require-prior-match      If prior exists near freq, keep only matching ID\n"
+      << "  --force-prior-id           Force-pick a prior ID when prior candidates exist\n"
       << "  --decode-threads <int>     Worker threads for per-track decode (default: 1)\n"
       << "  --seed <int>               Deterministic seed for stable ordering (default: 1337)\n"
       << "  --profile <name>           Performance profile: fast | balanced | deep\n"
@@ -285,11 +341,12 @@ void PrintUsage() {
       << "  --stream-tail-seconds <int> Keep last N seconds per stream iteration (default: 0=all)\n"
       << "  --output-json <path.json>  Write stable JSON output alongside CSV\n"
       << "  --diag-log <path.log>      Append diagnostic run logs\n"
+      << "  --symbol-debug-json <path.json> Write per-track symbol timing diagnostics\n"
       << "  --dashboard rich           Print minimal terminal dashboard (waterfall/tracks/timeline)\n"
       << "  --session-export <dir>     Export session evidence bundle (audio snippets + scores + params)\n"
       << "  --session-clean            Enable global unique-by-ID output view\n"
       << "  --session-clean-strategy <name> Merge strategy: best-score | longest-coverage | weighted\n"
-      << "  --mode <preset>            Preset: default | strict-dx | relaxed | phase3-balanced | phase3-selective | phase4-serious | quiet | urban-noise | weak-signal-dx\n"
+      << "  --mode <preset>            Preset: default | strict-dx | relaxed | phase3-balanced | phase3-selective | phase4-serious | quiet | urban-noise | weak-signal-dx | step3-fusion | step4-mht\n"
       << "  --min-confidence <float>   Keep only rows with confidence >= value\n"
       << "  --metrics <path.json>      Write quality metrics JSON\n"
       << "  --no-progress              Disable progress output\n"
@@ -304,8 +361,11 @@ void PrintUsage() {
       << "  ndb_decode capture.wav out.csv --mode strict-dx\n"
       << "  ndb_decode capture.wav out.csv --mode phase3-balanced\n"
       << "  ndb_decode capture.wav out.csv --mode phase4-serious --freq-prior-file priors.csv\n"
+      << "  ndb_decode capture.wav out.csv --mode step3-fusion\n"
+      << "  ndb_decode capture.wav out.csv --mode step4-mht\n"
       << "  ndb_decode capture.wav out.csv --profile fast --decode-threads 8 --seed 42\n"
       << "  ndb_decode capture.wav out.csv --output-json out.json --diag-log run.log\n"
+      << "  ndb_decode capture.wav out.csv --symbol-debug-json symbol_debug.json\n"
       << "  ndb_decode capture.wav out.csv --mode urban-noise --dashboard rich --session-export session_001\n";
 }
 
@@ -501,6 +561,56 @@ bool WriteJsonDual(const std::string& path, const std::vector<ndb::DecodeResult>
 
   writeList("raw", raw, true);
   writeList("session_clean", clean, false);
+  out << "}\n";
+  return true;
+}
+
+bool WriteSymbolDebugJson(const std::string& path, const std::vector<ndb::TrackDebugInfo>& tracks,
+                          const ndb::DecodeStats& s, std::string* error) {
+  std::ofstream out(path);
+  if (!out) {
+    *error = "Cannot write symbol debug JSON output file: " + path;
+    return false;
+  }
+  out << "{\n";
+  out << "  \"schema_version\": \"jndb.symbol_debug.v1\",\n";
+  out << "  \"stats\": {\n";
+  out << "    \"quality_score\": " << std::fixed << std::setprecision(3) << s.qualityScore << ",\n";
+  out << "    \"decoded_count\": " << s.decodedCount << ",\n";
+  out << "    \"track_count\": " << s.trackCount << "\n";
+  out << "  },\n";
+  out << "  \"tracks\": [\n";
+  for (std::size_t i = 0; i < tracks.size(); ++i) {
+    const auto& t = tracks[i];
+    out << "    {\"track_id\": " << t.trackId << ", \"freq_hz\": " << std::fixed
+        << std::setprecision(2) << t.freqHz << ", \"start_sec\": " << std::setprecision(3)
+        << t.startSec << ", \"end_sec\": " << t.endSec << ", \"dot_samples\": "
+        << t.dotSamples << ", \"threshold\": " << t.threshold << ", \"run_count\": "
+        << t.runCount << ", \"on_run_count\": " << t.onRunCount << ", \"off_run_count\": "
+        << t.offRunCount << ", \"decoder_model_requested\": \""
+        << EscapeJson(t.decoderModelRequested) << "\", \"decoder_model_used\": \""
+        << EscapeJson(t.decoderModelUsed) << "\", \"decoded_text\": \""
+        << EscapeJson(t.decodedText) << "\", \"plausible_id\": \""
+        << EscapeJson(t.plausibleId) << "\", \"plausible_id_score\": " << t.plausibleIdScore
+        << ", \"kept\": " << (t.kept ? "true" : "false") << ", \"reject_reason\": \""
+        << EscapeJson(t.rejectReason) << "\", \"run_preview\": [";
+    for (std::size_t j = 0; j < t.runPreview.size(); ++j) {
+      const auto& r = t.runPreview[j];
+      out << "{\"index\": " << r.index << ", \"value\": " << r.value
+          << ", \"length_samples\": " << r.lengthSamples << ", \"units\": "
+          << std::setprecision(4) << r.units << ", \"timing_class\": \""
+          << EscapeJson(r.timingClass) << "\"}";
+      if (j + 1 < t.runPreview.size()) {
+        out << ", ";
+      }
+    }
+    out << "]}";
+    if (i + 1 < tracks.size()) {
+      out << ',';
+    }
+    out << "\n";
+  }
+  out << "  ]\n";
   out << "}\n";
   return true;
 }
@@ -767,6 +877,7 @@ bool ApplyConfigJson(const std::string& path, CliArgs* args, std::string* error)
   parseInt("stream_tail_seconds", &args->streamTailSeconds);
   parseBool("stream", &args->streamMode);
   parseBool("session_clean", &args->sessionClean);
+  parseBool("force_prior_id", &args->cfg.forcePriorId);
 
   std::string mode;
   parseString("mode", &mode);
@@ -788,6 +899,11 @@ bool ApplyConfigJson(const std::string& path, CliArgs* args, std::string* error)
   parseString("diag_log", &diagLog);
   if (!diagLog.empty()) {
     args->diagnosticsLogPath = diagLog;
+  }
+  std::string symbolDebugJson;
+  parseString("symbol_debug_json", &symbolDebugJson);
+  if (!symbolDebugJson.empty()) {
+    args->symbolDebugJsonPath = symbolDebugJson;
   }
   std::string scs;
   parseString("session_clean_strategy", &scs);
@@ -966,10 +1082,45 @@ bool ParseArgs(int argc, char** argv, CliArgs* out, std::string* error) {
     }
     if (token == "--amtc-lite") {
       out->cfg.useAmtcFull = false;
+      out->cfg.useMhtLite = false;
       continue;
     }
     if (token == "--amtc-full") {
       out->cfg.useAmtcFull = true;
+      out->cfg.useMhtLite = false;
+      continue;
+    }
+    if (token == "--mht-lite") {
+      out->cfg.useMhtLite = true;
+      out->cfg.useAmtcFull = false;
+      continue;
+    }
+    if (token == "--no-mht-lite") {
+      out->cfg.useMhtLite = false;
+      continue;
+    }
+    if (token == "--mht-beam-width") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseInt(value, &out->cfg.mhtBeamWidth)) {
+        *error = "Invalid integer for --mht-beam-width";
+        return false;
+      }
+      continue;
+    }
+    if (token == "--mht-per-track-cands") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseInt(value, &out->cfg.mhtPerTrackCandidates)) {
+        *error = "Invalid integer for --mht-per-track-cands";
+        return false;
+      }
+      continue;
+    }
+    if (token == "--mht-max-new-tracks") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseInt(value, &out->cfg.mhtMaxNewTracksPerFrame)) {
+        *error = "Invalid integer for --mht-max-new-tracks";
+        return false;
+      }
       continue;
     }
     if (token == "--max-track-gap") {
@@ -1112,6 +1263,62 @@ bool ParseArgs(int argc, char** argv, CliArgs* out, std::string* error) {
       std::string value;
       if (!parseOptionValue(token, &value) || !ParseFloat(value, &out->cfg.cfarScale)) {
         *error = "Invalid float for --cfar-scale";
+        return false;
+      }
+      continue;
+    }
+    if (token == "--no-glrt") {
+      out->cfg.enableGlrt = false;
+      continue;
+    }
+    if (token == "--glrt") {
+      out->cfg.enableGlrt = true;
+      continue;
+    }
+    if (token == "--glrt-pfa") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseFloat(value, &out->cfg.glrtPfa)) {
+        *error = "Invalid float for --glrt-pfa";
+        return false;
+      }
+      continue;
+    }
+    if (token == "--glrt-min-snr-db") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseFloat(value, &out->cfg.glrtMinSnrDb)) {
+        *error = "Invalid float for --glrt-min-snr-db";
+        return false;
+      }
+      continue;
+    }
+    if (token == "--score-fusion-w-glrt") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseFloat(value, &out->cfg.scoreFusionWGlrt)) {
+        *error = "Invalid float for --score-fusion-w-glrt";
+        return false;
+      }
+      continue;
+    }
+    if (token == "--score-fusion-w-cyclo") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseFloat(value, &out->cfg.scoreFusionWCyclo)) {
+        *error = "Invalid float for --score-fusion-w-cyclo";
+        return false;
+      }
+      continue;
+    }
+    if (token == "--score-fusion-w-decoder") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseFloat(value, &out->cfg.scoreFusionWDecoder)) {
+        *error = "Invalid float for --score-fusion-w-decoder";
+        return false;
+      }
+      continue;
+    }
+    if (token == "--score-fusion-bias") {
+      std::string value;
+      if (!parseOptionValue(token, &value) || !ParseFloat(value, &out->cfg.scoreFusionBias)) {
+        *error = "Invalid float for --score-fusion-bias";
         return false;
       }
       continue;
@@ -1273,8 +1480,9 @@ bool ParseArgs(int argc, char** argv, CliArgs* out, std::string* error) {
       if (!parseOptionValue(token, &value)) {
         return false;
       }
-      if (value != "auto" && value != "hmm" && value != "hsmm") {
-        *error = "Invalid value for --decoder-model (use: auto, hmm, hsmm)";
+      if (value != "auto" && value != "hmm" && value != "hsmm" && value != "classic" &&
+          value != "ab") {
+        *error = "Invalid value for --decoder-model (use: auto, hmm, hsmm, classic, ab)";
         return false;
       }
       out->cfg.decoderModel = value;
@@ -1506,6 +1714,11 @@ bool ParseArgs(int argc, char** argv, CliArgs* out, std::string* error) {
       out->cfg.enableFreqPriors = true;
       continue;
     }
+    if (token == "--force-prior-id") {
+      out->cfg.forcePriorId = true;
+      out->cfg.enableFreqPriors = true;
+      continue;
+    }
     if (token == "--decode-threads") {
       std::string value;
       if (!parseOptionValue(token, &value) || !ParseInt(value, &out->cfg.decodeThreads)) {
@@ -1584,6 +1797,14 @@ bool ParseArgs(int argc, char** argv, CliArgs* out, std::string* error) {
         return false;
       }
       out->diagnosticsLogPath = value;
+      continue;
+    }
+    if (token == "--symbol-debug-json") {
+      std::string value;
+      if (!parseOptionValue(token, &value)) {
+        return false;
+      }
+      out->symbolDebugJsonPath = value;
       continue;
     }
     if (token == "--dashboard") {
@@ -1734,6 +1955,7 @@ int main(int argc, char** argv) {
 
     int lastPercent = -1;
     ndb::DecodeStats stats;
+    std::vector<ndb::TrackDebugInfo> symbolDebugTracks;
     auto progressCb = [&](int percent, const std::string& stage) {
       if (!args.progress || args.quiet) {
         return;
@@ -1750,7 +1972,13 @@ int main(int argc, char** argv) {
       std::cout << '\n';
     };
 
-    auto results = ndb::DecodeNdbFromWav(wav.samples, wav.sampleRate, args.cfg, &stats, progressCb);
+    auto results = ndb::DecodeNdbFromWav(
+        wav.samples,
+        wav.sampleRate,
+        args.cfg,
+        &stats,
+        progressCb,
+        args.symbolDebugJsonPath.has_value() ? &symbolDebugTracks : nullptr);
     if (args.minConfidence > 0.0f) {
       std::vector<ndb::DecodeResult> filtered;
       filtered.reserve(results.size());
@@ -1798,6 +2026,13 @@ int main(int argc, char** argv) {
       if (!ok) {
         std::cerr << error << '\n';
         return 5;
+      }
+    }
+
+    if (args.symbolDebugJsonPath.has_value()) {
+      if (!WriteSymbolDebugJson(*args.symbolDebugJsonPath, symbolDebugTracks, stats, &error)) {
+        std::cerr << error << '\n';
+        return 7;
       }
     }
 

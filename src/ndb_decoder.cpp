@@ -12,6 +12,7 @@
 #include <sstream>
 #include <thread>
 #include <unordered_map>
+#include <utility>
 
 namespace ndb {
 namespace {
@@ -45,6 +46,22 @@ struct SequenceDecode {
   std::string model;
 };
 
+struct PriorSoftMatch {
+  bool matched = false;
+  std::string token;
+  int editDistance = 9;
+  float score = 0.0f;
+};
+
+struct PriorConstrainedMatch {
+  bool matched = false;
+  std::string token;
+  int bestDistance = 9;
+  float score = 0.0f;
+};
+
+int EditDistanceBounded(const std::string& a, const std::string& b, int maxDist);
+
 std::vector<Run> RunLengthEncode(const std::vector<int>& bits) {
   std::vector<Run> runs;
   if (bits.empty()) {
@@ -63,6 +80,47 @@ std::vector<Run> RunLengthEncode(const std::vector<int>& bits) {
   }
   runs.push_back(Run{current, len});
   return runs;
+}
+
+std::vector<Run> NormalizeRunsToDotGrid(const std::vector<Run>& in, int dotSamples) {
+  if (in.empty() || dotSamples <= 0) {
+    return in;
+  }
+  auto quantOn = [](float u) {
+    if (u < 2.0f) {
+      return 1;
+    }
+    return 3;
+  };
+  auto quantOff = [](float u) {
+    const float d1 = std::fabs(u - 1.0f);
+    const float d3 = std::fabs(u - 3.0f);
+    const float d7 = std::fabs(u - 7.0f);
+    if (d1 <= d3 && d1 <= d7) {
+      return 1;
+    }
+    if (d3 <= d1 && d3 <= d7) {
+      return 3;
+    }
+    return 7;
+  };
+
+  std::vector<Run> out;
+  out.reserve(in.size());
+  for (const auto& r : in) {
+    if (r.length <= 0) {
+      continue;
+    }
+    const float u = static_cast<float>(r.length) / static_cast<float>(dotSamples);
+    const int qu = (r.value == 1) ? quantOn(u) : quantOff(u);
+    const int qlen = std::max(1, qu * dotSamples);
+    if (!out.empty() && out.back().value == r.value) {
+      out.back().length += qlen;
+    } else {
+      out.push_back(Run{r.value, qlen});
+    }
+  }
+  return out;
 }
 
 const std::unordered_map<std::string, char>& MorseTable() {
@@ -222,6 +280,124 @@ bool ContainsToken(const std::vector<std::string>& v, const std::string& x) {
     }
   }
   return false;
+}
+
+PriorSoftMatch SoftPriorMatch(const std::vector<std::string>& priorIds,
+                              const std::string& plausibleId,
+                              float plausibleScore,
+                              const std::string& decodedText);
+
+std::string DecodeLettersFromRunsSimple(const std::vector<Run>& runs, int dotSamples) {
+  if (runs.empty() || dotSamples <= 0) {
+    return "";
+  }
+  std::string text;
+  std::string current;
+  for (const auto& r : runs) {
+    const float u = static_cast<float>(r.length) / static_cast<float>(dotSamples);
+    if (r.value == 1) {
+      current.push_back((std::fabs(u - 1.0f) <= std::fabs(u - 3.0f)) ? '.' : '-');
+      continue;
+    }
+    if (u >= 2.2f && !current.empty()) {
+      const auto it = MorseTable().find(current);
+      if (it != MorseTable().end()) {
+        text.push_back(it->second);
+      }
+      current.clear();
+    }
+    if (u >= 5.6f) {
+      text.push_back(' ');
+    }
+  }
+  if (!current.empty()) {
+    const auto it = MorseTable().find(current);
+    if (it != MorseTable().end()) {
+      text.push_back(it->second);
+    }
+  }
+  std::string out;
+  out.reserve(text.size());
+  for (char c : text) {
+    if (c >= 'A' && c <= 'Z') {
+      out.push_back(c);
+    }
+  }
+  return out;
+}
+
+PriorConstrainedMatch ConstrainedPriorFromRuns(const std::vector<Run>& runs, int dotSamples,
+                                               const std::vector<std::string>& priorIds) {
+  PriorConstrainedMatch out;
+  if (priorIds.empty()) {
+    return out;
+  }
+  const std::string observed = DecodeLettersFromRunsSimple(runs, dotSamples);
+  if (observed.empty()) {
+    return out;
+  }
+  for (const auto& id : priorIds) {
+    if (id.size() < 2 || id.size() > 3) {
+      continue;
+    }
+    int bestDist = static_cast<int>(id.size()) + 1;
+    int nearCount = 0;
+    if (observed.size() >= id.size()) {
+      for (std::size_t i = 0; i + id.size() <= observed.size(); ++i) {
+        const std::string w = observed.substr(i, id.size());
+        const int d = EditDistanceBounded(w, id, 2);
+        bestDist = std::min(bestDist, d);
+        if (d <= 1) {
+          ++nearCount;
+        }
+      }
+    } else {
+      bestDist = EditDistanceBounded(observed, id, 3);
+      if (bestDist <= 1) {
+        nearCount = 1;
+      }
+    }
+    const float base = std::max(0.0f, 1.0f - static_cast<float>(bestDist) /
+                                           static_cast<float>(std::max<std::size_t>(1, id.size())));
+    const float repeat = std::min(1.0f, static_cast<float>(nearCount) / 2.0f);
+    const float sc = 0.75f * base + 0.25f * repeat;
+    if (!out.matched || sc > out.score || (sc == out.score && bestDist < out.bestDistance)) {
+      out.matched = true;
+      out.token = id;
+      out.bestDistance = bestDist;
+      out.score = sc;
+    }
+  }
+  return out;
+}
+
+PriorConstrainedMatch ConstrainedPriorFromRunsForced(const std::vector<Run>& runs,
+                                                     const std::vector<std::string>& priorIds,
+                                                     int minDotMs, int maxDotMs,
+                                                     int sampleRate) {
+  PriorConstrainedMatch best;
+  if (priorIds.empty() || sampleRate <= 0) {
+    return best;
+  }
+  const int minDot = std::max(1, sampleRate * minDotMs / 1000);
+  const int maxDot = std::max(minDot, sampleRate * maxDotMs / 1000);
+  const int step = std::max(1, sampleRate / 80);
+  for (int dot = minDot; dot <= maxDot; dot += step) {
+    const auto cand = ConstrainedPriorFromRuns(runs, dot, priorIds);
+    float bonus = 0.0f;
+    if (cand.bestDistance == 0) {
+      bonus = 0.20f;
+    } else if (cand.bestDistance == 1) {
+      bonus = 0.08f;
+    }
+    const float s = cand.score + bonus;
+    if (!best.matched || s > best.score || (s == best.score && cand.bestDistance < best.bestDistance)) {
+      best = cand;
+      best.score = s;
+      best.matched = cand.matched;
+    }
+  }
+  return best;
 }
 
 std::string JoinPipe(const std::vector<std::string>& v) {
@@ -673,11 +849,85 @@ SequenceDecode DecodeMorseHsmmExplicit(const std::vector<Run>& runs, int dotSamp
   return out;
 }
 
+SequenceDecode DecodeMorseClassicTiming(const std::vector<Run>& runs, int dotSamples,
+                                        const DecoderConfig&) {
+  if (runs.empty() || dotSamples <= 0) {
+    return {};
+  }
+
+  std::string text;
+  std::string current;
+  float confAcc = 0.0f;
+  int confN = 0;
+  float errAcc = 0.0f;
+
+  auto flushChar = [&]() {
+    if (current.empty()) {
+      return;
+    }
+    const auto it = MorseTable().find(current);
+    text.push_back(it == MorseTable().end() ? '?' : it->second);
+    current.clear();
+  };
+
+  for (const auto& r : runs) {
+    const float u = static_cast<float>(r.length) / static_cast<float>(std::max(1, dotSamples));
+    if (r.value == 1) {
+      const bool isDot = (u < 2.0f);
+      current.push_back(isDot ? '.' : '-');
+      const float mu = isDot ? 1.0f : 3.0f;
+      const float err = std::fabs(u - mu);
+      errAcc += err;
+      confAcc += 1.0f / (1.0f + 0.9f * err);
+      ++confN;
+      continue;
+    }
+
+    if (u < 2.0f) {
+      continue;
+    }
+    if (u < 5.0f) {
+      flushChar();
+    } else {
+      flushChar();
+      text.push_back(' ');
+    }
+  }
+  flushChar();
+
+  while (!text.empty() && text.back() == ' ') {
+    text.pop_back();
+  }
+
+  SequenceDecode out;
+  out.text = std::move(text);
+  out.confidence = confN > 0 ? (confAcc / static_cast<float>(confN)) : 0.0f;
+  out.avgLogLike = -(errAcc / static_cast<float>(std::max(1, confN)));
+  out.model = "classic";
+  return out;
+}
+
 SequenceDecode DecodeMorseAuto(const std::vector<Run>& runs, int dotSamples, const DecoderConfig& cfg) {
   const auto hmm = DecodeMorseViterbiHmm(runs, dotSamples, cfg);
   const auto hsmm = DecodeMorseHsmmExplicit(runs, dotSamples, cfg);
   const float sh = DecodeTextHeuristicScore(hmm.text, hmm.confidence, hmm.avgLogLike);
   const float ss = DecodeTextHeuristicScore(hsmm.text, hsmm.confidence, hsmm.avgLogLike);
+  if (ss > sh + 0.01f) {
+    return hsmm;
+  }
+  return hmm;
+}
+
+SequenceDecode DecodeMorseAb(const std::vector<Run>& runs, int dotSamples, const DecoderConfig& cfg) {
+  const auto hmm = DecodeMorseViterbiHmm(runs, dotSamples, cfg);
+  const auto hsmm = DecodeMorseHsmmExplicit(runs, dotSamples, cfg);
+  const auto classic = DecodeMorseClassicTiming(runs, dotSamples, cfg);
+  const float sh = DecodeTextHeuristicScore(hmm.text, hmm.confidence, hmm.avgLogLike);
+  const float ss = DecodeTextHeuristicScore(hsmm.text, hsmm.confidence, hsmm.avgLogLike);
+  const float sc = DecodeTextHeuristicScore(classic.text, classic.confidence, classic.avgLogLike);
+  if (sc >= ss + 0.005f && sc >= sh + 0.005f) {
+    return classic;
+  }
   if (ss > sh + 0.01f) {
     return hsmm;
   }
@@ -703,46 +953,233 @@ std::vector<std::string> ExtractUpperTokens(const std::string& text) {
   return out;
 }
 
+int EditDistanceBounded(const std::string& a, const std::string& b, int maxDist) {
+  if (a == b) {
+    return 0;
+  }
+  if (std::abs(static_cast<int>(a.size()) - static_cast<int>(b.size())) > maxDist) {
+    return maxDist + 1;
+  }
+  std::vector<int> prev(b.size() + 1, 0);
+  std::vector<int> cur(b.size() + 1, 0);
+  for (std::size_t j = 0; j <= b.size(); ++j) {
+    prev[j] = static_cast<int>(j);
+  }
+  for (std::size_t i = 1; i <= a.size(); ++i) {
+    cur[0] = static_cast<int>(i);
+    int rowMin = cur[0];
+    for (std::size_t j = 1; j <= b.size(); ++j) {
+      const int csub = prev[j - 1] + (a[i - 1] == b[j - 1] ? 0 : 1);
+      const int cins = cur[j - 1] + 1;
+      const int cdel = prev[j] + 1;
+      cur[j] = std::min(csub, std::min(cins, cdel));
+      rowMin = std::min(rowMin, cur[j]);
+    }
+    if (rowMin > maxDist) {
+      return maxDist + 1;
+    }
+    prev.swap(cur);
+  }
+  return prev[b.size()];
+}
+
+float TemporalGapCoherence(const std::vector<int>& pos) {
+  if (pos.size() < 3) {
+    return pos.size() >= 2 ? 0.35f : 0.0f;
+  }
+  std::vector<float> gaps;
+  gaps.reserve(pos.size() - 1);
+  for (std::size_t i = 1; i < pos.size(); ++i) {
+    gaps.push_back(static_cast<float>(pos[i] - pos[i - 1]));
+  }
+  const float mg = Mean(gaps);
+  if (mg <= 1e-4f) {
+    return 0.0f;
+  }
+  float var = 0.0f;
+  for (float g : gaps) {
+    const float d = g - mg;
+    var += d * d;
+  }
+  var /= static_cast<float>(gaps.size());
+  const float norm = var / (mg * mg + 1e-6f);
+  return std::max(0.0f, std::min(1.0f, 1.0f / (1.0f + norm)));
+}
+
+int EstimateGlobalCycleLen(const std::vector<std::string>& seq) {
+  if (seq.size() < 4) {
+    return 0;
+  }
+  int bestLag = 0;
+  float bestScore = 0.0f;
+  const int maxLag = std::min<int>(8, static_cast<int>(seq.size() / 2));
+  for (int lag = 1; lag <= maxLag; ++lag) {
+    int total = 0;
+    int hits = 0;
+    for (std::size_t i = static_cast<std::size_t>(lag); i < seq.size(); ++i) {
+      ++total;
+      if (seq[i] == seq[i - static_cast<std::size_t>(lag)]) {
+        ++hits;
+      }
+    }
+    if (total <= 0) {
+      continue;
+    }
+    const float score = static_cast<float>(hits) / static_cast<float>(total);
+    if (score > bestScore) {
+      bestScore = score;
+      bestLag = lag;
+    }
+  }
+  if (bestScore < 0.18f) {
+    return 0;
+  }
+  return bestLag;
+}
+
+float CycleAlignmentScore(const std::vector<int>& pos, int cycleLen) {
+  if (cycleLen <= 0 || pos.size() < 2) {
+    return 0.0f;
+  }
+  int good = 0;
+  int total = 0;
+  for (std::size_t i = 1; i < pos.size(); ++i) {
+    const int d = pos[i] - pos[i - 1];
+    if (d <= 0) {
+      continue;
+    }
+    ++total;
+    const int k = std::max(1, static_cast<int>(std::round(static_cast<float>(d) /
+                                                           static_cast<float>(cycleLen))));
+    const int target = k * cycleLen;
+    if (std::abs(d - target) <= 1) {
+      ++good;
+    }
+  }
+  if (total <= 0) {
+    return 0.0f;
+  }
+  return static_cast<float>(good) / static_cast<float>(total);
+}
+
 std::pair<std::string, float> ExtractPlausibleId(const std::string& text) {
   const auto tokens = ExtractUpperTokens(text);
   std::unordered_map<std::string, int> cnt;
+  std::unordered_map<std::string, std::vector<int>> pos;
   int validTotal = 0;
+  int validPos = 0;
   for (const auto& t : tokens) {
     if (t.size() >= 2 && t.size() <= 3) {
       ++cnt[t];
+      pos[t].push_back(validPos);
       ++validTotal;
+      ++validPos;
     }
   }
   if (validTotal == 0 || cnt.empty()) {
     return {"", 0.0f};
   }
 
+  std::vector<std::string> validSeq;
+  validSeq.reserve(tokens.size());
+  for (const auto& t : tokens) {
+    if (t.size() >= 2 && t.size() <= 3) {
+      validSeq.push_back(t);
+    }
+  }
+  const int globalCycleLen = EstimateGlobalCycleLen(validSeq);
+
   std::string best;
-  int bestCount = 0;
+  float bestScore = -1.0f;
   for (const auto& kv : cnt) {
-    if (kv.second > bestCount) {
-      bestCount = kv.second;
-      best = kv.first;
+    const std::string& cand = kv.first;
+    const int ccount = kv.second;
+    const float support = static_cast<float>(ccount) / static_cast<float>(validTotal);
+
+    int repHits = 0;
+    int repTot = 0;
+    for (std::size_t i = 1; i < validSeq.size(); ++i) {
+      if (validSeq[i] == cand || validSeq[i - 1] == cand) {
+        ++repTot;
+        if (validSeq[i] == cand && validSeq[i - 1] == cand) {
+          ++repHits;
+        }
+      }
+    }
+    const float repetition = repTot > 0 ? static_cast<float>(repHits) / static_cast<float>(repTot)
+                                        : 0.0f;
+
+    const float gapCoherence = TemporalGapCoherence(pos[cand]);
+    const float cycleAlign = CycleAlignmentScore(pos[cand], globalCycleLen);
+
+    float editMass = 0.0f;
+    for (const auto& kv2 : cnt) {
+      if (kv2.first == cand) {
+        continue;
+      }
+      const int d = EditDistanceBounded(cand, kv2.first, 2);
+      if (d == 1) {
+        editMass += 1.0f * static_cast<float>(kv2.second);
+      } else if (d == 2) {
+        editMass += 0.35f * static_cast<float>(kv2.second);
+      }
+    }
+    const float editCoherence = std::min(1.0f, editMass / static_cast<float>(std::max(1, validTotal)));
+
+    const float countBonus = ccount >= 3 ? 1.0f : (ccount == 2 ? 0.7f : 0.45f);
+    const float cycleGate = (globalCycleLen > 0 && ccount >= 2)
+                                ? (0.55f + 0.45f * cycleAlign)
+                                : 1.0f;
+    const float score = std::max(0.0f, std::min(1.0f, cycleGate * countBonus *
+                                                           (0.35f * support +
+                                                            0.15f * repetition +
+                                                            0.20f * gapCoherence +
+                                                            0.15f * editCoherence +
+                                                            0.15f * cycleAlign)));
+    if (score > bestScore || (score == bestScore && ccount > cnt[best])) {
+      bestScore = score;
+      best = cand;
     }
   }
 
-  int cycHits = 0;
-  int cycTotal = 0;
-  for (std::size_t i = 1; i < tokens.size(); ++i) {
-    if ((tokens[i - 1].size() >= 2 && tokens[i - 1].size() <= 3) &&
-        (tokens[i].size() >= 2 && tokens[i].size() <= 3)) {
-      ++cycTotal;
-      if (tokens[i] == tokens[i - 1]) {
-        ++cycHits;
+  if (best.empty()) {
+    return {"", 0.0f};
+  }
+  return {best, std::max(0.0f, std::min(1.0f, bestScore))};
+}
+
+PriorSoftMatch SoftPriorMatch(const std::vector<std::string>& priorIds,
+                              const std::string& plausibleId,
+                              float plausibleScore,
+                              const std::string& decodedText) {
+  PriorSoftMatch out;
+  if (priorIds.empty()) {
+    return out;
+  }
+  std::vector<std::string> observed = ExtractUpperTokens(decodedText);
+  if (!plausibleId.empty()) {
+    observed.push_back(plausibleId);
+  }
+  for (const auto& p : priorIds) {
+    for (const auto& t : observed) {
+      if (t.size() < 2 || t.size() > 3 || p.size() < 2 || p.size() > 3) {
+        continue;
+      }
+      const int d = EditDistanceBounded(t, p, 1);
+      if (d > 1) {
+        continue;
+      }
+      const float confBase = plausibleScore > 1e-6f ? plausibleScore : 0.22f;
+      const float sc = (d == 0) ? confBase : (0.78f * confBase);
+      if (!out.matched || sc > out.score) {
+        out.matched = true;
+        out.token = p;
+        out.editDistance = d;
+        out.score = sc;
       }
     }
   }
-
-  const float support = static_cast<float>(bestCount) / static_cast<float>(validTotal);
-  const float repetition = cycTotal > 0 ? static_cast<float>(cycHits) / static_cast<float>(cycTotal)
-                                        : 0.0f;
-  const float score = std::max(0.0f, std::min(1.0f, 0.65f * support + 0.35f * repetition));
-  return {best, score};
+  return out;
 }
 
 int EstimateDotSamplesMatched(const std::vector<float>& env, int sampleRate, int minDotMs,
@@ -755,7 +1192,8 @@ int EstimateDotSamplesMatched(const std::vector<float>& env, int sampleRate, int
     const auto boxed = Boxcar(env, dot);
     const float thr = RobustMadThreshold(boxed, 2.0f);
     const auto bits = BinaryByThreshold(boxed, thr);
-    const auto runs = RunLengthEncode(bits);
+    const auto runsRaw = RunLengthEncode(bits);
+    const auto runs = NormalizeRunsToDotGrid(runsRaw, dot);
     float score = 0.0f;
     for (const auto& r : runs) {
       if (r.value == 1) {
@@ -771,6 +1209,36 @@ int EstimateDotSamplesMatched(const std::vector<float>& env, int sampleRate, int
     }
   }
   return bestDot;
+}
+
+std::pair<std::size_t, std::size_t> DecodeWindowForTrack(const ClusteredTrack& tr,
+                                                         std::size_t totalSamples,
+                                                         int sampleRate, int maxDotMs) {
+  if (totalSamples == 0 || sampleRate <= 0) {
+    return {0U, 0U};
+  }
+  const int marginFromDot = std::max(1, sampleRate * std::max(20, maxDotMs) / 1000 * 8);
+  const int margin = std::max(sampleRate / 2, marginFromDot);
+  const int i0 = std::max(0, static_cast<int>(std::floor(tr.startSec * static_cast<float>(sampleRate))) - margin);
+  const int i1 = std::min(static_cast<int>(totalSamples),
+                          static_cast<int>(std::ceil(tr.endSec * static_cast<float>(sampleRate))) + margin);
+  if (i1 <= i0) {
+    return {0U, totalSamples};
+  }
+
+  std::size_t s0 = static_cast<std::size_t>(i0);
+  std::size_t s1 = static_cast<std::size_t>(i1);
+  const std::size_t minSpan = static_cast<std::size_t>(std::max(1, sampleRate));
+  if (s1 - s0 < minSpan) {
+    const std::size_t c = (s0 + s1) / 2U;
+    const std::size_t half = minSpan / 2U;
+    s0 = (c > half) ? (c - half) : 0U;
+    s1 = std::min(totalSamples, s0 + minSpan);
+    if (s1 - s0 < minSpan && s1 == totalSamples) {
+      s0 = (s1 > minSpan) ? (s1 - minSpan) : 0U;
+    }
+  }
+  return {s0, s1};
 }
 
 bool InNdbRange(float freqHz, const DecoderConfig& cfg) {
@@ -849,6 +1317,22 @@ float ComputeKeyingPeriodicityScore(const std::vector<int>& runsOn, int dotSampl
   }
   const float e = static_cast<float>(err / static_cast<double>(runsOn.size()));
   return Clamp01(1.0f - e / 1.8f);
+}
+
+std::string ClassifyRunTiming(int value, float u) {
+  if (value == 1) {
+    return (std::fabs(u - 1.0f) <= std::fabs(u - 3.0f)) ? "dot_like" : "dash_like";
+  }
+  const float d1 = std::fabs(u - 1.0f);
+  const float d3 = std::fabs(u - 3.0f);
+  const float d7 = std::fabs(u - 7.0f);
+  if (d1 <= d3 && d1 <= d7) {
+    return "intra_gap_like";
+  }
+  if (d3 <= d1 && d3 <= d7) {
+    return "char_gap_like";
+  }
+  return "word_gap_like";
 }
 
 std::vector<ClusteredTrack> ClusterTracks(const std::vector<Track>& tracks, int hopSize, int sampleRate,
@@ -1057,7 +1541,8 @@ std::vector<DecodeResult> ApplyStrictBeaconMode(const std::vector<DecodeResult>&
 
 std::vector<DecodeResult> DecodeNdbFromWav(const std::vector<float>& samples, int sampleRate,
                                            const DecoderConfig& cfg, DecodeStats* stats,
-                                           ProgressCallback progress) {
+                                           ProgressCallback progress,
+                                           std::vector<TrackDebugInfo>* debugTracks) {
   std::vector<DecodeResult> results;
   if (stats) {
     *stats = DecodeStats();
@@ -1119,6 +1604,9 @@ std::vector<DecodeResult> DecodeNdbFromWav(const std::vector<float>& samples, in
       cfg.cfarTrainFreq,
       cfg.cfarGuardFreq,
       cfg.cfarScale,
+      cfg.enableGlrt,
+      cfg.glrtPfa,
+      cfg.glrtMinSnrDb,
   };
   const auto candidates = DetectCandidateBinsMadCfar2D(spec, detCfg);
   if (stats) {
@@ -1130,12 +1618,19 @@ std::vector<DecodeResult> DecodeNdbFromWav(const std::vector<float>& samples, in
   }
   Report(progress, 35, "candidate-detection");
 
-  const auto tracks =
-      cfg.useAmtcFull
-          ? TrackTonesAmtcFull(spec, candidates, cfg.maxTrackStepBins, cfg.minTrackFrames,
-                               cfg.sustainPenalty, cfg.maxTrackGapFrames)
-          : TrackTonesAmtcLite(spec, candidates, cfg.maxTrackStepBins, cfg.minTrackFrames,
-                               cfg.sustainPenalty);
+  const auto tracks = cfg.useAmtcFull
+                          ? TrackTonesAmtcFull(spec, candidates, cfg.maxTrackStepBins,
+                                               cfg.minTrackFrames, cfg.sustainPenalty,
+                                               cfg.maxTrackGapFrames)
+                          : (cfg.useMhtLite
+                                 ? TrackTonesMhtLite(spec, candidates, cfg.maxTrackStepBins,
+                                                     cfg.minTrackFrames, cfg.sustainPenalty,
+                                                     cfg.mhtBeamWidth,
+                                                     cfg.mhtPerTrackCandidates,
+                                                     cfg.mhtMaxNewTracksPerFrame,
+                                                     cfg.maxTrackGapFrames)
+                                 : TrackTonesAmtcLite(spec, candidates, cfg.maxTrackStepBins,
+                                                      cfg.minTrackFrames, cfg.sustainPenalty));
   if (stats) {
     stats->trackCount = static_cast<int>(tracks.size());
   }
@@ -1170,6 +1665,10 @@ std::vector<DecodeResult> DecodeNdbFromWav(const std::vector<float>& samples, in
   std::atomic<int> nextIdx{0};
   std::atomic<int> done{0};
   std::mutex outMutex;
+  std::vector<TrackDebugInfo> debugLocal;
+  if (debugTracks) {
+    debugLocal.reserve(ordered.size());
+  }
 
   const int workerN = std::max(1, cfg.decodeThreads);
   std::vector<std::thread> workers;
@@ -1182,36 +1681,104 @@ std::vector<DecodeResult> DecodeNdbFromWav(const std::vector<float>& samples, in
         break;
       }
       const auto& tr = ordered[static_cast<std::size_t>(idx)];
+      TrackDebugInfo dbg;
+      if (debugTracks) {
+        dbg.trackId = tr.id;
+        dbg.freqHz = tr.freqHz;
+        dbg.startSec = tr.startSec;
+        dbg.endSec = tr.endSec;
+        dbg.decoderModelRequested = cfg.decoderModel;
+      }
     const float f0 = tr.freqHz;
     if (!InNdbRange(f0, cfg)) {
       {
         std::lock_guard<std::mutex> lock(outMutex);
         ++filteredByFreq;
+        if (debugTracks) {
+          dbg.rejectReason = "filtered_frequency_range";
+          debugLocal.push_back(std::move(dbg));
+        }
       }
       const int nowDone = done.fetch_add(1) + 1;
       Report(progress, 58 + (28 * nowDone) / total, "decode-clusters");
       continue;
     }
 
-    auto iq = MixDown(work, workRate, f0);
-    auto env = Envelope(iq);
-    env = ExponentialSmoother(env, cfg.envelopeAlpha);
+    const int dynWin = std::max(128, workRate / 14);
+    auto iq = MixDownDynamic(work, workRate, f0, 10.0f, dynWin);
+    auto envAll = Envelope(iq);
+    envAll = ExponentialSmoother(envAll, cfg.envelopeAlpha);
+
+    const auto win = DecodeWindowForTrack(tr, envAll.size(), workRate, cfg.maxDotMs);
+    std::vector<float> env;
+    if (win.second > win.first && win.second <= envAll.size()) {
+      env.assign(envAll.begin() + static_cast<std::ptrdiff_t>(win.first),
+                 envAll.begin() + static_cast<std::ptrdiff_t>(win.second));
+    } else {
+      env = std::move(envAll);
+    }
 
     const int dotSamples = EstimateDotSamplesMatched(env, workRate, cfg.minDotMs, cfg.maxDotMs);
     auto boxed = Boxcar(env, dotSamples);
-    const float thr = RobustMadThreshold(boxed, cfg.thresholdK);
+    float thr = RobustMadThreshold(boxed, cfg.thresholdK);
+    if (!boxed.empty()) {
+      const float localK = std::max(1.0f, cfg.thresholdK - 0.2f);
+      const float localThr = RobustMadThreshold(boxed, localK);
+      thr = 0.65f * localThr + 0.35f * thr;
+    }
     const auto bits = BinaryByThreshold(boxed, thr);
     const auto runs = RunLengthEncode(bits);
+    if (debugTracks) {
+      dbg.dotSamples = dotSamples;
+      dbg.threshold = thr;
+      dbg.runCount = static_cast<int>(runs.size());
+      int onRuns = 0;
+      int offRuns = 0;
+      const int previewN = std::min<int>(40, static_cast<int>(runs.size()));
+      dbg.runPreview.reserve(static_cast<std::size_t>(previewN));
+      for (int i = 0; i < static_cast<int>(runs.size()); ++i) {
+        const auto& rr = runs[static_cast<std::size_t>(i)];
+        if (rr.value == 1) {
+          ++onRuns;
+        } else {
+          ++offRuns;
+        }
+        if (i < previewN) {
+          SymbolRunDebug rd;
+          rd.index = i;
+          rd.value = rr.value;
+          rd.lengthSamples = rr.length;
+          rd.units = static_cast<float>(rr.length) / static_cast<float>(std::max(1, dotSamples));
+          rd.timingClass = ClassifyRunTiming(rr.value, rd.units);
+          dbg.runPreview.push_back(std::move(rd));
+        }
+      }
+      dbg.onRunCount = onRuns;
+      dbg.offRunCount = offRuns;
+    }
     SequenceDecode decodedText;
     if (cfg.decoderModel == "hmm") {
       decodedText = DecodeMorseViterbiHmm(runs, dotSamples, cfg);
     } else if (cfg.decoderModel == "hsmm") {
       decodedText = DecodeMorseHsmmExplicit(runs, dotSamples, cfg);
+    } else if (cfg.decoderModel == "classic") {
+      decodedText = DecodeMorseClassicTiming(runs, dotSamples, cfg);
+    } else if (cfg.decoderModel == "ab") {
+      decodedText = DecodeMorseAb(runs, dotSamples, cfg);
     } else {
       decodedText = DecodeMorseAuto(runs, dotSamples, cfg);
     }
+    if (debugTracks) {
+      dbg.decoderModelUsed = decodedText.model;
+      dbg.decodedText = decodedText.text;
+    }
 
     if (decodedText.text.empty()) {
+      if (debugTracks) {
+        std::lock_guard<std::mutex> lock(outMutex);
+        dbg.rejectReason = "empty_decoded_text";
+        debugLocal.push_back(std::move(dbg));
+      }
       const int nowDone = done.fetch_add(1) + 1;
       Report(progress, 58 + (28 * nowDone) / total, "decode-clusters");
       continue;
@@ -1246,18 +1813,75 @@ std::vector<DecodeResult> DecodeNdbFromWav(const std::vector<float>& samples, in
     r.compositeScore = 0.35f * r.energyScore + 0.25f * r.continuityScore +
                        0.20f * r.freqStabilityScore + 0.20f * r.keyingPeriodicityScore;
 
+    const float glrtScore = std::clamp(r.energyScore, 0.0f, 1.0f);
+    const float cycloScore = std::clamp(r.keyingPeriodicityScore, 0.0f, 1.0f);
+    const float decoderScore = std::clamp(r.confidenceCalibrated, 0.0f, 1.0f);
+    const float wsum = std::max(1e-6f, std::max(0.0f, cfg.scoreFusionWGlrt) +
+                                           std::max(0.0f, cfg.scoreFusionWCyclo) +
+                                           std::max(0.0f, cfg.scoreFusionWDecoder));
+    const float fused = (cfg.scoreFusionBias + cfg.scoreFusionWGlrt * glrtScore +
+                         cfg.scoreFusionWCyclo * cycloScore +
+                         cfg.scoreFusionWDecoder * decoderScore) /
+                        wsum;
+    r.confidenceCalibrated = std::clamp(fused, 0.0f, 1.0f);
+    r.confidence = r.confidenceCalibrated;
+
     const auto plausible = ExtractPlausibleId(r.text);
     r.plausibleId = plausible.first;
     r.plausibleIdScore = plausible.second;
+    if (debugTracks) {
+      dbg.plausibleId = r.plausibleId;
+      dbg.plausibleIdScore = r.plausibleIdScore;
+    }
 
     if (cfg.enableFreqPriors) {
       const auto cand = FindPriorCandidates(r.freqHz, priors, cfg.freqPriorTolHz);
       r.priorCandidates = JoinPipe(cand);
       r.priorMatched = (!r.plausibleId.empty() && ContainsToken(cand, r.plausibleId));
+
+      if (!r.priorMatched && cfg.forcePriorId && !cand.empty()) {
+        const auto forced = ConstrainedPriorFromRunsForced(runs, cand, cfg.minDotMs, cfg.maxDotMs, workRate);
+        if (forced.matched && forced.bestDistance <= 1 && forced.score >= 0.38f) {
+          r.priorMatched = true;
+          r.plausibleId = forced.token;
+          r.text = forced.token;
+          r.plausibleIdScore = std::max(r.plausibleIdScore, std::min(0.98f, forced.score));
+        }
+      }
+
+      if (!r.priorMatched && !cand.empty()) {
+        const auto constrained = ConstrainedPriorFromRuns(runs, dotSamples, cand);
+        if (constrained.matched && constrained.bestDistance <= 1 && constrained.score >= 0.48f) {
+          r.priorMatched = true;
+          r.plausibleId = constrained.token;
+          r.text = constrained.token;
+          r.plausibleIdScore = std::max(r.plausibleIdScore, 0.60f * constrained.score);
+        }
+      }
+
+      const auto softMatch = SoftPriorMatch(cand, r.plausibleId, r.plausibleIdScore, r.text);
+      if (!r.priorMatched && softMatch.matched && softMatch.editDistance <= 1 &&
+          r.plausibleIdScore >= 0.16f) {
+        r.priorMatched = true;
+        r.plausibleId = softMatch.token;
+        r.text = softMatch.token;
+        r.plausibleIdScore = std::max(r.plausibleIdScore, softMatch.score * 0.92f);
+      }
+
+      if (!r.priorMatched && cfg.forcePriorId && !cand.empty()) {
+        r.priorMatched = true;
+        r.plausibleId = cand.front();
+        r.text = cand.front();
+        r.plausibleIdScore = std::max(r.plausibleIdScore, 0.25f);
+      }
       if (cfg.requirePriorMatch && !cand.empty() && !r.priorMatched) {
         {
           std::lock_guard<std::mutex> lock(outMutex);
           ++plausibleRejected;
+          if (debugTracks) {
+            dbg.rejectReason = "prior_mismatch";
+            debugLocal.push_back(std::move(dbg));
+          }
         }
         const int nowDone = done.fetch_add(1) + 1;
         Report(progress, 58 + (28 * nowDone) / total, "decode-clusters");
@@ -1269,6 +1893,10 @@ std::vector<DecodeResult> DecodeNdbFromWav(const std::vector<float>& samples, in
       {
         std::lock_guard<std::mutex> lock(outMutex);
         ++plausibleRejected;
+        if (debugTracks) {
+          dbg.rejectReason = "plausible_id_filter";
+          debugLocal.push_back(std::move(dbg));
+        }
       }
       const int nowDone = done.fetch_add(1) + 1;
       Report(progress, 58 + (28 * nowDone) / total, "decode-clusters");
@@ -1280,6 +1908,11 @@ std::vector<DecodeResult> DecodeNdbFromWav(const std::vector<float>& samples, in
 
       {
         std::lock_guard<std::mutex> lock(outMutex);
+        if (debugTracks) {
+          dbg.kept = true;
+          dbg.rejectReason = "accepted";
+          debugLocal.push_back(std::move(dbg));
+        }
         decoded.push_back(std::move(r));
       }
       const int nowDone = done.fetch_add(1) + 1;
@@ -1308,6 +1941,16 @@ std::vector<DecodeResult> DecodeNdbFromWav(const std::vector<float>& samples, in
   Report(progress, 90, "dedup-id");
 
   results = std::move(dedup);
+
+  if (debugTracks) {
+    std::sort(debugLocal.begin(), debugLocal.end(), [](const TrackDebugInfo& a, const TrackDebugInfo& b) {
+      if (a.trackId != b.trackId) {
+        return a.trackId < b.trackId;
+      }
+      return a.freqHz < b.freqHz;
+    });
+    *debugTracks = std::move(debugLocal);
+  }
 
   if (stats) {
     stats->decodedCount = static_cast<int>(results.size());
