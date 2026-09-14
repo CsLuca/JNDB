@@ -602,34 +602,85 @@ void EnsureWaterfallPreview(AppState* app) {
   app->waterfallRgb.assign(static_cast<std::size_t>(app->waterfallW * app->waterfallH * 3), 0);
 
   std::vector<float> lv(static_cast<std::size_t>(spec.frameCount * spec.binCount), 0.0f);
-  float minV = std::numeric_limits<float>::max();
-  float maxV = std::numeric_limits<float>::lowest();
+  std::vector<float> dbVals;
+  dbVals.reserve(static_cast<std::size_t>(spec.frameCount * std::max(1, spec.binCount - 1)));
   for (int t = 0; t < spec.frameCount; ++t) {
     for (int b = 1; b < spec.binCount; ++b) {
-      const float v = std::log10(1e-9f + spec.At(t, b));
+      const float v = 20.0f * std::log10(1e-12f + spec.At(t, b));
       lv[static_cast<std::size_t>(t * spec.binCount + b)] = v;
-      minV = std::min(minV, v);
-      maxV = std::max(maxV, v);
+      dbVals.push_back(v);
     }
   }
-  if (maxV <= minV + 1e-9f) {
-    maxV = minV + 1.0f;
+
+  auto percentile = [](std::vector<float> vals, float q) {
+    if (vals.empty()) {
+      return -120.0f;
+    }
+    const float qq = std::clamp(q, 0.0f, 1.0f);
+    const std::size_t idx = static_cast<std::size_t>(qq * static_cast<float>(vals.size() - 1));
+    std::nth_element(vals.begin(), vals.begin() + static_cast<std::ptrdiff_t>(idx), vals.end());
+    return vals[idx];
+  };
+
+  float floorDb = percentile(dbVals, 0.20f);
+  float ceilDb = percentile(dbVals, 0.995f);
+  if (ceilDb < floorDb + 8.0f) {
+    ceilDb = floorDb + 8.0f;
   }
 
-  auto ramp = [](float x) {
+  std::vector<float> norm(static_cast<std::size_t>(spec.frameCount * spec.binCount), 0.0f);
+  for (int t = 0; t < spec.frameCount; ++t) {
+    for (int b = 1; b < spec.binCount; ++b) {
+      float n = (lv[static_cast<std::size_t>(t * spec.binCount + b)] - floorDb) /
+                std::max(1.0f, (ceilDb - floorDb));
+      n = std::clamp((n - 0.01f) * 1.18f, 0.0f, 1.0f);
+      n = std::pow(n, 0.78f);
+      norm[static_cast<std::size_t>(t * spec.binCount + b)] = n;
+    }
+  }
+
+  // HDSDR-like persistence: fast attack, slow decay for thin CW/NDB traces.
+  for (int b = 1; b < spec.binCount; ++b) {
+    float prev = 0.0f;
+    for (int t = 0; t < spec.frameCount; ++t) {
+      const std::size_t idx = static_cast<std::size_t>(t * spec.binCount + b);
+      const float cur = norm[idx];
+      prev = std::max(cur, prev * 0.965f);
+      norm[idx] = prev;
+    }
+  }
+
+  auto rampHdsdr = [](float x) {
     x = std::clamp(x, 0.0f, 1.0f);
-    const float r = std::clamp(1.8f * x - 0.5f, 0.0f, 1.0f);
-    const float g = std::clamp(1.6f * x, 0.0f, 1.0f);
-    const float b = std::clamp(1.2f - 1.5f * x, 0.0f, 1.0f);
-    return RGB(static_cast<int>(255.0f * r), static_cast<int>(255.0f * g), static_cast<int>(255.0f * b));
+    struct Stop {
+      float p;
+      int r;
+      int g;
+      int b;
+    };
+    constexpr Stop k[] = {
+        {0.00f, 0, 0, 0},       {0.12f, 0, 10, 50},   {0.24f, 0, 45, 140},
+        {0.36f, 0, 120, 190},   {0.50f, 0, 175, 90},  {0.66f, 220, 220, 0},
+        {0.82f, 240, 110, 0},   {0.93f, 255, 40, 20}, {1.00f, 255, 245, 230},
+    };
+    for (int i = 1; i < static_cast<int>(std::size(k)); ++i) {
+      if (x <= k[i].p) {
+        const float t = (x - k[i - 1].p) / std::max(1e-6f, (k[i].p - k[i - 1].p));
+        const int r = static_cast<int>(std::round(k[i - 1].r + t * (k[i].r - k[i - 1].r)));
+        const int g = static_cast<int>(std::round(k[i - 1].g + t * (k[i].g - k[i - 1].g)));
+        const int b = static_cast<int>(std::round(k[i - 1].b + t * (k[i].b - k[i - 1].b)));
+        return RGB(r, g, b);
+      }
+    }
+    return RGB(255, 245, 230);
   };
 
   for (int t = 0; t < app->waterfallW; ++t) {
     for (int y = 0; y < app->waterfallH; ++y) {
       const int b = app->waterfallH - y;
       const float v = lv[static_cast<std::size_t>(t * spec.binCount + b)];
-      const float n = (v - minV) / (maxV - minV);
-      const COLORREF c = ramp(std::pow(std::clamp(n, 0.0f, 1.0f), 0.75f));
+      float n = norm[static_cast<std::size_t>(t * spec.binCount + b)];
+      const COLORREF c = rampHdsdr(n);
       const std::size_t idx = static_cast<std::size_t>((y * app->waterfallW + t) * 3);
       app->waterfallRgb[idx + 0] = GetBValue(c);
       app->waterfallRgb[idx + 1] = GetGValue(c);
@@ -1632,9 +1683,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       RegisterClassW(&cc);
 
       const int m = 16;
-      const int leftW = 820;
+      const int leftW = 860;
       const int rightX = m + leftW + 12;
-      const int rightW = 1520 - rightX - m;
+      const int rightW = 1820 - rightX - m;
       int y = 16;
 
       HWND title = CreateWindowW(L"STATIC", L"JNDB Professional Decoder", WS_CHILD | WS_VISIBLE,
@@ -1784,7 +1835,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
       app->chartPanel = CreateWindowW(L"JNDBChartPanel", nullptr,
                                       WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP,
-                                      rightX, 16, rightW, 760, hwnd, (HMENU)kIdChartPanel, nullptr,
+                                      rightX, 16, rightW, 860, hwnd, (HMENU)kIdChartPanel, nullptr,
                                       nullptr);
       SetWindowLongPtrW(app->chartPanel, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(app));
 
@@ -2054,7 +2105,7 @@ int RunGuiApplication(HINSTANCE instance, int nCmdShow) {
                                                                                               WS_CAPTION |
                                                                                               WS_SYSMENU |
                                                                                               WS_MINIMIZEBOX,
-                              CW_USEDEFAULT, CW_USEDEFAULT, 1560, 860, nullptr, nullptr, instance,
+                              CW_USEDEFAULT, CW_USEDEFAULT, 1860, 980, nullptr, nullptr, instance,
                               &app);
   if (!hwnd) {
     return 1;
