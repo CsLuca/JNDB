@@ -853,6 +853,69 @@ void DrawPanadapter(HDC hdc, const RECT& rc, const AppState* app) {
   drawSeries(app->panPeakDb, RGB(255, 104, 94), 1);
   drawSeries(app->panAvgDb, RGB(95, 190, 240), 1);
   drawSeries(app->panInstantDb, RGB(255, 226, 92), 2);
+
+  if (app->previewWav.sampleRate > 0) {
+    const float nyq = 0.5f * static_cast<float>(app->previewWav.sampleRate);
+    const auto xForBin = [&](int bi) {
+      const float fn = static_cast<float>(bi) /
+                       std::max(1.0f, static_cast<float>(std::max(1, app->waterfallH - 1)));
+      return plot.left + static_cast<int>(fn * (plot.right - plot.left));
+    };
+
+    // Notch/lock bands from decoded rows (crowded-channel readability)
+    for (const auto& r : app->overlayRows) {
+      if (r.freqHz <= 0.0f || r.freqHz >= nyq) {
+        continue;
+      }
+      const int bi = std::clamp(static_cast<int>((r.freqHz / std::max(1.0f, nyq)) * app->waterfallH),
+                                0, std::max(0, app->waterfallH - 1));
+      const int x = xForBin(bi);
+      RECT band = {x - 2, plot.top + 1, x + 2, plot.bottom - 1};
+      HBRUSH bb = CreateSolidBrush(RGB(36, 76, 122));
+      FillRect(hdc, &band, bb);
+      DeleteObject(bb);
+    }
+
+    // Peak markers from instant spectrum (HDSDR-like RF markers)
+    struct Peak {
+      int bin = 0;
+      float db = -120.0f;
+    };
+    std::vector<Peak> peaks;
+    const float thr = minDb + 0.62f * (maxDb - minDb);
+    for (int i = 2; i + 2 < static_cast<int>(app->panInstantDb.size()); ++i) {
+      const float c = app->panInstantDb[static_cast<std::size_t>(i)];
+      if (c < thr) {
+        continue;
+      }
+      if (c >= app->panInstantDb[static_cast<std::size_t>(i - 1)] &&
+          c >= app->panInstantDb[static_cast<std::size_t>(i + 1)] &&
+          c > app->panInstantDb[static_cast<std::size_t>(i - 2)] &&
+          c > app->panInstantDb[static_cast<std::size_t>(i + 2)]) {
+        peaks.push_back(Peak{i, c});
+      }
+    }
+    std::sort(peaks.begin(), peaks.end(), [](const Peak& a, const Peak& b) { return a.db > b.db; });
+    if (peaks.size() > 5) {
+      peaks.resize(5);
+    }
+    for (const auto& p : peaks) {
+      const int x = xForBin(p.bin);
+      HPEN mk = CreatePen(PS_DASH, 1, RGB(255, 240, 150));
+      auto oldMk = reinterpret_cast<HPEN>(SelectObject(hdc, mk));
+      MoveToEx(hdc, x, plot.top + 1, nullptr);
+      LineTo(hdc, x, plot.bottom - 1);
+      SelectObject(hdc, oldMk);
+      DeleteObject(mk);
+
+      const float fHz = (static_cast<float>(p.bin) / std::max(1.0f, static_cast<float>(app->waterfallH))) * nyq;
+      std::wstringstream ss;
+      ss << std::fixed << std::setprecision(3) << (fHz / 1000.0f);
+      RECT lr = {x + 3, plot.top + 2, x + 68, plot.top + 16};
+      SetTextColor(hdc, RGB(250, 232, 140));
+      DrawTextW(hdc, ss.str().c_str(), -1, &lr, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+    }
+  }
 }
 
 void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
