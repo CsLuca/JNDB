@@ -145,6 +145,8 @@ struct AppState {
   HWND statusText = nullptr;
   HWND summaryText = nullptr;
   HWND presetHintText = nullptr;
+  HWND resetUiButton = nullptr;
+  HWND tooltipWnd = nullptr;
   HWND historyEdit = nullptr;
   HWND compareEdit = nullptr;
   HWND chartPanel = nullptr;
@@ -212,6 +214,7 @@ struct AppState {
   POINT waterfallHoverPoint = {0, 0};
   std::wstring waterfallHoverText;
   bool mouseLeaveArmed = false;
+  bool suppressNextResetConfirm = false;
 };
 
 void InvalidateWaterfallCache(AppState* app);
@@ -1986,7 +1989,7 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
     }
     RECT hk = {map.left, map.top - 16, map.right, map.top - 1};
     SetTextColor(hdc, RGB(178, 206, 228));
-    DrawTextW(hdc, L"Hotkeys: A show auto, B/C add-clear, D del, N/P nav, 1..9 jump, E/I exp-imp, Ctrl+R reset",
+    DrawTextW(hdc, L"Hotkeys: A show auto, B/C add-clear, D del, N/P nav, 1..9 jump, E/I exp-imp, Ctrl+R reset (Shift=skip prompt)",
               -1, &hk,
               DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
   }
@@ -2974,6 +2977,7 @@ LRESULT CALLBACK ChartProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           return 0;
         }
         if (vk == 'R' && (GetKeyState(VK_CONTROL) & 0x8000)) {
+          app->suppressNextResetConfirm = ((GetKeyState(VK_SHIFT) & 0x8000) != 0);
           SendMessageW(GetParent(hwnd), WM_COMMAND, MAKEWPARAM(kIdResetUiSession, BN_CLICKED), 0);
           return 0;
         }
@@ -3357,8 +3361,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     y + 40, 124, 34, hwnd, (HMENU)kIdBookmarkExport, nullptr, nullptr);
       CreateWindowW(L"BUTTON", L"Import Marks", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, m + 1038,
                     y + 40, 124, 34, hwnd, (HMENU)kIdBookmarkImport, nullptr, nullptr);
-      CreateWindowW(L"BUTTON", L"Reset Session UI", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, m + 1168,
-                    y + 40, 140, 34, hwnd, (HMENU)kIdResetUiSession, nullptr, nullptr);
+      app->resetUiButton = CreateWindowW(L"BUTTON", L"Reset Session UI",
+                                         WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, m + 1168,
+                                         y + 40, 140, 34, hwnd, (HMENU)kIdResetUiSession, nullptr,
+                                         nullptr);
       app->runButton = CreateWindowW(L"BUTTON", L"Start Decode", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
                                      m + 100, y + 40, 152, 34, hwnd, (HMENU)kIdRun, nullptr, nullptr);
       y += 82;
@@ -3392,10 +3398,25 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                                app->agcGammaSlider, app->agcAutoCheck,
                                app->peakLockButton, app->autoBookmarkCheck,
                                app->autoBookmarkConfSlider, app->autoBookmarkMidSlider,
-                               app->autoBookmarkHighSlider,
+                               app->autoBookmarkHighSlider, app->resetUiButton,
                                app->priorEdit, app->priorCheck};
       for (HWND c : controls) {
         SendMessageW(c, WM_SETFONT, reinterpret_cast<WPARAM>(app->font), TRUE);
+      }
+
+      app->tooltipWnd = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr,
+                                        WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX, CW_USEDEFAULT,
+                                        CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, hwnd, nullptr,
+                                        nullptr, nullptr);
+      if (app->tooltipWnd && app->resetUiButton) {
+        TOOLINFOW ti = {};
+        ti.cbSize = sizeof(ti);
+        ti.uFlags = TTF_SUBCLASS;
+        ti.hwnd = hwnd;
+        ti.uId = reinterpret_cast<UINT_PTR>(app->resetUiButton);
+        ti.lpszText = const_cast<wchar_t*>(L"Reset all saved UI session settings to default values");
+        GetClientRect(app->resetUiButton, &ti.rect);
+        SendMessageW(app->tooltipWnd, TTM_ADDTOOL, 0, reinterpret_cast<LPARAM>(&ti));
       }
 
       wchar_t modPath[MAX_PATH] = {};
@@ -3709,6 +3730,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           return 0;
         }
         case kIdResetUiSession:
+          if (!app->suppressNextResetConfirm) {
+            const int r = MessageBoxW(
+                hwnd,
+                L"Reset all saved UI session settings to defaults?\n\nTip: hold Shift while pressing Ctrl+R to skip this confirmation once.",
+                L"Reset Session UI", MB_OKCANCEL | MB_ICONQUESTION);
+            if (r != IDOK) {
+              return 0;
+            }
+          }
+          app->suppressNextResetConfirm = false;
           ResetUiSessionState(app);
           SetStatus(app, L"Session UI reset to defaults");
           return 0;
