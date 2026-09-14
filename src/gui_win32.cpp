@@ -180,6 +180,7 @@ struct AppState {
   float peakLockHz = 0.0f;
   std::vector<float> bookmarksSec;
   std::vector<std::uint8_t> bookmarkAuto;
+  std::vector<float> bookmarkConfidence;
   bool autoBookmarkEnabled = true;
   float autoBookmarkMinConfidence = 0.65f;
   bool showAutoBookmarks = true;
@@ -499,7 +500,8 @@ bool WriteMetrics(const std::string& path, const ndb::DecodeStats& s, std::strin
 }
 
 bool WriteBookmarksCsv(const std::string& path, const std::vector<float>& bookmarksSec,
-                       const std::vector<std::uint8_t>& bookmarkAuto, std::string* error) {
+                       const std::vector<std::uint8_t>& bookmarkAuto,
+                       const std::vector<float>& bookmarkConfidence, std::string* error) {
   std::ofstream out(path);
   if (!out) {
     if (error) {
@@ -507,17 +509,19 @@ bool WriteBookmarksCsv(const std::string& path, const std::vector<float>& bookma
     }
     return false;
   }
-  out << "index,time_sec,type\n";
+  out << "index,time_sec,type,confidence\n";
   for (std::size_t i = 0; i < bookmarksSec.size(); ++i) {
     const bool isAuto = (i < bookmarkAuto.size() && bookmarkAuto[i] != 0);
+    const float conf = (i < bookmarkConfidence.size()) ? bookmarkConfidence[i] : (isAuto ? 0.70f : 1.00f);
     out << (i + 1) << ',' << std::fixed << std::setprecision(3) << bookmarksSec[i] << ','
-        << (isAuto ? "auto" : "manual") << '\n';
+        << (isAuto ? "auto" : "manual") << ',' << std::setprecision(3) << conf << '\n';
   }
   return true;
 }
 
 bool ReadBookmarksCsv(const std::string& path, std::vector<float>* bookmarksSec,
-                      std::vector<std::uint8_t>* bookmarkAuto, std::string* error) {
+                      std::vector<std::uint8_t>* bookmarkAuto,
+                      std::vector<float>* bookmarkConfidence, std::string* error) {
   if (!bookmarksSec) {
     if (error) {
       *error = "Internal error: bookmarks target is null";
@@ -527,6 +531,12 @@ bool ReadBookmarksCsv(const std::string& path, std::vector<float>* bookmarksSec,
   if (!bookmarkAuto) {
     if (error) {
       *error = "Internal error: bookmark auto target is null";
+    }
+    return false;
+  }
+  if (!bookmarkConfidence) {
+    if (error) {
+      *error = "Internal error: bookmark confidence target is null";
     }
     return false;
   }
@@ -541,6 +551,7 @@ bool ReadBookmarksCsv(const std::string& path, std::vector<float>* bookmarksSec,
   struct Rec {
     float t = 0.0f;
     std::uint8_t autoFlag = 0;
+    float conf = 1.0f;
   };
   std::vector<Rec> parsed;
   bool headerSkipped = false;
@@ -559,15 +570,27 @@ bool ReadBookmarksCsv(const std::string& path, std::vector<float>* bookmarksSec,
     std::string t = (c0 == std::string::npos)
                         ? line
                         : (c1 == std::string::npos ? line.substr(c0 + 1) : line.substr(c0 + 1, c1 - c0 - 1));
-    std::string type = (c1 == std::string::npos) ? "manual" : line.substr(c1 + 1);
+    const std::size_t c2 = (c1 == std::string::npos) ? std::string::npos : line.find(',', c1 + 1);
+    std::string type = (c1 == std::string::npos)
+                           ? "manual"
+                           : (c2 == std::string::npos ? line.substr(c1 + 1)
+                                                      : line.substr(c1 + 1, c2 - c1 - 1));
+    std::string confS = (c2 == std::string::npos) ? "" : line.substr(c2 + 1);
     try {
       float v = std::stof(t);
       if (std::isfinite(v) && v >= 0.0f) {
         Rec r;
         r.t = v;
-        r.autoFlag = (type.find("auto") != std::string::npos || type.find("AUTO") != std::string::npos)
-                         ? 1
-                         : 0;
+        r.autoFlag = (type.find("auto") != std::string::npos || type.find("AUTO") != std::string::npos) ? 1 : 0;
+        if (!confS.empty()) {
+          try {
+            r.conf = std::clamp(std::stof(confS), 0.0f, 1.0f);
+          } catch (...) {
+            r.conf = r.autoFlag ? 0.70f : 1.00f;
+          }
+        } else {
+          r.conf = r.autoFlag ? 0.70f : 1.00f;
+        }
         parsed.push_back(r);
       }
     } catch (...) {
@@ -576,16 +599,20 @@ bool ReadBookmarksCsv(const std::string& path, std::vector<float>* bookmarksSec,
   std::sort(parsed.begin(), parsed.end(), [](const Rec& a, const Rec& b) { return a.t < b.t; });
   std::vector<float> tOut;
   std::vector<std::uint8_t> aOut;
+  std::vector<float> cOut;
   for (const auto& r : parsed) {
     if (!tOut.empty() && std::fabs(tOut.back() - r.t) <= 0.05f) {
       aOut.back() = static_cast<std::uint8_t>(aOut.back() & r.autoFlag);
+      cOut.back() = std::max(cOut.back(), r.conf);
       continue;
     }
     tOut.push_back(r.t);
     aOut.push_back(r.autoFlag);
+    cOut.push_back(r.conf);
   }
   *bookmarksSec = std::move(tOut);
   *bookmarkAuto = std::move(aOut);
+  *bookmarkConfidence = std::move(cOut);
   return true;
 }
 
@@ -978,14 +1005,18 @@ void AddBookmarkAtCurrent(AppState* app) {
       if (i < app->bookmarkAuto.size()) {
         app->bookmarkAuto[i] = 0;
       }
+      if (i < app->bookmarkConfidence.size()) {
+        app->bookmarkConfidence[i] = 1.0f;
+      }
       return;
     }
   }
   app->bookmarksSec.push_back(std::clamp(tSec, 0.0f, dur));
   app->bookmarkAuto.push_back(0);
+  app->bookmarkConfidence.push_back(1.0f);
 }
 
-void AddBookmarkAtTime(AppState* app, float tSec, bool automatic) {
+void AddBookmarkAtTime(AppState* app, float tSec, bool automatic, float confidence = 1.0f) {
   if (!app) {
     return;
   }
@@ -998,11 +1029,15 @@ void AddBookmarkAtTime(AppState* app, float tSec, bool automatic) {
       if (i < app->bookmarkAuto.size() && !automatic) {
         app->bookmarkAuto[i] = 0;
       }
+      if (i < app->bookmarkConfidence.size()) {
+        app->bookmarkConfidence[i] = std::max(app->bookmarkConfidence[i], std::clamp(confidence, 0.0f, 1.0f));
+      }
       return;
     }
   }
   app->bookmarksSec.push_back(std::clamp(tSec, 0.0f, dur));
   app->bookmarkAuto.push_back(automatic ? 1 : 0);
+  app->bookmarkConfidence.push_back(std::clamp(confidence, 0.0f, 1.0f));
 
   std::vector<std::size_t> idx(app->bookmarksSec.size());
   for (std::size_t i = 0; i < idx.size(); ++i) idx[i] = i;
@@ -1011,14 +1046,18 @@ void AddBookmarkAtTime(AppState* app, float tSec, bool automatic) {
   });
   std::vector<float> t2;
   std::vector<std::uint8_t> a2;
+  std::vector<float> c2;
   t2.reserve(idx.size());
   a2.reserve(idx.size());
+  c2.reserve(idx.size());
   for (std::size_t i : idx) {
     t2.push_back(app->bookmarksSec[i]);
     a2.push_back((i < app->bookmarkAuto.size()) ? app->bookmarkAuto[i] : 0);
+    c2.push_back((i < app->bookmarkConfidence.size()) ? app->bookmarkConfidence[i] : 1.0f);
   }
   app->bookmarksSec.swap(t2);
   app->bookmarkAuto.swap(a2);
+  app->bookmarkConfidence.swap(c2);
 }
 
 bool BookmarkVisible(const AppState* app, std::size_t idx) {
@@ -1090,6 +1129,9 @@ bool RemoveBookmarkFromMapClick(AppState* app, const RECT& mapRc, POINT p) {
   app->bookmarksSec.erase(app->bookmarksSec.begin() + static_cast<std::ptrdiff_t>(bestIdx));
   if (bestIdx < app->bookmarkAuto.size()) {
     app->bookmarkAuto.erase(app->bookmarkAuto.begin() + static_cast<std::ptrdiff_t>(bestIdx));
+  }
+  if (bestIdx < app->bookmarkConfidence.size()) {
+    app->bookmarkConfidence.erase(app->bookmarkConfidence.begin() + static_cast<std::ptrdiff_t>(bestIdx));
   }
   return true;
 }
@@ -1185,6 +1227,9 @@ bool RemoveBookmarkNearestCurrent(AppState* app) {
   app->bookmarksSec.erase(app->bookmarksSec.begin() + static_cast<std::ptrdiff_t>(bestIdx));
   if (bestIdx < app->bookmarkAuto.size()) {
     app->bookmarkAuto.erase(app->bookmarkAuto.begin() + static_cast<std::ptrdiff_t>(bestIdx));
+  }
+  if (bestIdx < app->bookmarkConfidence.size()) {
+    app->bookmarkConfidence.erase(app->bookmarkConfidence.begin() + static_cast<std::ptrdiff_t>(bestIdx));
   }
   return true;
 }
@@ -1626,16 +1671,33 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
 
     if (!app->bookmarksSec.empty() && app->previewWav.sampleRate > 0) {
       HPEN bmManual = CreatePen(PS_SOLID, 1, RGB(255, 178, 88));
-      HPEN bmAuto = CreatePen(PS_SOLID, 1, RGB(120, 212, 255));
+      HPEN bmAutoHi = CreatePen(PS_SOLID, 1, RGB(112, 236, 160));
+      HPEN bmAutoMid = CreatePen(PS_SOLID, 1, RGB(120, 212, 255));
+      HPEN bmAutoLow = CreatePen(PS_SOLID, 1, RGB(146, 160, 255));
       auto oldBm = reinterpret_cast<HPEN>(SelectObject(hdc, bmManual));
       int bmIdx = 0;
       int shownCount = 0;
       int autoCount = 0;
+      int autoHi = 0;
+      int autoMid = 0;
+      int autoLow = 0;
       for (std::size_t i = 0; i < app->bookmarksSec.size(); ++i) {
         if (!BookmarkVisible(app, i)) continue;
         const float tsec = app->bookmarksSec[i];
         const bool isAuto = (i < app->bookmarkAuto.size() && app->bookmarkAuto[i] != 0);
-        SelectObject(hdc, isAuto ? bmAuto : bmManual);
+        const float conf = (i < app->bookmarkConfidence.size()) ? app->bookmarkConfidence[i] : (isAuto ? 0.70f : 1.00f);
+        if (!isAuto) {
+          SelectObject(hdc, bmManual);
+        } else if (conf >= 0.85f) {
+          SelectObject(hdc, bmAutoHi);
+          ++autoHi;
+        } else if (conf >= 0.65f) {
+          SelectObject(hdc, bmAutoMid);
+          ++autoMid;
+        } else {
+          SelectObject(hdc, bmAutoLow);
+          ++autoLow;
+        }
         const float tn = std::clamp(tsec / std::max(0.1f, dur), 0.0f, 1.0f);
         const int xMap = map.left + static_cast<int>(tn * (map.right - map.left));
         MoveToEx(hdc, xMap, map.top + 1, nullptr);
@@ -1660,11 +1722,14 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
       }
       SelectObject(hdc, oldBm);
       DeleteObject(bmManual);
-      DeleteObject(bmAuto);
+      DeleteObject(bmAutoHi);
+      DeleteObject(bmAutoMid);
+      DeleteObject(bmAutoLow);
 
       std::wstringstream bss;
       bss << L"Bookmarks: " << shownCount << L" (M" << (shownCount - autoCount) << L"/A" << autoCount
-          << L")  Auto: " << (app->autoBookmarkEnabled ? L"ON" : L"OFF") << L" @"
+          << L" h/m/l " << autoHi << L"/" << autoMid << L"/" << autoLow << L")  Auto: "
+          << (app->autoBookmarkEnabled ? L"ON" : L"OFF") << L" @"
           << std::fixed << std::setprecision(2) << app->autoBookmarkMinConfidence << L"  ShowA: "
           << (app->showAutoBookmarks ? L"ON" : L"OFF");
       RECT br = {map.left, map.top - 16, map.left + 520, map.top - 1};
@@ -2328,6 +2393,7 @@ void RefreshWaterfallFromInput(AppState* app) {
   app->overlayRows.clear();
   app->bookmarksSec.clear();
   app->bookmarkAuto.clear();
+  app->bookmarkConfidence.clear();
   InvalidateWaterfallCache(app);
   app->waterfallZoom = 1.0;
   app->waterfallPanPx = 0;
@@ -2529,7 +2595,7 @@ void OnDone(AppState* app, DecodeThreadResult* result) {
         const std::size_t before = app->bookmarksSec.size();
       for (const auto& r : result->decodedRows) {
         if (r.confidence >= app->autoBookmarkMinConfidence) {
-          AddBookmarkAtTime(app, std::max(0.0f, r.startSec), true);
+          AddBookmarkAtTime(app, std::max(0.0f, r.startSec), true, std::clamp(r.confidence, 0.0f, 1.0f));
         }
       }
       if (app->bookmarksSec.size() > before) {
@@ -2607,6 +2673,7 @@ LRESULT CALLBACK ChartProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (vk == 'C') {
           app->bookmarksSec.clear();
           app->bookmarkAuto.clear();
+          app->bookmarkConfidence.clear();
           SetStatus(app, L"Bookmarks cleared [C]");
           InvalidateRect(hwnd, nullptr, TRUE);
           return 0;
@@ -3267,6 +3334,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case kIdBookmarkClear:
           app->bookmarksSec.clear();
           app->bookmarkAuto.clear();
+          app->bookmarkConfidence.clear();
           SetStatus(app, L"Bookmarks cleared");
           InvalidateRect(app->chartPanel, nullptr, TRUE);
           return 0;
@@ -3278,7 +3346,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
           }
           std::string err;
-          if (!WriteBookmarksCsv(ToUtf8(p), app->bookmarksSec, app->bookmarkAuto, &err)) {
+          if (!WriteBookmarksCsv(ToUtf8(p), app->bookmarksSec, app->bookmarkAuto,
+                                 app->bookmarkConfidence, &err)) {
             SetStatus(app, L"Bookmark export failed");
             MessageBoxW(hwnd, ToWide(err).c_str(), L"Bookmarks", MB_OK | MB_ICONERROR);
             return 0;
@@ -3295,7 +3364,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           std::string err;
           std::vector<float> loaded;
           std::vector<std::uint8_t> loadedAuto;
-          if (!ReadBookmarksCsv(ToUtf8(p), &loaded, &loadedAuto, &err)) {
+          std::vector<float> loadedConf;
+          if (!ReadBookmarksCsv(ToUtf8(p), &loaded, &loadedAuto, &loadedConf, &err)) {
             SetStatus(app, L"Bookmark import failed");
             MessageBoxW(hwnd, ToWide(err).c_str(), L"Bookmarks", MB_OK | MB_ICONERROR);
             return 0;
@@ -3308,6 +3378,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 if (i < loadedAuto.size()) {
                   loadedAuto.erase(loadedAuto.begin() + static_cast<std::ptrdiff_t>(i));
                 }
+                if (i < loadedConf.size()) {
+                  loadedConf.erase(loadedConf.begin() + static_cast<std::ptrdiff_t>(i));
+                }
               } else {
                 ++i;
               }
@@ -3315,6 +3388,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           }
           app->bookmarksSec = std::move(loaded);
           app->bookmarkAuto = std::move(loadedAuto);
+          app->bookmarkConfidence = std::move(loadedConf);
           std::wstringstream ss;
           ss << L"Bookmarks imported: " << app->bookmarksSec.size();
           SetStatus(app, ss.str());
