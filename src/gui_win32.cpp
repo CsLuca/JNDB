@@ -1001,6 +1001,32 @@ bool JumpToBookmarkFromMapClick(AppState* app, const RECT& mapRc, POINT p) {
   return true;
 }
 
+bool RemoveBookmarkFromMapClick(AppState* app, const RECT& mapRc, POINT p) {
+  if (!app || app->bookmarksSec.empty() || !PtInRect(&mapRc, p)) {
+    return false;
+  }
+  const float dur = PreviewDurationSec(app);
+  if (dur <= 0.0f) {
+    return false;
+  }
+  std::size_t bestIdx = 0;
+  int bestDx = 999999;
+  for (std::size_t i = 0; i < app->bookmarksSec.size(); ++i) {
+    const float tn = std::clamp(app->bookmarksSec[i] / std::max(0.1f, dur), 0.0f, 1.0f);
+    const int x = mapRc.left + static_cast<int>(tn * (mapRc.right - mapRc.left - 1));
+    const int dx = std::abs(p.x - x);
+    if (dx < bestDx) {
+      bestDx = dx;
+      bestIdx = i;
+    }
+  }
+  if (bestDx > 8) {
+    return false;
+  }
+  app->bookmarksSec.erase(app->bookmarksSec.begin() + static_cast<std::ptrdiff_t>(bestIdx));
+  return true;
+}
+
 void SetWaterfallPanToTime(AppState* app, float tSec) {
   if (!app || app->waterfallW <= 0) {
     return;
@@ -1047,6 +1073,24 @@ bool JumpToBookmarkIndex(AppState* app, int index0) {
     return false;
   }
   SetWaterfallPanToTime(app, app->bookmarksSec[static_cast<std::size_t>(index0)]);
+  return true;
+}
+
+bool RemoveBookmarkNearestCurrent(AppState* app) {
+  if (!app || app->bookmarksSec.empty()) {
+    return false;
+  }
+  const float now = CurrentBookmarkTimeSec(app);
+  std::size_t bestIdx = 0;
+  float bestDt = std::numeric_limits<float>::max();
+  for (std::size_t i = 0; i < app->bookmarksSec.size(); ++i) {
+    const float dt = std::fabs(app->bookmarksSec[i] - now);
+    if (dt < bestDt) {
+      bestDt = dt;
+      bestIdx = i;
+    }
+  }
+  app->bookmarksSec.erase(app->bookmarksSec.begin() + static_cast<std::ptrdiff_t>(bestIdx));
   return true;
 }
 
@@ -1523,7 +1567,7 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
     DrawTextW(hdc, bss.str().c_str(), -1, &br, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
     RECT hk = {map.left, map.top - 16, map.right, map.top - 1};
     SetTextColor(hdc, RGB(178, 206, 228));
-    DrawTextW(hdc, L"Hotkeys: B/C add-clear, N/P nav, 1..9 jump, E/I exp-imp", -1, &hk,
+    DrawTextW(hdc, L"Hotkeys: B/C add-clear, D del, N/P nav, 1..9 jump, E/I exp-imp", -1, &hk,
               DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
   }
 
@@ -2482,6 +2526,13 @@ LRESULT CALLBACK ChartProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           }
           return 0;
         }
+        if (vk == 'D') {
+          if (RemoveBookmarkNearestCurrent(app)) {
+            SetStatus(app, L"Nearest bookmark removed [D]");
+            InvalidateRect(hwnd, nullptr, TRUE);
+          }
+          return 0;
+        }
         if (vk == 'E') {
           SendMessageW(GetParent(hwnd), WM_COMMAND, MAKEWPARAM(kIdBookmarkExport, BN_CLICKED), 0);
           return 0;
@@ -2544,6 +2595,18 @@ LRESULT CALLBACK ChartProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         app->dragging = false;
         app->waterfallDragging = false;
         ReleaseCapture();
+      }
+      return 0;
+    case WM_RBUTTONDOWN:
+      if (app) {
+        const POINT p = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        const RECT wfMap = GetWaterfallMapRect(rc);
+        if (RemoveBookmarkFromMapClick(app, wfMap, p)) {
+          SetStatus(app, L"Bookmark removed");
+          InvalidateRect(hwnd, nullptr, TRUE);
+        }
       }
       return 0;
     case WM_MOUSELEAVE:
