@@ -677,6 +677,9 @@ void SaveUiState(AppState* app) {
   WritePrivateProfileStringW(L"view", L"fps", std::to_wstring(app->waterfallFps).c_str(), s);
   WritePrivateProfileStringW(L"view", L"zoom", std::to_wstring(app->waterfallZoom).c_str(), s);
   WritePrivateProfileStringW(L"view", L"pan", std::to_wstring(app->waterfallPanPx).c_str(), s);
+  WritePrivateProfileStringW(L"view", L"shading", app->shadingEnabled ? L"1" : L"0", s);
+  WritePrivateProfileStringW(L"view", L"colormap3d", std::to_wstring(app->colormap3d).c_str(), s);
+  WritePrivateProfileStringW(L"view", L"peak_lock", app->peakLockEnabled ? L"1" : L"0", s);
 
   WritePrivateProfileStringW(L"agc", L"auto", app->agcAutoContrast ? L"1" : L"0", s);
   saveFloat(L"agc", L"floor", app->agcFloorOffsetDb);
@@ -707,6 +710,9 @@ void LoadUiState(AppState* app) {
   app->waterfallFps = std::clamp(IniReadInt(app->uiStatePath, L"view", L"fps", app->waterfallFps), 10, 120);
   app->waterfallZoom = std::clamp(static_cast<double>(IniReadFloat(app->uiStatePath, L"view", L"zoom", static_cast<float>(app->waterfallZoom))), 1.0, 8.0);
   app->waterfallPanPx = std::max(0, IniReadInt(app->uiStatePath, L"view", L"pan", app->waterfallPanPx));
+  app->shadingEnabled = IniReadBool(app->uiStatePath, L"view", L"shading", app->shadingEnabled);
+  app->colormap3d = std::clamp(IniReadInt(app->uiStatePath, L"view", L"colormap3d", app->colormap3d), 0, 2);
+  app->peakLockEnabled = IniReadBool(app->uiStatePath, L"view", L"peak_lock", app->peakLockEnabled);
 
   app->agcAutoContrast = IniReadBool(app->uiStatePath, L"agc", L"auto", app->agcAutoContrast);
   app->agcFloorOffsetDb = std::clamp(IniReadFloat(app->uiStatePath, L"agc", L"floor", app->agcFloorOffsetDb), -30.0f, 30.0f);
@@ -741,6 +747,16 @@ void LoadUiState(AppState* app) {
   }
   if (app->waterfallFpsCombo) {
     SendMessageW(app->waterfallFpsCombo, CB_SETCURSEL, app->waterfallFps >= 60 ? 1 : 0, 0);
+  }
+  if (app->shadingCheck) {
+    SendMessageW(app->shadingCheck, BM_SETCHECK,
+                 app->shadingEnabled ? BST_CHECKED : BST_UNCHECKED, 0);
+  }
+  if (app->colormapCombo) {
+    SendMessageW(app->colormapCombo, CB_SETCURSEL, app->colormap3d, 0);
+  }
+  if (app->peakLockButton) {
+    SetWindowTextW(app->peakLockButton, app->peakLockEnabled ? L"Peak Lock: ON" : L"Peak Lock: OFF");
   }
   if (app->agcFloorSlider) {
     SendMessageW(app->agcFloorSlider, TBM_SETPOS, TRUE, static_cast<LPARAM>(app->agcFloorOffsetDb));
@@ -3433,12 +3449,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case kIdShadingCheck:
           app->shadingEnabled =
               (SendMessageW(app->shadingCheck, BM_GETCHECK, 0, 0) == BST_CHECKED);
+          SaveUiState(app);
           InvalidateRect(app->chartPanel, nullptr, TRUE);
           return 0;
         case kIdColormapCombo:
           if (HIWORD(wParam) == CBN_SELCHANGE && app->colormapCombo) {
             const int sel = static_cast<int>(SendMessageW(app->colormapCombo, CB_GETCURSEL, 0, 0));
             app->colormap3d = std::clamp(sel, 0, 2);
+            SaveUiState(app);
             InvalidateRect(app->chartPanel, nullptr, TRUE);
           }
           return 0;
@@ -3540,6 +3558,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             app->peakLockBin = -1;
             app->peakLockHz = 0.0f;
           }
+          SaveUiState(app);
           if (app->peakLockButton) {
             SetWindowTextW(app->peakLockButton,
                            app->peakLockEnabled ? L"Peak Lock: ON" : L"Peak Lock: OFF");
