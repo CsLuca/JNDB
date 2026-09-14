@@ -750,6 +750,18 @@ RECT GetWaterfallPlotRect(const RECT& clientRc) {
   return plot;
 }
 
+RECT GetWaterfallMapRect(const RECT& clientRc) {
+  const int outerGap = 10;
+  const int wfH = 360;
+  RECT wfRc = {clientRc.left + outerGap, clientRc.top + outerGap, clientRc.right - outerGap,
+               clientRc.top + wfH};
+  const int panH = 112;
+  RECT panRc = {wfRc.left + 14, wfRc.top + 30, wfRc.right - 14, wfRc.top + 30 + panH};
+  RECT plot = {wfRc.left + 14, panRc.bottom + 8, wfRc.right - 14, wfRc.bottom - 34};
+  RECT map = {plot.left, plot.bottom - 12, plot.right, plot.bottom - 2};
+  return map;
+}
+
 UINT WaterfallTimerMs(const AppState* app) {
   if (!app) {
     return 33;
@@ -1062,6 +1074,68 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
   }
   SelectObject(hdc, oldTickPen);
   DeleteObject(tickPen);
+
+  // Mini-map timeline + viewport (SDR-style overview for long files)
+  if (app->waterfallW > 4) {
+    RECT map = {plot.left, plot.bottom - 12, plot.right, plot.bottom - 2};
+    HBRUSH mbg = CreateSolidBrush(RGB(8, 14, 22));
+    FillRect(hdc, &map, mbg);
+    DeleteObject(mbg);
+    HPEN mb = CreatePen(PS_SOLID, 1, RGB(66, 92, 118));
+    auto oldMb = reinterpret_cast<HPEN>(SelectObject(hdc, mb));
+    MoveToEx(hdc, map.left, map.top, nullptr);
+    LineTo(hdc, map.right - 1, map.top);
+    LineTo(hdc, map.right - 1, map.bottom - 1);
+    LineTo(hdc, map.left, map.bottom - 1);
+    LineTo(hdc, map.left, map.top);
+    SelectObject(hdc, oldMb);
+    DeleteObject(mb);
+
+    // overview energy trace (top-of-band proxy)
+    if (!app->waterfallDbRender.empty()) {
+      HPEN tr = CreatePen(PS_SOLID, 1, RGB(96, 168, 232));
+      auto oldTr = reinterpret_cast<HPEN>(SelectObject(hdc, tr));
+      for (int x = map.left; x < map.right; ++x) {
+        const float xn = static_cast<float>(x - map.left) /
+                         std::max<int>(1, static_cast<int>(map.right - map.left - 1));
+        const int col = std::clamp(static_cast<int>(xn * (app->waterfallW - 1)), 0, app->waterfallW - 1);
+        float maxDb = -120.0f;
+        for (int y = 0; y < app->waterfallH; y += std::max(1, app->waterfallH / 42)) {
+          maxDb = std::max(maxDb, app->waterfallDbRender[static_cast<std::size_t>(y * app->waterfallW + col)]);
+        }
+        const float yn = std::clamp((maxDb - app->panMinDb) / std::max(1.0f, app->panMaxDb - app->panMinDb),
+                                    0.0f, 1.0f);
+        const int yy = map.bottom - 1 - static_cast<int>(yn * (map.bottom - map.top - 2));
+        if (x == map.left) {
+          MoveToEx(hdc, x, yy, nullptr);
+        } else {
+          LineTo(hdc, x, yy);
+        }
+      }
+      SelectObject(hdc, oldTr);
+      DeleteObject(tr);
+    }
+
+    // visible viewport window
+    const int vx0 = map.left + (srcX * (map.right - map.left)) / std::max(1, app->waterfallW);
+    const int vx1 = map.left + ((srcX + srcW) * (map.right - map.left)) / std::max(1, app->waterfallW);
+    RECT vp = {std::clamp<int>(vx0, static_cast<int>(map.left), static_cast<int>(map.right - 1)),
+               static_cast<LONG>(map.top + 1),
+               std::clamp<int>(vx1, static_cast<int>(map.left + 1), static_cast<int>(map.right)),
+               static_cast<LONG>(map.bottom - 1)};
+    HBRUSH vb = CreateSolidBrush(RGB(255, 240, 96));
+    FillRect(hdc, &vp, vb);
+    DeleteObject(vb);
+    HPEN vpPen = CreatePen(PS_SOLID, 1, RGB(255, 250, 160));
+    auto oldVp = reinterpret_cast<HPEN>(SelectObject(hdc, vpPen));
+    MoveToEx(hdc, vp.left, vp.top, nullptr);
+    LineTo(hdc, vp.right - 1, vp.top);
+    LineTo(hdc, vp.right - 1, vp.bottom - 1);
+    LineTo(hdc, vp.left, vp.bottom - 1);
+    LineTo(hdc, vp.left, vp.top);
+    SelectObject(hdc, oldVp);
+    DeleteObject(vpPen);
+  }
 
   if (app && app->waterfallHoverActive && PtInRect(&plot, app->waterfallHoverPoint)) {
     HPEN cr = CreatePen(PS_SOLID, 1, RGB(255, 255, 180));
@@ -1861,10 +1935,22 @@ LRESULT CALLBACK ChartProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         RECT rc;
         GetClientRect(hwnd, &rc);
         const RECT wfPlot = GetWaterfallPlotRect(rc);
-        if (PtInRect(&wfPlot, p)) {
+        const RECT wfMap = GetWaterfallMapRect(rc);
+        if (PtInRect(&wfPlot, p) || PtInRect(&wfMap, p)) {
           app->waterfallDragging = true;
           app->waterfallDragStartX = p.x;
           app->waterfallPanStartPx = app->waterfallPanPx;
+          if (PtInRect(&wfMap, p) && app->waterfallW > 0) {
+            const float xn = static_cast<float>(p.x - wfMap.left) /
+                             std::max<int>(1, static_cast<int>(wfMap.right - wfMap.left - 1));
+            const int vis = std::max(60, static_cast<int>(std::round(
+                                         static_cast<double>(std::max(1, app->waterfallW)) /
+                                         std::max(1.0, app->waterfallZoom))));
+            const int centerCol = std::clamp(static_cast<int>(xn * app->waterfallW), 0, app->waterfallW - 1);
+            const int maxPan = std::max(0, app->waterfallW - vis);
+            app->waterfallPanPx = std::clamp(centerCol - vis / 2, 0, maxPan);
+            app->waterfallPanStartPx = app->waterfallPanPx;
+          }
         } else {
           app->dragging = true;
           app->dragStartX = p.x;
