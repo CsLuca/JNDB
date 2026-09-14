@@ -61,6 +61,7 @@ constexpr int kIdPitchSlider = 1026;
 constexpr int kIdShadingCheck = 1027;
 constexpr int kIdColormapCombo = 1028;
 constexpr int kIdWaterfallDxPreset = 1029;
+constexpr int kIdWaterfallFpsCombo = 1030;
 
 constexpr UINT kMsgProgress = WM_APP + 1;
 constexpr UINT kMsgDone = WM_APP + 2;
@@ -110,6 +111,7 @@ struct AppState {
   HWND pitchSlider = nullptr;
   HWND shadingCheck = nullptr;
   HWND colormapCombo = nullptr;
+  HWND waterfallFpsCombo = nullptr;
   HWND runButton = nullptr;
   HWND progressBar = nullptr;
   HWND statusText = nullptr;
@@ -133,11 +135,14 @@ struct AppState {
   int waterfallH = 0;
   std::vector<ndb::DecodeResult> overlayRows;
   int decodeProgressPct = 0;
+  double decodeProgressVisualPct = 0.0;
+  ULONGLONG decodeStartTickMs = 0;
   int waterfallViewMode = 1;  // 0: 2D only, 1: 2D+3D, 2: 3D large
   int yawDeg = 36;
   int pitchDeg = 24;
   bool shadingEnabled = true;
   int colormap3d = 0;
+  int waterfallFps = 30;
   double waterfallZoom = 1.0;
   int waterfallPanPx = 0;
   bool waterfallDragging = false;
@@ -698,6 +703,14 @@ RECT GetWaterfallPlotRect(const RECT& clientRc) {
   return plot;
 }
 
+UINT WaterfallTimerMs(const AppState* app) {
+  if (!app) {
+    return 33;
+  }
+  const int fps = std::clamp(app->waterfallFps, 10, 120);
+  return static_cast<UINT>(std::max(8, 1000 / fps));
+}
+
 void ComputeWaterfallSourceWindow(const AppState* app, int* srcX, int* srcW) {
   if (!app || app->waterfallW <= 0) {
     *srcX = 0;
@@ -705,7 +718,8 @@ void ComputeWaterfallSourceWindow(const AppState* app, int* srcX, int* srcW) {
     return;
   }
   if (app->running) {
-    const int curCol = std::clamp((app->decodeProgressPct * std::max(1, app->waterfallW - 1)) / 100,
+    const int pvis = std::clamp(static_cast<int>(std::round(app->decodeProgressVisualPct)), 0, 100);
+    const int curCol = std::clamp((pvis * std::max(1, app->waterfallW - 1)) / 100,
                                   0, std::max(0, app->waterfallW - 1));
     const int win = std::max(120, app->waterfallW / 2);
     *srcW = std::min(app->waterfallW, win);
@@ -781,7 +795,7 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
                 SRCCOPY);
 
   if (app && app->running) {
-    const int p = std::clamp(app->decodeProgressPct, 0, 100);
+    const int p = std::clamp(static_cast<int>(std::round(app->decodeProgressVisualPct)), 0, 100);
     const int xSweep = plot.left + ((plot.right - plot.left) * p) / 100;
     HPEN sweep = CreatePen(PS_SOLID, 2, RGB(255, 245, 160));
     auto oldSweep = reinterpret_cast<HPEN>(SelectObject(hdc, sweep));
@@ -1444,7 +1458,9 @@ void StartDecode(AppState* app) {
 
   app->running = true;
   app->decodeProgressPct = 0;
-  SetTimer(app->hwnd, kWaterfallTimerId, 33, nullptr);
+  app->decodeProgressVisualPct = 0.0;
+  app->decodeStartTickMs = GetTickCount64();
+  SetTimer(app->hwnd, kWaterfallTimerId, WaterfallTimerMs(app), nullptr);
   SetBusy(app, true);
   SendMessageW(app->progressBar, PBM_SETPOS, 0, 0);
   SetStatus(app, L"Starting...");
@@ -1541,6 +1557,7 @@ void StartDecode(AppState* app) {
 void OnDone(AppState* app, DecodeThreadResult* result) {
   app->running = false;
   app->decodeProgressPct = 100;
+  app->decodeProgressVisualPct = 100.0;
   KillTimer(app->hwnd, kWaterfallTimerId);
   SetBusy(app, false);
   SendMessageW(app->progressBar, PBM_SETPOS, 100, 0);
@@ -1643,7 +1660,14 @@ LRESULT CALLBACK ChartProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     RECT rc;
     GetClientRect(hwnd, &rc);
     if (app) {
-      DrawCharts(app, hdc, rc);
+      HDC memdc = CreateCompatibleDC(hdc);
+      HBITMAP bmp = CreateCompatibleBitmap(hdc, rc.right - rc.left, rc.bottom - rc.top);
+      auto oldBmp = reinterpret_cast<HBITMAP>(SelectObject(memdc, bmp));
+      DrawCharts(app, memdc, rc);
+      BitBlt(hdc, 0, 0, rc.right - rc.left, rc.bottom - rc.top, memdc, 0, 0, SRCCOPY);
+      SelectObject(memdc, oldBmp);
+      DeleteObject(bmp);
+      DeleteDC(memdc);
     }
     EndPaint(hwnd, &ps);
     return 0;
@@ -1789,8 +1813,17 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       SendMessageW(app->colormapCombo, CB_ADDSTRING, 0, (LPARAM)L"Magma");
       SendMessageW(app->colormapCombo, CB_ADDSTRING, 0, (LPARAM)L"Neon");
       SendMessageW(app->colormapCombo, CB_SETCURSEL, 0, 0);
+      CreateWindowW(L"STATIC", L"FPS", WS_CHILD | WS_VISIBLE, m + 968, y + 6, 28, 22, hwnd,
+                    nullptr, nullptr, nullptr);
+      app->waterfallFpsCombo = CreateWindowW(L"COMBOBOX", L"",
+                                             WS_CHILD | WS_VISIBLE | WS_VSCROLL | CBS_DROPDOWNLIST,
+                                             m + 1000, y, 84, 100, hwnd,
+                                             (HMENU)kIdWaterfallFpsCombo, nullptr, nullptr);
+      SendMessageW(app->waterfallFpsCombo, CB_ADDSTRING, 0, (LPARAM)L"30 FPS");
+      SendMessageW(app->waterfallFpsCombo, CB_ADDSTRING, 0, (LPARAM)L"60 FPS");
+      SendMessageW(app->waterfallFpsCombo, CB_SETCURSEL, 0, 0);
       CreateWindowW(L"BUTTON", L"3D DX Weak Preset", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                    m + 808, y, 156, 30, hwnd, (HMENU)kIdWaterfallDxPreset, nullptr, nullptr);
+                    m + 1092, y, 156, 30, hwnd, (HMENU)kIdWaterfallDxPreset, nullptr, nullptr);
       y += 38;
 
       CreateWindowW(L"STATIC", L"Prior CSV", WS_CHILD | WS_VISIBLE, m, y + 6, 100, 22, hwnd,
@@ -1843,7 +1876,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                                app->compareEdit, app->inputEdit, app->outputEdit, app->metricsEdit,
                                app->presetCombo, app->calibCombo, app->waterfallViewCombo,
                                app->yawSlider, app->pitchSlider, app->shadingCheck,
-                               app->colormapCombo, app->priorEdit, app->priorCheck};
+                               app->colormapCombo, app->waterfallFpsCombo,
+                               app->priorEdit, app->priorCheck};
       for (HWND c : controls) {
         SendMessageW(c, WM_SETFONT, reinterpret_cast<WPARAM>(app->font), TRUE);
       }
@@ -1975,6 +2009,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           app->pitchDeg = 31;
           app->shadingEnabled = true;
           app->colormap3d = 1;
+          app->waterfallFps = 60;
           if (app->waterfallViewCombo) {
             SendMessageW(app->waterfallViewCombo, CB_SETCURSEL, app->waterfallViewMode, 0);
           }
@@ -1991,7 +2026,23 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           if (app->colormapCombo) {
             SendMessageW(app->colormapCombo, CB_SETCURSEL, app->colormap3d, 0);
           }
+          if (app->waterfallFpsCombo) {
+            SendMessageW(app->waterfallFpsCombo, CB_SETCURSEL, 1, 0);
+          }
+          if (app->running) {
+            SetTimer(app->hwnd, kWaterfallTimerId, WaterfallTimerMs(app), nullptr);
+          }
           InvalidateRect(app->chartPanel, nullptr, TRUE);
+          return 0;
+        case kIdWaterfallFpsCombo:
+          if (HIWORD(wParam) == CBN_SELCHANGE && app->waterfallFpsCombo) {
+            const int sel = static_cast<int>(SendMessageW(app->waterfallFpsCombo, CB_GETCURSEL, 0, 0));
+            app->waterfallFps = (sel == 1) ? 60 : 30;
+            if (app->running) {
+              SetTimer(app->hwnd, kWaterfallTimerId, WaterfallTimerMs(app), nullptr);
+            }
+            InvalidateRect(app->chartPanel, nullptr, TRUE);
+          }
           return 0;
       }
       return 0;
@@ -2074,6 +2125,23 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       return 0;
     case WM_TIMER:
       if (app && wParam == kWaterfallTimerId && app->running) {
+        const ULONGLONG now = GetTickCount64();
+        const double elapsedMs = static_cast<double>(now - app->decodeStartTickMs);
+        double rtPct = 0.0;
+        if (app->previewWav.sampleRate > 0 && !app->previewWav.samples.empty()) {
+          const double durSec = static_cast<double>(app->previewWav.samples.size()) /
+                                static_cast<double>(app->previewWav.sampleRate);
+          if (durSec > 0.01) {
+            rtPct = (elapsedMs / (durSec * 1000.0)) * 100.0;
+          }
+        }
+        const double target = std::clamp(std::max(static_cast<double>(app->decodeProgressPct), rtPct),
+                                         0.0, 100.0);
+        app->decodeProgressVisualPct += (target - app->decodeProgressVisualPct) * 0.24;
+        if (target - app->decodeProgressVisualPct > 2.5) {
+          app->decodeProgressVisualPct += 0.45;
+        }
+        app->decodeProgressVisualPct = std::clamp(app->decodeProgressVisualPct, 0.0, 100.0);
         InvalidateRect(app->chartPanel, nullptr, TRUE);
       }
       return 0;
