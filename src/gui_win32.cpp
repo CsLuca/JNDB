@@ -68,6 +68,8 @@ constexpr int kIdAgcGainSlider = 1033;
 constexpr int kIdAgcGammaSlider = 1034;
 constexpr int kIdAgcAutoCheck = 1035;
 constexpr int kIdPeakLockButton = 1036;
+constexpr int kIdBookmarkAdd = 1037;
+constexpr int kIdBookmarkClear = 1038;
 
 constexpr UINT kMsgProgress = WM_APP + 1;
 constexpr UINT kMsgDone = WM_APP + 2;
@@ -170,6 +172,7 @@ struct AppState {
   bool peakLockEnabled = false;
   int peakLockBin = -1;
   float peakLockHz = 0.0f;
+  std::vector<float> bookmarksSec;
   double waterfallZoom = 1.0;
   int waterfallPanPx = 0;
   bool waterfallDragging = false;
@@ -835,6 +838,82 @@ void ComputeWaterfallSourceWindow(const AppState* app, int* srcX, int* srcW) {
   *srcX = pan;
 }
 
+float PreviewDurationSec(const AppState* app) {
+  if (!app || app->previewWav.sampleRate <= 0 || app->previewWav.samples.empty()) {
+    return 0.0f;
+  }
+  return static_cast<float>(app->previewWav.samples.size()) /
+         static_cast<float>(std::max(1, app->previewWav.sampleRate));
+}
+
+float CurrentBookmarkTimeSec(const AppState* app) {
+  const float dur = PreviewDurationSec(app);
+  if (dur <= 0.0f || !app) {
+    return 0.0f;
+  }
+  if (app->running) {
+    const float p = static_cast<float>(std::clamp(app->decodeProgressVisualPct, 0.0, 100.0) / 100.0);
+    return std::clamp(p * dur, 0.0f, dur);
+  }
+  int srcX = 0;
+  int srcW = 0;
+  ComputeWaterfallSourceWindow(app, &srcX, &srcW);
+  const float centerCol = static_cast<float>(srcX) + 0.5f * static_cast<float>(std::max(1, srcW));
+  const float n = centerCol / std::max(1.0f, static_cast<float>(app->waterfallW - 1));
+  return std::clamp(n * dur, 0.0f, dur);
+}
+
+void AddBookmarkAtCurrent(AppState* app) {
+  if (!app) {
+    return;
+  }
+  const float tSec = CurrentBookmarkTimeSec(app);
+  const float dur = PreviewDurationSec(app);
+  if (dur <= 0.0f) {
+    return;
+  }
+  for (float t : app->bookmarksSec) {
+    if (std::fabs(t - tSec) <= 0.08f) {
+      return;
+    }
+  }
+  app->bookmarksSec.push_back(std::clamp(tSec, 0.0f, dur));
+  std::sort(app->bookmarksSec.begin(), app->bookmarksSec.end());
+}
+
+bool JumpToBookmarkFromMapClick(AppState* app, const RECT& mapRc, POINT p) {
+  if (!app || app->bookmarksSec.empty() || app->waterfallW <= 0 || !PtInRect(&mapRc, p)) {
+    return false;
+  }
+  const float dur = PreviewDurationSec(app);
+  if (dur <= 0.0f) {
+    return false;
+  }
+
+  float bestT = -1.0f;
+  int bestDx = 999999;
+  for (float tsec : app->bookmarksSec) {
+    const float tn = std::clamp(tsec / std::max(0.1f, dur), 0.0f, 1.0f);
+    const int x = mapRc.left + static_cast<int>(tn * (mapRc.right - mapRc.left - 1));
+    const int dx = std::abs(p.x - x);
+    if (dx < bestDx) {
+      bestDx = dx;
+      bestT = tsec;
+    }
+  }
+  if (bestDx > 8 || bestT < 0.0f) {
+    return false;
+  }
+
+  const int vis = std::max(60, static_cast<int>(std::round(static_cast<double>(std::max(1, app->waterfallW)) /
+                                                            std::max(1.0, app->waterfallZoom))));
+  const int maxPan = std::max(0, app->waterfallW - vis);
+  const int col = std::clamp(static_cast<int>(std::round((bestT / dur) * (app->waterfallW - 1))),
+                             0, app->waterfallW - 1);
+  app->waterfallPanPx = std::clamp(col - vis / 2, 0, maxPan);
+  return true;
+}
+
 void UpdatePanadapterPersistence(AppState* app) {
   if (!app || app->waterfallW <= 0 || app->waterfallH <= 0 || app->waterfallDbRender.empty()) {
     return;
@@ -1153,6 +1232,16 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
   SelectObject(hdc, oldPen);
   DeleteObject(axis);
 
+  const float dur = (app->previewWav.sampleRate > 0)
+                        ? (static_cast<float>(app->previewWav.samples.size()) /
+                           static_cast<float>(std::max(1, app->previewWav.sampleRate)))
+                        : 0.0f;
+  const float viewStart = (static_cast<float>(srcX) / std::max(1, app->waterfallW - 1)) *
+                          std::max(0.1f, dur);
+  const float viewDur = (static_cast<float>(srcW) / std::max(1, app->waterfallW)) *
+                        std::max(0.1f, dur);
+  const float viewEnd = viewStart + viewDur;
+
   SetTextColor(hdc, RGB(166, 194, 220));
   RECT xLab = {plot.left, plot.bottom + 2, plot.right, plot.bottom + 20};
   DrawTextW(hdc, L"Time ->", -1, &xLab, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
@@ -1259,6 +1348,32 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
     LineTo(hdc, vp.left, vp.top);
     SelectObject(hdc, oldVp);
     DeleteObject(vpPen);
+
+    if (!app->bookmarksSec.empty() && app->previewWav.sampleRate > 0) {
+      HPEN bmPen = CreatePen(PS_SOLID, 1, RGB(255, 178, 88));
+      auto oldBm = reinterpret_cast<HPEN>(SelectObject(hdc, bmPen));
+      for (float tsec : app->bookmarksSec) {
+        const float tn = std::clamp(tsec / std::max(0.1f, dur), 0.0f, 1.0f);
+        const int xMap = map.left + static_cast<int>(tn * (map.right - map.left));
+        MoveToEx(hdc, xMap, map.top + 1, nullptr);
+        LineTo(hdc, xMap, map.bottom - 1);
+
+        if (tsec >= viewStart && tsec <= viewEnd) {
+          const float vxn = (tsec - viewStart) / std::max(0.1f, viewDur);
+          const int xPlot = plot.left + static_cast<int>(vxn * (plot.right - plot.left));
+          MoveToEx(hdc, xPlot, plot.top + 2, nullptr);
+          LineTo(hdc, xPlot, plot.bottom - 14);
+        }
+      }
+      SelectObject(hdc, oldBm);
+      DeleteObject(bmPen);
+    }
+
+    std::wstringstream bss;
+    bss << L"Bookmarks: " << app->bookmarksSec.size();
+    RECT br = {map.left, map.top - 16, map.left + 180, map.top - 1};
+    SetTextColor(hdc, RGB(255, 196, 120));
+    DrawTextW(hdc, bss.str().c_str(), -1, &br, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
   }
 
   // RF Zoom lane around peak-lock (local magnifier like SDR narrow view)
@@ -1460,11 +1575,6 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
     auto oldT = reinterpret_cast<HPEN>(SelectObject(hdc, trk));
     SetTextColor(hdc, RGB(255, 235, 130));
     SetBkMode(hdc, TRANSPARENT);
-    const float dur = static_cast<float>(app->previewWav.samples.size()) /
-                      static_cast<float>(std::max(1, app->previewWav.sampleRate));
-    const float viewStart = (static_cast<float>(srcX) / std::max(1, app->waterfallW - 1)) * dur;
-    const float viewDur = (static_cast<float>(srcW) / std::max(1, app->waterfallW)) * dur;
-    const float viewEnd = viewStart + viewDur;
     for (const auto& r : app->overlayRows) {
       if (r.endSec < viewStart || r.startSec > viewEnd) {
         continue;
@@ -1914,6 +2024,7 @@ void RefreshWaterfallFromInput(AppState* app) {
   }
   app->previewWav = ndb::WavData();
   app->overlayRows.clear();
+  app->bookmarksSec.clear();
   InvalidateWaterfallCache(app);
   app->waterfallZoom = 1.0;
   app->waterfallPanPx = 0;
@@ -2134,6 +2245,11 @@ LRESULT CALLBACK ChartProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         GetClientRect(hwnd, &rc);
         const RECT wfPlot = GetWaterfallPlotRect(rc);
         const RECT wfMap = GetWaterfallMapRect(rc);
+        if (JumpToBookmarkFromMapClick(app, wfMap, p)) {
+          SetStatus(app, L"Jumped to bookmark");
+          InvalidateRect(hwnd, nullptr, TRUE);
+          return 0;
+        }
         if (PtInRect(&wfPlot, p) || PtInRect(&wfMap, p)) {
           app->waterfallDragging = true;
           app->waterfallDragStartX = p.x;
@@ -2466,6 +2582,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     120, 34, hwnd, (HMENU)kIdResetView, nullptr, nullptr);
       CreateWindowW(L"BUTTON", L"Export PNG", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, m + 520, y + 40,
                     120, 34, hwnd, (HMENU)kIdExportPng, nullptr, nullptr);
+      CreateWindowW(L"BUTTON", L"Add Bookmark", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, m + 646,
+                    y + 40, 130, 34, hwnd, (HMENU)kIdBookmarkAdd, nullptr, nullptr);
+      CreateWindowW(L"BUTTON", L"Clear Marks", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, m + 782,
+                    y + 40, 120, 34, hwnd, (HMENU)kIdBookmarkClear, nullptr, nullptr);
       app->runButton = CreateWindowW(L"BUTTON", L"Start Decode", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
                                      m + 100, y + 40, 152, 34, hwnd, (HMENU)kIdRun, nullptr, nullptr);
       y += 82;
@@ -2705,6 +2825,25 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             SetWindowTextW(app->peakLockButton,
                            app->peakLockEnabled ? L"Peak Lock: ON" : L"Peak Lock: OFF");
           }
+          InvalidateRect(app->chartPanel, nullptr, TRUE);
+          return 0;
+        case kIdBookmarkAdd: {
+          const std::size_t before = app->bookmarksSec.size();
+          AddBookmarkAtCurrent(app);
+          const std::size_t after = app->bookmarksSec.size();
+          if (after > before) {
+            std::wstringstream ss;
+            ss << L"Bookmark #" << after << L" added";
+            SetStatus(app, ss.str());
+          } else {
+            SetStatus(app, L"Bookmark already present / unavailable");
+          }
+          InvalidateRect(app->chartPanel, nullptr, TRUE);
+          return 0;
+        }
+        case kIdBookmarkClear:
+          app->bookmarksSec.clear();
+          SetStatus(app, L"Bookmarks cleared");
           InvalidateRect(app->chartPanel, nullptr, TRUE);
           return 0;
       }
