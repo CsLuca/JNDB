@@ -131,6 +131,7 @@ struct AppState {
   std::vector<HistoryEntry> historyCompare;
   ndb::WavData previewWav;
   std::vector<std::uint8_t> waterfallRgb;
+  std::vector<float> waterfallDbRender;
   int waterfallW = 0;
   int waterfallH = 0;
   std::vector<float> panInstantDb;
@@ -161,6 +162,9 @@ struct AppState {
   bool hoverActive = false;
   POINT hoverPoint = {0, 0};
   std::wstring hoverText;
+  bool waterfallHoverActive = false;
+  POINT waterfallHoverPoint = {0, 0};
+  std::wstring waterfallHoverText;
   bool mouseLeaveArmed = false;
 };
 
@@ -610,6 +614,7 @@ void EnsureWaterfallPreview(AppState* app) {
   app->waterfallW = std::max(1, spec.frameCount);
   app->waterfallH = std::max(1, spec.binCount - 1);
   app->waterfallRgb.assign(static_cast<std::size_t>(app->waterfallW * app->waterfallH * 3), 0);
+  app->waterfallDbRender.assign(static_cast<std::size_t>(app->waterfallW * app->waterfallH), -120.0f);
   app->panInstantDb.assign(static_cast<std::size_t>(app->waterfallH), -120.0f);
   app->panAvgDb.assign(static_cast<std::size_t>(app->waterfallH), -120.0f);
   app->panPeakDb.assign(static_cast<std::size_t>(app->waterfallH), -120.0f);
@@ -719,6 +724,7 @@ void EnsureWaterfallPreview(AppState* app) {
       app->waterfallRgb[idx + 0] = GetBValue(c);
       app->waterfallRgb[idx + 1] = GetGValue(c);
       app->waterfallRgb[idx + 2] = GetRValue(c);
+      app->waterfallDbRender[static_cast<std::size_t>(y * app->waterfallW + t)] = v;
     }
   }
 }
@@ -981,6 +987,17 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
   }
   SelectObject(hdc, oldTickPen);
   DeleteObject(tickPen);
+
+  if (app && app->waterfallHoverActive && PtInRect(&plot, app->waterfallHoverPoint)) {
+    HPEN cr = CreatePen(PS_SOLID, 1, RGB(255, 255, 180));
+    auto oldCr = reinterpret_cast<HPEN>(SelectObject(hdc, cr));
+    MoveToEx(hdc, plot.left, app->waterfallHoverPoint.y, nullptr);
+    LineTo(hdc, plot.right, app->waterfallHoverPoint.y);
+    MoveToEx(hdc, app->waterfallHoverPoint.x, plot.top, nullptr);
+    LineTo(hdc, app->waterfallHoverPoint.x, plot.bottom);
+    SelectObject(hdc, oldCr);
+    DeleteObject(cr);
+  }
 
   if (viewMode != 0 && app->waterfallW > 4 && app->waterfallH > 8) {
     RECT mini;
@@ -1257,6 +1274,12 @@ struct HitPoint {
   std::wstring text;
 };
 
+struct WaterfallReadout {
+  bool ok = false;
+  POINT pt = {0, 0};
+  std::wstring text;
+};
+
 void DrawTooltip(HDC hdc, const RECT& canvas, POINT anchor, const std::wstring& text) {
   if (text.empty()) {
     return;
@@ -1297,6 +1320,61 @@ void DrawTooltip(HDC hdc, const RECT& canvas, POINT anchor, const std::wstring& 
   SetBkMode(hdc, TRANSPARENT);
   SetTextColor(hdc, RGB(30, 30, 30));
   DrawTextW(hdc, text.c_str(), -1, &tx, DT_LEFT | DT_TOP | DT_WORDBREAK);
+}
+
+WaterfallReadout HitTestWaterfall(const AppState* app, const RECT& rc, POINT mouse) {
+  WaterfallReadout out;
+  if (!app || app->waterfallW <= 0 || app->waterfallH <= 0 || app->previewWav.sampleRate <= 0) {
+    return out;
+  }
+  const int outerGap = 10;
+  const int wfH = 360;
+  RECT wfRc = {rc.left + outerGap, rc.top + outerGap, rc.right - outerGap, rc.top + wfH};
+  const int panH = 112;
+  RECT panRc = {wfRc.left + 14, wfRc.top + 30, wfRc.right - 14, wfRc.top + 30 + panH};
+  RECT plot = {wfRc.left + 14, panRc.bottom + 8, wfRc.right - 14, wfRc.bottom - 34};
+  if (!PtInRect(&plot, mouse)) {
+    return out;
+  }
+
+  int srcX = 0;
+  int srcW = app->waterfallW;
+  ComputeWaterfallSourceWindow(app, &srcX, &srcW);
+  const float xn = static_cast<float>(mouse.x - plot.left) /
+                   std::max<int>(1, static_cast<int>(plot.right - plot.left));
+  const float yn = static_cast<float>(mouse.y - plot.top) /
+                   std::max<int>(1, static_cast<int>(plot.bottom - plot.top));
+  const int xCol = std::clamp(srcX + static_cast<int>(xn * srcW), 0, app->waterfallW - 1);
+  const int yRow = std::clamp(static_cast<int>(yn * app->waterfallH), 0, app->waterfallH - 1);
+
+  const float nyq = 0.5f * static_cast<float>(app->previewWav.sampleRate);
+  const float fMin = 80.0f;
+  const float fMax = std::min(2200.0f, nyq - 20.0f);
+  const float fHz = fMax - (static_cast<float>(yRow) / std::max(1.0f, static_cast<float>(app->waterfallH - 1))) *
+                                (fMax - fMin);
+  const float dur = static_cast<float>(app->previewWav.samples.size()) /
+                    static_cast<float>(std::max(1, app->previewWav.sampleRate));
+  const float tSec = (static_cast<float>(xCol) / std::max(1.0f, static_cast<float>(app->waterfallW - 1))) * dur;
+
+  float db = -120.0f;
+  if (!app->waterfallDbRender.empty()) {
+    db = app->waterfallDbRender[static_cast<std::size_t>(yRow * app->waterfallW + xCol)];
+  }
+
+  float noiseDb = app->panMinDb;
+  float snrDb = db - noiseDb;
+
+  std::wstringstream ss;
+  ss << L"Waterfall Readout\n"
+     << L"f: " << std::fixed << std::setprecision(3) << (fHz / 1000.0f) << L" kHz\n"
+     << L"t: " << std::fixed << std::setprecision(2) << tSec << L" s\n"
+     << L"dB: " << std::fixed << std::setprecision(1) << db << L"\n"
+     << L"SNR~: " << std::fixed << std::setprecision(1) << snrDb << L" dB";
+
+  out.ok = true;
+  out.pt = mouse;
+  out.text = ss.str();
+  return out;
 }
 
 HitPoint HitTestCharts(const AppState* app, const RECT& rc, POINT mouse) {
@@ -1439,7 +1517,9 @@ void DrawCharts(AppState* app, HDC hdc, const RECT& rc) {
     }
   }
 
-  if (app->hoverActive) {
+  if (app->waterfallHoverActive) {
+    DrawTooltip(hdc, rc, app->waterfallHoverPoint, app->waterfallHoverText);
+  } else if (app->hoverActive) {
     DrawTooltip(hdc, rc, app->hoverPoint, app->hoverText);
   }
 }
@@ -1723,21 +1803,32 @@ LRESULT CALLBACK ChartProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           const int maxPan = std::max(0, app->waterfallW - vis);
           app->waterfallPanPx = std::clamp(app->waterfallPanStartPx + dx, 0, maxPan);
           app->hoverActive = false;
+          app->waterfallHoverActive = false;
           InvalidateRect(hwnd, nullptr, TRUE);
         } else if (app->dragging) {
           app->chartPanPx = app->panStartPx + (p.x - app->dragStartX);
           app->hoverActive = false;
+          app->waterfallHoverActive = false;
           InvalidateRect(hwnd, nullptr, TRUE);
         } else {
           RECT rc;
           GetClientRect(hwnd, &rc);
-          auto hit = HitTestCharts(app, rc, p);
-          if (hit.ok) {
-            app->hoverActive = true;
-            app->hoverPoint = hit.pt;
-            app->hoverText = hit.text;
-          } else {
+          auto wf = HitTestWaterfall(app, rc, p);
+          if (wf.ok) {
+            app->waterfallHoverActive = true;
+            app->waterfallHoverPoint = wf.pt;
+            app->waterfallHoverText = wf.text;
             app->hoverActive = false;
+          } else {
+            app->waterfallHoverActive = false;
+            auto hit = HitTestCharts(app, rc, p);
+            if (hit.ok) {
+              app->hoverActive = true;
+              app->hoverPoint = hit.pt;
+              app->hoverText = hit.text;
+            } else {
+              app->hoverActive = false;
+            }
           }
           InvalidateRect(hwnd, nullptr, TRUE);
         }
@@ -1754,6 +1845,7 @@ LRESULT CALLBACK ChartProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       if (app) {
         app->mouseLeaveArmed = false;
         app->hoverActive = false;
+        app->waterfallHoverActive = false;
         InvalidateRect(hwnd, nullptr, TRUE);
       }
       return 0;
