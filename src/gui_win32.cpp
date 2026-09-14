@@ -914,6 +914,47 @@ bool JumpToBookmarkFromMapClick(AppState* app, const RECT& mapRc, POINT p) {
   return true;
 }
 
+void SetWaterfallPanToTime(AppState* app, float tSec) {
+  if (!app || app->waterfallW <= 0) {
+    return;
+  }
+  const float dur = PreviewDurationSec(app);
+  if (dur <= 0.0f) {
+    return;
+  }
+  const int vis = std::max(60, static_cast<int>(std::round(static_cast<double>(std::max(1, app->waterfallW)) /
+                                                            std::max(1.0, app->waterfallZoom))));
+  const int maxPan = std::max(0, app->waterfallW - vis);
+  const int col = std::clamp(static_cast<int>(std::round((tSec / dur) * (app->waterfallW - 1))),
+                             0, app->waterfallW - 1);
+  app->waterfallPanPx = std::clamp(col - vis / 2, 0, maxPan);
+}
+
+bool JumpToAdjacentBookmark(AppState* app, int dir) {
+  if (!app || app->bookmarksSec.empty()) {
+    return false;
+  }
+  const float now = CurrentBookmarkTimeSec(app);
+  if (dir >= 0) {
+    for (float t : app->bookmarksSec) {
+      if (t > now + 0.05f) {
+        SetWaterfallPanToTime(app, t);
+        return true;
+      }
+    }
+    SetWaterfallPanToTime(app, app->bookmarksSec.front());
+    return true;
+  }
+  for (auto it = app->bookmarksSec.rbegin(); it != app->bookmarksSec.rend(); ++it) {
+    if (*it < now - 0.05f) {
+      SetWaterfallPanToTime(app, *it);
+      return true;
+    }
+  }
+  SetWaterfallPanToTime(app, app->bookmarksSec.back());
+  return true;
+}
+
 void UpdatePanadapterPersistence(AppState* app) {
   if (!app || app->waterfallW <= 0 || app->waterfallH <= 0 || app->waterfallDbRender.empty()) {
     return;
@@ -1374,6 +1415,10 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
     RECT br = {map.left, map.top - 16, map.left + 180, map.top - 1};
     SetTextColor(hdc, RGB(255, 196, 120));
     DrawTextW(hdc, bss.str().c_str(), -1, &br, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+    RECT hk = {map.left, map.top - 16, map.right, map.top - 1};
+    SetTextColor(hdc, RGB(178, 206, 228));
+    DrawTextW(hdc, L"Hotkeys: B add, C clear, N/P next-prev", -1, &hk,
+              DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
   }
 
   // RF Zoom lane around peak-lock (local magnifier like SDR narrow view)
@@ -2240,6 +2285,7 @@ LRESULT CALLBACK ChartProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
   switch (msg) {
     case WM_LBUTTONDOWN:
       if (app) {
+        SetFocus(hwnd);
         const POINT p = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
         RECT rc;
         GetClientRect(hwnd, &rc);
@@ -2271,6 +2317,39 @@ LRESULT CALLBACK ChartProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           app->panStartPx = app->chartPanPx;
         }
         SetCapture(hwnd);
+      }
+      return 0;
+    case WM_KEYDOWN:
+      if (app) {
+        const UINT vk = static_cast<UINT>(wParam);
+        if (vk == 'B') {
+          const std::size_t before = app->bookmarksSec.size();
+          AddBookmarkAtCurrent(app);
+          const std::size_t after = app->bookmarksSec.size();
+          SetStatus(app, after > before ? L"Bookmark added [B]" : L"Bookmark already present");
+          InvalidateRect(hwnd, nullptr, TRUE);
+          return 0;
+        }
+        if (vk == 'C') {
+          app->bookmarksSec.clear();
+          SetStatus(app, L"Bookmarks cleared [C]");
+          InvalidateRect(hwnd, nullptr, TRUE);
+          return 0;
+        }
+        if (vk == 'N') {
+          if (JumpToAdjacentBookmark(app, +1)) {
+            SetStatus(app, L"Next bookmark [N]");
+            InvalidateRect(hwnd, nullptr, TRUE);
+          }
+          return 0;
+        }
+        if (vk == 'P') {
+          if (JumpToAdjacentBookmark(app, -1)) {
+            SetStatus(app, L"Previous bookmark [P]");
+            InvalidateRect(hwnd, nullptr, TRUE);
+          }
+          return 0;
+        }
       }
       return 0;
     case WM_MOUSEMOVE:
