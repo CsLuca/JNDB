@@ -147,6 +147,7 @@ struct AppState {
   HWND historyEdit = nullptr;
   HWND compareEdit = nullptr;
   HWND chartPanel = nullptr;
+  std::wstring uiStatePath;
 
   HFONT font = nullptr;
   HFONT fontBig = nullptr;
@@ -631,6 +632,74 @@ void SetStatus(AppState* app, const std::wstring& s) {
 
 void SetSummary(AppState* app, const std::wstring& s) {
   SetText(app->summaryText, s);
+}
+
+float IniReadFloat(const std::wstring& path, const wchar_t* section, const wchar_t* key, float defVal) {
+  wchar_t buf[64] = {};
+  GetPrivateProfileStringW(section, key, L"", buf, 64, path.c_str());
+  if (buf[0] == 0) return defVal;
+  try {
+    return std::stof(std::wstring(buf));
+  } catch (...) {
+    return defVal;
+  }
+}
+
+bool IniReadBool(const std::wstring& path, const wchar_t* section, const wchar_t* key, bool defVal) {
+  const UINT v = GetPrivateProfileIntW(section, key, defVal ? 1 : 0, path.c_str());
+  return v != 0;
+}
+
+void SaveUiState(AppState* app) {
+  if (!app || app->uiStatePath.empty()) {
+    return;
+  }
+  const auto s = app->uiStatePath.c_str();
+  WritePrivateProfileStringW(L"bookmarks", L"auto_enabled", app->autoBookmarkEnabled ? L"1" : L"0", s);
+  WritePrivateProfileStringW(L"bookmarks", L"show_auto", app->showAutoBookmarks ? L"1" : L"0", s);
+
+  auto saveFloat = [&](const wchar_t* k, float v) {
+    wchar_t b[32] = {};
+    swprintf(b, 32, L"%.3f", v);
+    WritePrivateProfileStringW(L"bookmarks", k, b, s);
+  };
+  saveFloat(L"min_conf", app->autoBookmarkMinConfidence);
+  saveFloat(L"mid_thr", app->autoBookmarkMidThreshold);
+  saveFloat(L"high_thr", app->autoBookmarkHighThreshold);
+}
+
+void LoadUiState(AppState* app) {
+  if (!app || app->uiStatePath.empty()) {
+    return;
+  }
+  app->autoBookmarkEnabled = IniReadBool(app->uiStatePath, L"bookmarks", L"auto_enabled", app->autoBookmarkEnabled);
+  app->showAutoBookmarks = IniReadBool(app->uiStatePath, L"bookmarks", L"show_auto", app->showAutoBookmarks);
+  app->autoBookmarkMinConfidence = std::clamp(
+      IniReadFloat(app->uiStatePath, L"bookmarks", L"min_conf", app->autoBookmarkMinConfidence), 0.30f, 0.95f);
+  app->autoBookmarkMidThreshold = std::clamp(
+      IniReadFloat(app->uiStatePath, L"bookmarks", L"mid_thr", app->autoBookmarkMidThreshold), 0.40f, 0.95f);
+  app->autoBookmarkHighThreshold = std::clamp(
+      IniReadFloat(app->uiStatePath, L"bookmarks", L"high_thr", app->autoBookmarkHighThreshold), 0.45f, 0.98f);
+  if (app->autoBookmarkHighThreshold <= app->autoBookmarkMidThreshold) {
+    app->autoBookmarkHighThreshold = std::min(0.98f, app->autoBookmarkMidThreshold + 0.01f);
+  }
+
+  if (app->autoBookmarkCheck) {
+    SendMessageW(app->autoBookmarkCheck, BM_SETCHECK,
+                 app->autoBookmarkEnabled ? BST_CHECKED : BST_UNCHECKED, 0);
+  }
+  if (app->autoBookmarkConfSlider) {
+    SendMessageW(app->autoBookmarkConfSlider, TBM_SETPOS, TRUE,
+                 static_cast<LPARAM>(std::round(app->autoBookmarkMinConfidence * 100.0f)));
+  }
+  if (app->autoBookmarkMidSlider) {
+    SendMessageW(app->autoBookmarkMidSlider, TBM_SETPOS, TRUE,
+                 static_cast<LPARAM>(std::round(app->autoBookmarkMidThreshold * 100.0f)));
+  }
+  if (app->autoBookmarkHighSlider) {
+    SendMessageW(app->autoBookmarkHighSlider, TBM_SETPOS, TRUE,
+                 static_cast<LPARAM>(std::round(app->autoBookmarkHighThreshold * 100.0f)));
+  }
 }
 
 void ApplyAutoMarkPreset(AppState* app, float minConf, float midThr, float highThr,
@@ -2724,6 +2793,7 @@ LRESULT CALLBACK ChartProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         if (vk == 'A') {
           app->showAutoBookmarks = !app->showAutoBookmarks;
+          SaveUiState(app);
           SetStatus(app, app->showAutoBookmarks ? L"Show auto bookmarks [A]: ON"
                                                 : L"Show auto bookmarks [A]: OFF");
           InvalidateRect(hwnd, nullptr, TRUE);
@@ -3189,9 +3259,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       wchar_t modPath[MAX_PATH] = {};
       GetModuleFileNameW(nullptr, modPath, MAX_PATH);
       std::filesystem::path p(modPath);
+      app->uiStatePath = (p.parent_path() / L"ndb_gui_state.ini").wstring();
       auto hist = p.parent_path().parent_path().parent_path() / "benchmarks" / "phase0" / "history" /
                   "benchmark_history.csv";
       SetText(app->historyEdit, hist.wstring());
+      LoadUiState(app);
       RefreshHistory(app);
       RefreshCompareHistory(app);
       RefreshWaterfallFromInput(app);
@@ -3381,16 +3453,20 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case kIdAutoBookmarkCheck:
           app->autoBookmarkEnabled =
               (SendMessageW(app->autoBookmarkCheck, BM_GETCHECK, 0, 0) == BST_CHECKED);
+          SaveUiState(app);
           InvalidateRect(app->chartPanel, nullptr, TRUE);
           return 0;
         case kIdAutoMarkPresetDx:
           ApplyAutoMarkPreset(app, 0.78f, 0.74f, 0.88f, L"DX strict");
+          SaveUiState(app);
           return 0;
         case kIdAutoMarkPresetBalanced:
           ApplyAutoMarkPreset(app, 0.65f, 0.65f, 0.85f, L"Balanced");
+          SaveUiState(app);
           return 0;
         case kIdAutoMarkPresetWeak:
           ApplyAutoMarkPreset(app, 0.52f, 0.60f, 0.78f, L"Weak-Sig");
+          SaveUiState(app);
           return 0;
         case kIdPeakLockButton:
           app->peakLockEnabled = !app->peakLockEnabled;
@@ -3529,6 +3605,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (src == app->autoBookmarkConfSlider) {
           const int v = static_cast<int>(SendMessageW(app->autoBookmarkConfSlider, TBM_GETPOS, 0, 0));
           app->autoBookmarkMinConfidence = static_cast<float>(v) / 100.0f;
+          SaveUiState(app);
           std::wstringstream ss;
           ss << L"Auto mark min conf: " << std::fixed << std::setprecision(2)
              << app->autoBookmarkMinConfidence;
@@ -3542,6 +3619,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           vm = std::min(vm, vh - 1);
           SendMessageW(app->autoBookmarkMidSlider, TBM_SETPOS, TRUE, vm);
           app->autoBookmarkMidThreshold = static_cast<float>(vm) / 100.0f;
+          SaveUiState(app);
           std::wstringstream ss;
           ss << L"Auto mark mid/high: " << std::fixed << std::setprecision(2)
              << app->autoBookmarkMidThreshold << L"/" << app->autoBookmarkHighThreshold;
@@ -3555,6 +3633,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           vh = std::max(vh, vm + 1);
           SendMessageW(app->autoBookmarkHighSlider, TBM_SETPOS, TRUE, vh);
           app->autoBookmarkHighThreshold = static_cast<float>(vh) / 100.0f;
+          SaveUiState(app);
           std::wstringstream ss;
           ss << L"Auto mark mid/high: " << std::fixed << std::setprecision(2)
              << app->autoBookmarkMidThreshold << L"/" << app->autoBookmarkHighThreshold;
@@ -3597,6 +3676,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       return 1;
     }
     case WM_DESTROY:
+      if (app) {
+        SaveUiState(app);
+      }
       PostQuitMessage(0);
       return 0;
     case WM_MOUSEWHEEL:
