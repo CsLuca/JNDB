@@ -79,6 +79,7 @@ constexpr int kIdAutoBookmarkHighSlider = 1044;
 constexpr int kIdAutoMarkPresetDx = 1045;
 constexpr int kIdAutoMarkPresetBalanced = 1046;
 constexpr int kIdAutoMarkPresetWeak = 1047;
+constexpr int kIdResetUiSession = 1048;
 
 constexpr UINT kMsgProgress = WM_APP + 1;
 constexpr UINT kMsgDone = WM_APP + 2;
@@ -813,6 +814,59 @@ void ApplyAutoMarkPreset(AppState* app, float minConf, float midThr, float highT
      << app->autoBookmarkMinConfidence << L"/" << app->autoBookmarkMidThreshold << L"/"
      << app->autoBookmarkHighThreshold;
   SetStatus(app, ss.str());
+  InvalidateRect(app->chartPanel, nullptr, TRUE);
+}
+
+void ResetUiSessionState(AppState* app) {
+  if (!app) {
+    return;
+  }
+  app->waterfallViewMode = 1;
+  app->yawDeg = 36;
+  app->pitchDeg = 24;
+  app->shadingEnabled = true;
+  app->colormap3d = 0;
+  app->waterfallFps = 30;
+  app->waterfallZoom = 1.0;
+  app->waterfallPanPx = 0;
+  app->chartZoom = 1.0;
+  app->chartPanPx = 0;
+  app->agcFloorOffsetDb = -3.0f;
+  app->agcSpanDb = 22.0f;
+  app->agcGain = 1.35f;
+  app->agcGamma = 0.72f;
+  app->agcAutoContrast = true;
+  app->peakLockEnabled = false;
+  app->peakLockBin = -1;
+  app->peakLockHz = 0.0f;
+  app->autoBookmarkEnabled = true;
+  app->autoBookmarkMinConfidence = 0.65f;
+  app->autoBookmarkMidThreshold = 0.65f;
+  app->autoBookmarkHighThreshold = 0.85f;
+  app->showAutoBookmarks = true;
+
+  if (app->waterfallViewCombo) SendMessageW(app->waterfallViewCombo, CB_SETCURSEL, app->waterfallViewMode, 0);
+  if (app->yawSlider) SendMessageW(app->yawSlider, TBM_SETPOS, TRUE, app->yawDeg);
+  if (app->pitchSlider) SendMessageW(app->pitchSlider, TBM_SETPOS, TRUE, app->pitchDeg);
+  if (app->shadingCheck) SendMessageW(app->shadingCheck, BM_SETCHECK, BST_CHECKED, 0);
+  if (app->colormapCombo) SendMessageW(app->colormapCombo, CB_SETCURSEL, app->colormap3d, 0);
+  if (app->waterfallFpsCombo) SendMessageW(app->waterfallFpsCombo, CB_SETCURSEL, 0, 0);
+  if (app->agcFloorSlider) SendMessageW(app->agcFloorSlider, TBM_SETPOS, TRUE, static_cast<LPARAM>(app->agcFloorOffsetDb));
+  if (app->agcSpanSlider) SendMessageW(app->agcSpanSlider, TBM_SETPOS, TRUE, static_cast<LPARAM>(app->agcSpanDb));
+  if (app->agcGainSlider) SendMessageW(app->agcGainSlider, TBM_SETPOS, TRUE, static_cast<LPARAM>(std::round(app->agcGain * 100.0f)));
+  if (app->agcGammaSlider) SendMessageW(app->agcGammaSlider, TBM_SETPOS, TRUE, static_cast<LPARAM>(std::round(app->agcGamma * 100.0f)));
+  if (app->agcAutoCheck) SendMessageW(app->agcAutoCheck, BM_SETCHECK, BST_CHECKED, 0);
+  if (app->peakLockButton) SetWindowTextW(app->peakLockButton, L"Peak Lock: OFF");
+  if (app->autoBookmarkCheck) SendMessageW(app->autoBookmarkCheck, BM_SETCHECK, BST_CHECKED, 0);
+  if (app->autoBookmarkConfSlider) SendMessageW(app->autoBookmarkConfSlider, TBM_SETPOS, TRUE, 65);
+  if (app->autoBookmarkMidSlider) SendMessageW(app->autoBookmarkMidSlider, TBM_SETPOS, TRUE, 65);
+  if (app->autoBookmarkHighSlider) SendMessageW(app->autoBookmarkHighSlider, TBM_SETPOS, TRUE, 85);
+
+  if (!app->uiStatePath.empty()) {
+    DeleteFileW(app->uiStatePath.c_str());
+  }
+  SaveUiState(app);
+  InvalidateWaterfallCache(app);
   InvalidateRect(app->chartPanel, nullptr, TRUE);
 }
 
@@ -3299,6 +3353,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     y + 40, 124, 34, hwnd, (HMENU)kIdBookmarkExport, nullptr, nullptr);
       CreateWindowW(L"BUTTON", L"Import Marks", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, m + 1038,
                     y + 40, 124, 34, hwnd, (HMENU)kIdBookmarkImport, nullptr, nullptr);
+      CreateWindowW(L"BUTTON", L"Reset Session UI", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, m + 1168,
+                    y + 40, 140, 34, hwnd, (HMENU)kIdResetUiSession, nullptr, nullptr);
       app->runButton = CreateWindowW(L"BUTTON", L"Start Decode", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
                                      m + 100, y + 40, 152, 34, hwnd, (HMENU)kIdRun, nullptr, nullptr);
       y += 82;
@@ -3648,6 +3704,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           InvalidateRect(app->chartPanel, nullptr, TRUE);
           return 0;
         }
+        case kIdResetUiSession:
+          ResetUiSessionState(app);
+          SetStatus(app, L"Session UI reset to defaults");
+          return 0;
       }
       return 0;
     }
