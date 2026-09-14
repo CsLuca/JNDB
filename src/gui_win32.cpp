@@ -74,6 +74,8 @@ constexpr int kIdBookmarkExport = 1039;
 constexpr int kIdBookmarkImport = 1040;
 constexpr int kIdAutoBookmarkCheck = 1041;
 constexpr int kIdAutoBookmarkConfSlider = 1042;
+constexpr int kIdAutoBookmarkMidSlider = 1043;
+constexpr int kIdAutoBookmarkHighSlider = 1044;
 
 constexpr UINT kMsgProgress = WM_APP + 1;
 constexpr UINT kMsgDone = WM_APP + 2;
@@ -132,6 +134,8 @@ struct AppState {
   HWND peakLockButton = nullptr;
   HWND autoBookmarkCheck = nullptr;
   HWND autoBookmarkConfSlider = nullptr;
+  HWND autoBookmarkMidSlider = nullptr;
+  HWND autoBookmarkHighSlider = nullptr;
   HWND runButton = nullptr;
   HWND progressBar = nullptr;
   HWND statusText = nullptr;
@@ -183,6 +187,8 @@ struct AppState {
   std::vector<float> bookmarkConfidence;
   bool autoBookmarkEnabled = true;
   float autoBookmarkMinConfidence = 0.65f;
+  float autoBookmarkMidThreshold = 0.65f;
+  float autoBookmarkHighThreshold = 0.85f;
   bool showAutoBookmarks = true;
   double waterfallZoom = 1.0;
   int waterfallPanPx = 0;
@@ -1688,10 +1694,10 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
         const float conf = (i < app->bookmarkConfidence.size()) ? app->bookmarkConfidence[i] : (isAuto ? 0.70f : 1.00f);
         if (!isAuto) {
           SelectObject(hdc, bmManual);
-        } else if (conf >= 0.85f) {
+        } else if (conf >= app->autoBookmarkHighThreshold) {
           SelectObject(hdc, bmAutoHi);
           ++autoHi;
-        } else if (conf >= 0.65f) {
+        } else if (conf >= app->autoBookmarkMidThreshold) {
           SelectObject(hdc, bmAutoMid);
           ++autoMid;
         } else {
@@ -1730,7 +1736,9 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
       bss << L"Bookmarks: " << shownCount << L" (M" << (shownCount - autoCount) << L"/A" << autoCount
           << L" h/m/l " << autoHi << L"/" << autoMid << L"/" << autoLow << L")  Auto: "
           << (app->autoBookmarkEnabled ? L"ON" : L"OFF") << L" @"
-          << std::fixed << std::setprecision(2) << app->autoBookmarkMinConfidence << L"  ShowA: "
+          << std::fixed << std::setprecision(2) << app->autoBookmarkMinConfidence << L" M/H "
+          << app->autoBookmarkMidThreshold << L"/" << app->autoBookmarkHighThreshold
+          << L"  ShowA: "
           << (app->showAutoBookmarks ? L"ON" : L"OFF");
       RECT br = {map.left, map.top - 16, map.left + 520, map.top - 1};
       SetTextColor(hdc, RGB(255, 196, 120));
@@ -3038,6 +3046,29 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       SendMessageW(app->autoBookmarkConfSlider, TBM_SETRANGEMAX, FALSE, 95);
       SendMessageW(app->autoBookmarkConfSlider, TBM_SETPOS, TRUE,
                    static_cast<LPARAM>(std::round(app->autoBookmarkMinConfidence * 100.0f)));
+      CreateWindowW(L"STATIC", L"Mid", WS_CHILD | WS_VISIBLE, m + 1378, y + 6, 26, 22, hwnd,
+                    nullptr, nullptr, nullptr);
+      app->autoBookmarkMidSlider = CreateWindowW(TRACKBAR_CLASSW, L"",
+                                                 WS_CHILD | WS_VISIBLE | TBS_AUTOTICKS, m + 1406,
+                                                 y, 92, 28, hwnd,
+                                                 (HMENU)kIdAutoBookmarkMidSlider, nullptr,
+                                                 nullptr);
+      SendMessageW(app->autoBookmarkMidSlider, TBM_SETRANGEMIN, FALSE, 40);
+      SendMessageW(app->autoBookmarkMidSlider, TBM_SETRANGEMAX, FALSE, 90);
+      SendMessageW(app->autoBookmarkMidSlider, TBM_SETPOS, TRUE,
+                   static_cast<LPARAM>(std::round(app->autoBookmarkMidThreshold * 100.0f)));
+
+      CreateWindowW(L"STATIC", L"High", WS_CHILD | WS_VISIBLE, m + 1502, y + 6, 30, 22, hwnd,
+                    nullptr, nullptr, nullptr);
+      app->autoBookmarkHighSlider = CreateWindowW(TRACKBAR_CLASSW, L"",
+                                                  WS_CHILD | WS_VISIBLE | TBS_AUTOTICKS, m + 1534,
+                                                  y, 92, 28, hwnd,
+                                                  (HMENU)kIdAutoBookmarkHighSlider, nullptr,
+                                                  nullptr);
+      SendMessageW(app->autoBookmarkHighSlider, TBM_SETRANGEMIN, FALSE, 55);
+      SendMessageW(app->autoBookmarkHighSlider, TBM_SETRANGEMAX, FALSE, 98);
+      SendMessageW(app->autoBookmarkHighSlider, TBM_SETPOS, TRUE,
+                   static_cast<LPARAM>(std::round(app->autoBookmarkHighThreshold * 100.0f)));
       y += 36;
 
       CreateWindowW(L"STATIC", L"Prior CSV", WS_CHILD | WS_VISIBLE, m, y + 6, 100, 22, hwnd,
@@ -3102,7 +3133,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                                app->agcFloorSlider, app->agcSpanSlider, app->agcGainSlider,
                                app->agcGammaSlider, app->agcAutoCheck,
                                app->peakLockButton, app->autoBookmarkCheck,
-                               app->autoBookmarkConfSlider,
+                               app->autoBookmarkConfSlider, app->autoBookmarkMidSlider,
+                               app->autoBookmarkHighSlider,
                                app->priorEdit, app->priorCheck};
       for (HWND c : controls) {
         SendMessageW(c, WM_SETFONT, reinterpret_cast<WPARAM>(app->font), TRUE);
@@ -3446,6 +3478,33 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           ss << L"Auto mark min conf: " << std::fixed << std::setprecision(2)
              << app->autoBookmarkMinConfidence;
           SetStatus(app, ss.str());
+          InvalidateRect(app->chartPanel, nullptr, TRUE);
+          return 0;
+        }
+        if (src == app->autoBookmarkMidSlider) {
+          int vm = static_cast<int>(SendMessageW(app->autoBookmarkMidSlider, TBM_GETPOS, 0, 0));
+          int vh = static_cast<int>(SendMessageW(app->autoBookmarkHighSlider, TBM_GETPOS, 0, 0));
+          vm = std::min(vm, vh - 1);
+          SendMessageW(app->autoBookmarkMidSlider, TBM_SETPOS, TRUE, vm);
+          app->autoBookmarkMidThreshold = static_cast<float>(vm) / 100.0f;
+          std::wstringstream ss;
+          ss << L"Auto mark mid/high: " << std::fixed << std::setprecision(2)
+             << app->autoBookmarkMidThreshold << L"/" << app->autoBookmarkHighThreshold;
+          SetStatus(app, ss.str());
+          InvalidateRect(app->chartPanel, nullptr, TRUE);
+          return 0;
+        }
+        if (src == app->autoBookmarkHighSlider) {
+          int vm = static_cast<int>(SendMessageW(app->autoBookmarkMidSlider, TBM_GETPOS, 0, 0));
+          int vh = static_cast<int>(SendMessageW(app->autoBookmarkHighSlider, TBM_GETPOS, 0, 0));
+          vh = std::max(vh, vm + 1);
+          SendMessageW(app->autoBookmarkHighSlider, TBM_SETPOS, TRUE, vh);
+          app->autoBookmarkHighThreshold = static_cast<float>(vh) / 100.0f;
+          std::wstringstream ss;
+          ss << L"Auto mark mid/high: " << std::fixed << std::setprecision(2)
+             << app->autoBookmarkMidThreshold << L"/" << app->autoBookmarkHighThreshold;
+          SetStatus(app, ss.str());
+          InvalidateRect(app->chartPanel, nullptr, TRUE);
           return 0;
         }
       }
