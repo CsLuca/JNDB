@@ -662,14 +662,14 @@ void SaveUiState(AppState* app) {
   WritePrivateProfileStringW(L"bookmarks", L"auto_enabled", app->autoBookmarkEnabled ? L"1" : L"0", s);
   WritePrivateProfileStringW(L"bookmarks", L"show_auto", app->showAutoBookmarks ? L"1" : L"0", s);
 
-  auto saveFloat = [&](const wchar_t* k, float v) {
+  auto saveFloat = [&](const wchar_t* section, const wchar_t* k, float v) {
     wchar_t b[32] = {};
     swprintf(b, 32, L"%.3f", v);
-    WritePrivateProfileStringW(L"bookmarks", k, b, s);
+    WritePrivateProfileStringW(section, k, b, s);
   };
-  saveFloat(L"min_conf", app->autoBookmarkMinConfidence);
-  saveFloat(L"mid_thr", app->autoBookmarkMidThreshold);
-  saveFloat(L"high_thr", app->autoBookmarkHighThreshold);
+  saveFloat(L"bookmarks", L"min_conf", app->autoBookmarkMinConfidence);
+  saveFloat(L"bookmarks", L"mid_thr", app->autoBookmarkMidThreshold);
+  saveFloat(L"bookmarks", L"high_thr", app->autoBookmarkHighThreshold);
 
   WritePrivateProfileStringW(L"view", L"mode", std::to_wstring(app->waterfallViewMode).c_str(), s);
   WritePrivateProfileStringW(L"view", L"yaw", std::to_wstring(app->yawDeg).c_str(), s);
@@ -677,6 +677,12 @@ void SaveUiState(AppState* app) {
   WritePrivateProfileStringW(L"view", L"fps", std::to_wstring(app->waterfallFps).c_str(), s);
   WritePrivateProfileStringW(L"view", L"zoom", std::to_wstring(app->waterfallZoom).c_str(), s);
   WritePrivateProfileStringW(L"view", L"pan", std::to_wstring(app->waterfallPanPx).c_str(), s);
+
+  WritePrivateProfileStringW(L"agc", L"auto", app->agcAutoContrast ? L"1" : L"0", s);
+  saveFloat(L"agc", L"floor", app->agcFloorOffsetDb);
+  saveFloat(L"agc", L"span", app->agcSpanDb);
+  saveFloat(L"agc", L"gain", app->agcGain);
+  saveFloat(L"agc", L"gamma", app->agcGamma);
 }
 
 void LoadUiState(AppState* app) {
@@ -701,6 +707,12 @@ void LoadUiState(AppState* app) {
   app->waterfallFps = std::clamp(IniReadInt(app->uiStatePath, L"view", L"fps", app->waterfallFps), 10, 120);
   app->waterfallZoom = std::clamp(static_cast<double>(IniReadFloat(app->uiStatePath, L"view", L"zoom", static_cast<float>(app->waterfallZoom))), 1.0, 8.0);
   app->waterfallPanPx = std::max(0, IniReadInt(app->uiStatePath, L"view", L"pan", app->waterfallPanPx));
+
+  app->agcAutoContrast = IniReadBool(app->uiStatePath, L"agc", L"auto", app->agcAutoContrast);
+  app->agcFloorOffsetDb = std::clamp(IniReadFloat(app->uiStatePath, L"agc", L"floor", app->agcFloorOffsetDb), -30.0f, 30.0f);
+  app->agcSpanDb = std::clamp(IniReadFloat(app->uiStatePath, L"agc", L"span", app->agcSpanDb), 8.0f, 80.0f);
+  app->agcGain = std::clamp(IniReadFloat(app->uiStatePath, L"agc", L"gain", app->agcGain), 0.50f, 2.50f);
+  app->agcGamma = std::clamp(IniReadFloat(app->uiStatePath, L"agc", L"gamma", app->agcGamma), 0.40f, 1.60f);
 
   if (app->autoBookmarkCheck) {
     SendMessageW(app->autoBookmarkCheck, BM_SETCHECK,
@@ -729,6 +741,24 @@ void LoadUiState(AppState* app) {
   }
   if (app->waterfallFpsCombo) {
     SendMessageW(app->waterfallFpsCombo, CB_SETCURSEL, app->waterfallFps >= 60 ? 1 : 0, 0);
+  }
+  if (app->agcFloorSlider) {
+    SendMessageW(app->agcFloorSlider, TBM_SETPOS, TRUE, static_cast<LPARAM>(app->agcFloorOffsetDb));
+  }
+  if (app->agcSpanSlider) {
+    SendMessageW(app->agcSpanSlider, TBM_SETPOS, TRUE, static_cast<LPARAM>(app->agcSpanDb));
+  }
+  if (app->agcGainSlider) {
+    SendMessageW(app->agcGainSlider, TBM_SETPOS, TRUE,
+                 static_cast<LPARAM>(std::round(app->agcGain * 100.0f)));
+  }
+  if (app->agcGammaSlider) {
+    SendMessageW(app->agcGammaSlider, TBM_SETPOS, TRUE,
+                 static_cast<LPARAM>(std::round(app->agcGamma * 100.0f)));
+  }
+  if (app->agcAutoCheck) {
+    SendMessageW(app->agcAutoCheck, BM_SETCHECK,
+                 app->agcAutoContrast ? BST_CHECKED : BST_UNCHECKED, 0);
   }
 }
 
@@ -3482,6 +3512,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case kIdAgcAutoCheck:
           app->agcAutoContrast =
               (SendMessageW(app->agcAutoCheck, BM_GETCHECK, 0, 0) == BST_CHECKED);
+          SaveUiState(app);
           InvalidateWaterfallCache(app);
           InvalidateRect(app->chartPanel, nullptr, TRUE);
           return 0;
@@ -3614,6 +3645,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (src == app->agcFloorSlider) {
           app->agcFloorOffsetDb = static_cast<float>(
               static_cast<int>(SendMessageW(app->agcFloorSlider, TBM_GETPOS, 0, 0)));
+          SaveUiState(app);
           InvalidateWaterfallCache(app);
           InvalidateRect(app->chartPanel, nullptr, TRUE);
           return 0;
@@ -3621,6 +3653,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (src == app->agcSpanSlider) {
           app->agcSpanDb = static_cast<float>(
               static_cast<int>(SendMessageW(app->agcSpanSlider, TBM_GETPOS, 0, 0)));
+          SaveUiState(app);
           InvalidateWaterfallCache(app);
           InvalidateRect(app->chartPanel, nullptr, TRUE);
           return 0;
@@ -3628,6 +3661,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (src == app->agcGainSlider) {
           const int v = static_cast<int>(SendMessageW(app->agcGainSlider, TBM_GETPOS, 0, 0));
           app->agcGain = static_cast<float>(v) / 100.0f;
+          SaveUiState(app);
           InvalidateWaterfallCache(app);
           InvalidateRect(app->chartPanel, nullptr, TRUE);
           return 0;
@@ -3635,6 +3669,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (src == app->agcGammaSlider) {
           const int v = static_cast<int>(SendMessageW(app->agcGammaSlider, TBM_GETPOS, 0, 0));
           app->agcGamma = static_cast<float>(v) / 100.0f;
+          SaveUiState(app);
           InvalidateWaterfallCache(app);
           InvalidateRect(app->chartPanel, nullptr, TRUE);
           return 0;
