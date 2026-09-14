@@ -133,6 +133,11 @@ struct AppState {
   std::vector<std::uint8_t> waterfallRgb;
   int waterfallW = 0;
   int waterfallH = 0;
+  std::vector<float> panInstantDb;
+  std::vector<float> panAvgDb;
+  std::vector<float> panPeakDb;
+  float panMinDb = -120.0f;
+  float panMaxDb = -20.0f;
   std::vector<ndb::DecodeResult> overlayRows;
   int decodeProgressPct = 0;
   double decodeProgressVisualPct = 0.0;
@@ -605,6 +610,9 @@ void EnsureWaterfallPreview(AppState* app) {
   app->waterfallW = std::max(1, spec.frameCount);
   app->waterfallH = std::max(1, spec.binCount - 1);
   app->waterfallRgb.assign(static_cast<std::size_t>(app->waterfallW * app->waterfallH * 3), 0);
+  app->panInstantDb.assign(static_cast<std::size_t>(app->waterfallH), -120.0f);
+  app->panAvgDb.assign(static_cast<std::size_t>(app->waterfallH), -120.0f);
+  app->panPeakDb.assign(static_cast<std::size_t>(app->waterfallH), -120.0f);
 
   std::vector<float> lv(static_cast<std::size_t>(spec.frameCount * spec.binCount), 0.0f);
   std::vector<float> dbVals;
@@ -615,6 +623,25 @@ void EnsureWaterfallPreview(AppState* app) {
       lv[static_cast<std::size_t>(t * spec.binCount + b)] = v;
       dbVals.push_back(v);
     }
+  }
+
+  const int tailN = std::min(spec.frameCount, 12);
+  for (int bi = 1; bi < spec.binCount; ++bi) {
+    float inst = lv[static_cast<std::size_t>((spec.frameCount - 1) * spec.binCount + bi)];
+    double acc = 0.0;
+    int n = 0;
+    for (int k = 0; k < tailN; ++k) {
+      const int t = spec.frameCount - 1 - k;
+      if (t < 0) {
+        break;
+      }
+      acc += lv[static_cast<std::size_t>(t * spec.binCount + bi)];
+      ++n;
+    }
+    const float avg = (n > 0) ? static_cast<float>(acc / static_cast<double>(n)) : inst;
+    app->panInstantDb[static_cast<std::size_t>(bi - 1)] = inst;
+    app->panAvgDb[static_cast<std::size_t>(bi - 1)] = avg;
+    app->panPeakDb[static_cast<std::size_t>(bi - 1)] = std::max(inst, avg);
   }
 
   auto percentile = [](std::vector<float> vals, float q) {
@@ -632,6 +659,8 @@ void EnsureWaterfallPreview(AppState* app) {
   if (ceilDb < floorDb + 8.0f) {
     ceilDb = floorDb + 8.0f;
   }
+  app->panMinDb = floorDb;
+  app->panMaxDb = ceilDb;
 
   std::vector<float> norm(static_cast<std::size_t>(spec.frameCount * spec.binCount), 0.0f);
   for (int t = 0; t < spec.frameCount; ++t) {
@@ -735,6 +764,79 @@ void ComputeWaterfallSourceWindow(const AppState* app, int* srcX, int* srcW) {
   *srcX = pan;
 }
 
+void DrawPanadapter(HDC hdc, const RECT& rc, const AppState* app) {
+  HBRUSH bg = CreateSolidBrush(RGB(9, 16, 26));
+  FillRect(hdc, &rc, bg);
+  DeleteObject(bg);
+
+  HPEN border = CreatePen(PS_SOLID, 1, RGB(45, 70, 96));
+  auto oldPen = reinterpret_cast<HPEN>(SelectObject(hdc, border));
+  MoveToEx(hdc, rc.left, rc.top, nullptr);
+  LineTo(hdc, rc.right - 1, rc.top);
+  LineTo(hdc, rc.right - 1, rc.bottom - 1);
+  LineTo(hdc, rc.left, rc.bottom - 1);
+  LineTo(hdc, rc.left, rc.top);
+  SelectObject(hdc, oldPen);
+  DeleteObject(border);
+
+  SetBkMode(hdc, TRANSPARENT);
+  SetTextColor(hdc, RGB(170, 198, 222));
+  RECT tr = {rc.left + 8, rc.top + 2, rc.right - 8, rc.top + 18};
+  DrawTextW(hdc, L"Panadapter  Instant/Avg/Peak", -1, &tr, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+
+  if (!app || app->panInstantDb.empty()) {
+    RECT m = {rc.left + 8, rc.top + 18, rc.right - 8, rc.bottom - 6};
+    SetTextColor(hdc, RGB(120, 145, 168));
+    DrawTextW(hdc, L"Load WAV to show panadapter", -1, &m, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    return;
+  }
+
+  RECT plot = {rc.left + 36, rc.top + 18, rc.right - 8, rc.bottom - 14};
+  const float minDb = app->panMinDb;
+  const float maxDb = app->panMaxDb;
+  const int gridN = 4;
+  HPEN grid = CreatePen(PS_DOT, 1, RGB(36, 52, 72));
+  oldPen = reinterpret_cast<HPEN>(SelectObject(hdc, grid));
+  for (int i = 0; i <= gridN; ++i) {
+    const int y = plot.top + ((plot.bottom - plot.top) * i) / gridN;
+    MoveToEx(hdc, plot.left, y, nullptr);
+    LineTo(hdc, plot.right, y);
+    const float db = maxDb - (maxDb - minDb) * (static_cast<float>(i) / static_cast<float>(gridN));
+    std::wstringstream ss;
+    ss << std::fixed << std::setprecision(0) << db;
+    RECT lr = {rc.left + 2, y - 8, plot.left - 4, y + 8};
+    SetTextColor(hdc, RGB(116, 145, 172));
+    DrawTextW(hdc, ss.str().c_str(), -1, &lr, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
+  }
+  SelectObject(hdc, oldPen);
+  DeleteObject(grid);
+
+  auto drawSeries = [&](const std::vector<float>& src, COLORREF c, int width) {
+    if (src.size() < 2) {
+      return;
+    }
+    HPEN pen = CreatePen(PS_SOLID, width, c);
+    auto old = reinterpret_cast<HPEN>(SelectObject(hdc, pen));
+    for (std::size_t i = 0; i < src.size(); ++i) {
+      const float n = static_cast<float>(i) / static_cast<float>(src.size() - 1);
+      const int x = plot.left + static_cast<int>(n * (plot.right - plot.left));
+      const float yn = std::clamp((src[i] - minDb) / std::max(1.0f, (maxDb - minDb)), 0.0f, 1.0f);
+      const int y = plot.bottom - static_cast<int>(yn * (plot.bottom - plot.top));
+      if (i == 0) {
+        MoveToEx(hdc, x, y, nullptr);
+      } else {
+        LineTo(hdc, x, y);
+      }
+    }
+    SelectObject(hdc, old);
+    DeleteObject(pen);
+  };
+
+  drawSeries(app->panPeakDb, RGB(255, 104, 94), 1);
+  drawSeries(app->panAvgDb, RGB(95, 190, 240), 1);
+  drawSeries(app->panInstantDb, RGB(255, 226, 92), 2);
+}
+
 void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
   const int viewMode = app ? app->waterfallViewMode : 1;
   TRIVERTEX tv[2] = {
@@ -763,7 +865,10 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
   RECT titleRc = {rc.left + 10, rc.top + 6, rc.right - 10, rc.top + 28};
   DrawTextW(hdc, L"NDB Waterfall Preview", -1, &titleRc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
 
-  RECT plot = {rc.left + 14, rc.top + 34, rc.right - 14, rc.bottom - 34};
+  const int panH = 112;
+  RECT panRc = {rc.left + 14, rc.top + 30, rc.right - 14, rc.top + 30 + panH};
+  DrawPanadapter(hdc, panRc, app);
+  RECT plot = {rc.left + 14, panRc.bottom + 8, rc.right - 14, rc.bottom - 34};
   if (!app || app->previewWav.samples.empty()) {
     SetTextColor(hdc, RGB(130, 150, 170));
     DrawTextW(hdc, L"Open an input WAV to render waterfall.", -1, &plot,
