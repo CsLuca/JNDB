@@ -70,6 +70,8 @@ constexpr int kIdAgcAutoCheck = 1035;
 constexpr int kIdPeakLockButton = 1036;
 constexpr int kIdBookmarkAdd = 1037;
 constexpr int kIdBookmarkClear = 1038;
+constexpr int kIdBookmarkExport = 1039;
+constexpr int kIdBookmarkImport = 1040;
 
 constexpr UINT kMsgProgress = WM_APP + 1;
 constexpr UINT kMsgDone = WM_APP + 2;
@@ -485,6 +487,68 @@ bool WriteMetrics(const std::string& path, const ndb::DecodeStats& s, std::strin
   out << "  \"track_count\": " << s.trackCount << ",\n";
   out << "  \"decoded_count\": " << s.decodedCount << "\n";
   out << "}\n";
+  return true;
+}
+
+bool WriteBookmarksCsv(const std::string& path, const std::vector<float>& bookmarksSec,
+                       std::string* error) {
+  std::ofstream out(path);
+  if (!out) {
+    if (error) {
+      *error = "Cannot write bookmarks file: " + path;
+    }
+    return false;
+  }
+  out << "index,time_sec\n";
+  for (std::size_t i = 0; i < bookmarksSec.size(); ++i) {
+    out << (i + 1) << ',' << std::fixed << std::setprecision(3) << bookmarksSec[i] << '\n';
+  }
+  return true;
+}
+
+bool ReadBookmarksCsv(const std::string& path, std::vector<float>* bookmarksSec, std::string* error) {
+  if (!bookmarksSec) {
+    if (error) {
+      *error = "Internal error: bookmarks target is null";
+    }
+    return false;
+  }
+  std::ifstream in(path);
+  if (!in) {
+    if (error) {
+      *error = "Cannot open bookmarks file: " + path;
+    }
+    return false;
+  }
+  std::string line;
+  std::vector<float> parsed;
+  bool headerSkipped = false;
+  while (std::getline(in, line)) {
+    if (line.empty()) {
+      continue;
+    }
+    if (!headerSkipped) {
+      headerSkipped = true;
+      if (line.find("time_sec") != std::string::npos) {
+        continue;
+      }
+    }
+    const std::size_t c = line.find(',');
+    std::string t = (c == std::string::npos) ? line : line.substr(c + 1);
+    try {
+      float v = std::stof(t);
+      if (std::isfinite(v) && v >= 0.0f) {
+        parsed.push_back(v);
+      }
+    } catch (...) {
+    }
+  }
+  std::sort(parsed.begin(), parsed.end());
+  parsed.erase(std::unique(parsed.begin(), parsed.end(), [](float a, float b) {
+                 return std::fabs(a - b) <= 0.05f;
+               }),
+               parsed.end());
+  *bookmarksSec = std::move(parsed);
   return true;
 }
 
@@ -1434,7 +1498,7 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
     DrawTextW(hdc, bss.str().c_str(), -1, &br, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
     RECT hk = {map.left, map.top - 16, map.right, map.top - 1};
     SetTextColor(hdc, RGB(178, 206, 228));
-    DrawTextW(hdc, L"Hotkeys: B add, C clear, N/P nav, 1..9 jump", -1, &hk,
+    DrawTextW(hdc, L"Hotkeys: B/C add-clear, N/P nav, 1..9 jump, E/I exp-imp", -1, &hk,
               DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
   }
 
@@ -2377,6 +2441,14 @@ LRESULT CALLBACK ChartProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           }
           return 0;
         }
+        if (vk == 'E') {
+          SendMessageW(GetParent(hwnd), WM_COMMAND, MAKEWPARAM(kIdBookmarkExport, BN_CLICKED), 0);
+          return 0;
+        }
+        if (vk == 'I') {
+          SendMessageW(GetParent(hwnd), WM_COMMAND, MAKEWPARAM(kIdBookmarkImport, BN_CLICKED), 0);
+          return 0;
+        }
       }
       return 0;
     case WM_MOUSEMOVE:
@@ -2692,6 +2764,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     y + 40, 130, 34, hwnd, (HMENU)kIdBookmarkAdd, nullptr, nullptr);
       CreateWindowW(L"BUTTON", L"Clear Marks", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, m + 782,
                     y + 40, 120, 34, hwnd, (HMENU)kIdBookmarkClear, nullptr, nullptr);
+      CreateWindowW(L"BUTTON", L"Export Marks", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, m + 908,
+                    y + 40, 124, 34, hwnd, (HMENU)kIdBookmarkExport, nullptr, nullptr);
+      CreateWindowW(L"BUTTON", L"Import Marks", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, m + 1038,
+                    y + 40, 124, 34, hwnd, (HMENU)kIdBookmarkImport, nullptr, nullptr);
       app->runButton = CreateWindowW(L"BUTTON", L"Start Decode", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
                                      m + 100, y + 40, 152, 34, hwnd, (HMENU)kIdRun, nullptr, nullptr);
       y += 82;
@@ -2952,6 +3028,47 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           SetStatus(app, L"Bookmarks cleared");
           InvalidateRect(app->chartPanel, nullptr, TRUE);
           return 0;
+        case kIdBookmarkExport: {
+          const auto p = ChooseSaveFile(hwnd, L"Export bookmark CSV",
+                                        L"CSV files (*.csv)\0*.csv\0All files (*.*)\0*.*\0",
+                                        L"csv");
+          if (p.empty()) {
+            return 0;
+          }
+          std::string err;
+          if (!WriteBookmarksCsv(ToUtf8(p), app->bookmarksSec, &err)) {
+            SetStatus(app, L"Bookmark export failed");
+            MessageBoxW(hwnd, ToWide(err).c_str(), L"Bookmarks", MB_OK | MB_ICONERROR);
+            return 0;
+          }
+          SetStatus(app, L"Bookmarks exported");
+          return 0;
+        }
+        case kIdBookmarkImport: {
+          const auto p = ChooseOpenFile(hwnd, L"Import bookmark CSV",
+                                        L"CSV files (*.csv)\0*.csv\0All files (*.*)\0*.*\0");
+          if (p.empty()) {
+            return 0;
+          }
+          std::string err;
+          std::vector<float> loaded;
+          if (!ReadBookmarksCsv(ToUtf8(p), &loaded, &err)) {
+            SetStatus(app, L"Bookmark import failed");
+            MessageBoxW(hwnd, ToWide(err).c_str(), L"Bookmarks", MB_OK | MB_ICONERROR);
+            return 0;
+          }
+          const float dur = PreviewDurationSec(app);
+          if (dur > 0.0f) {
+            loaded.erase(std::remove_if(loaded.begin(), loaded.end(), [&](float t) { return t > dur; }),
+                         loaded.end());
+          }
+          app->bookmarksSec = std::move(loaded);
+          std::wstringstream ss;
+          ss << L"Bookmarks imported: " << app->bookmarksSec.size();
+          SetStatus(app, ss.str());
+          InvalidateRect(app->chartPanel, nullptr, TRUE);
+          return 0;
+        }
       }
       return 0;
     }
