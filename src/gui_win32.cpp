@@ -119,6 +119,10 @@ constexpr int kIdDriftGhostCheck = 1084;
 constexpr int kIdNoiseRibbonCheck = 1085;
 constexpr int kIdTrackSparkbarsCheck = 1086;
 constexpr int kIdAutoClutterCheck = 1087;
+constexpr int kIdHudPresetIdFast = 1088;
+constexpr int kIdHudPresetDxWeak = 1089;
+constexpr int kIdHudPresetQrmHeavy = 1090;
+constexpr int kIdHudPresetSplit = 1091;
 
 constexpr UINT kMsgProgress = WM_APP + 1;
 constexpr UINT kMsgDone = WM_APP + 2;
@@ -368,6 +372,9 @@ struct AppState {
   float compareCursorBFreqHz = 0.0f;
   float compareCursorBTimeSec = 0.0f;
   float compareCursorBDb = -120.0f;
+  bool confidenceCameraValid = false;
+  float confidenceCameraFreqHz = 0.0f;
+  float confidenceCameraTimeSec = 0.0f;
   int selectedTrackId = -1;
   bool mouseLeaveArmed = false;
   bool suppressNextResetConfirm = false;
@@ -1379,6 +1386,62 @@ void ApplyVisualTuningPreset(AppState* app, float lens, float bg, float split,
      << app->splitTonePoint << L"/" << app->autoFocusStrength;
   SetStatus(app, ss.str());
   InvalidateRect(app->chartPanel, nullptr, TRUE);
+}
+
+void ApplyOperatorHudPreset(AppState* app, int mode, const wchar_t* name) {
+  if (!app) {
+    return;
+  }
+  // 0 ID Fast, 1 DX Weak, 2 QRM Heavy, 3 Split/Co-channel
+  if (mode == 0) {
+    app->showTimeWarpLens = true;
+    app->showDriftPredictionGhost = true;
+    app->showNoiseProfileRibbon = true;
+    app->showTrackSparkbars = true;
+    app->enableAutoClutterOpacity = true;
+    app->showBeaconSeparationView = false;
+    app->qrmBirdieSuppression = 1.0f;
+    app->qrmRidgeAggressiveness = 1.0f;
+  } else if (mode == 1) {
+    app->showTimeWarpLens = true;
+    app->showDriftPredictionGhost = true;
+    app->showNoiseProfileRibbon = true;
+    app->showTrackSparkbars = true;
+    app->showCoherenceOverlay = true;
+    app->showPhaseOverlay = true;
+    app->enableAutoClutterOpacity = false;
+  } else if (mode == 2) {
+    app->showTimeWarpLens = false;
+    app->showDriftPredictionGhost = true;
+    app->showNoiseProfileRibbon = true;
+    app->showTrackSparkbars = false;
+    app->enableAutoClutterOpacity = true;
+    app->qrmBirdieSuppression = 1.35f;
+    app->qrmRidgeAggressiveness = 1.30f;
+  } else {
+    app->showBeaconSeparationView = true;
+    app->showTrackSparkbars = true;
+    app->showTimeWarpLens = true;
+    app->showDriftPredictionGhost = true;
+    app->enableAutoClutterOpacity = true;
+    app->qrmBirdieSuppression = 1.12f;
+    app->qrmRidgeAggressiveness = 1.10f;
+  }
+
+  auto sync = [&](HWND h, bool v) {
+    if (h) SendMessageW(h, BM_SETCHECK, v ? BST_CHECKED : BST_UNCHECKED, 0);
+  };
+  sync(app->beaconSplitCheck, app->showBeaconSeparationView);
+  sync(app->timeWarpLensCheck, app->showTimeWarpLens);
+  sync(app->driftGhostCheck, app->showDriftPredictionGhost);
+  sync(app->noiseRibbonCheck, app->showNoiseProfileRibbon);
+  sync(app->trackSparkbarsCheck, app->showTrackSparkbars);
+  sync(app->autoClutterCheck, app->enableAutoClutterOpacity);
+  SaveUiState(app);
+  InvalidateRect(app->chartPanel, nullptr, TRUE);
+  std::wstringstream ss;
+  ss << L"HUD preset " << name << L" applied";
+  SetStatus(app, ss.str());
 }
 
 void ResetUiSessionState(AppState* app) {
@@ -3613,6 +3676,129 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
                         std::max(0.1f, dur);
   const float viewEnd = viewStart + viewDur;
 
+  // Auto-focus confidence camera with hysteresis (reduced visual jumping).
+  if (!app->overlayRows.empty() && app->previewWav.sampleRate > 0 && !app->waterfallRgb.empty()) {
+    const float nyq = 0.5f * static_cast<float>(app->previewWav.sampleRate);
+    const float fMin = 80.0f;
+    const float fMax = std::min(2200.0f, nyq - 20.0f);
+    const ndb::DecodeResult* best = nullptr;
+    float bestScore = -1.0f;
+    for (const auto& r : app->overlayRows) {
+      if (r.endSec < viewStart || r.startSec > viewEnd) continue;
+      const float s = 0.50f * std::clamp(r.confidence, 0.0f, 1.0f) +
+                      0.30f * std::clamp(r.freqStabilityScore, 0.0f, 1.0f) +
+                      0.20f * std::clamp(r.keyingPeriodicityScore, 0.0f, 1.0f);
+      if (s > bestScore) {
+        bestScore = s;
+        best = &r;
+      }
+    }
+    if (best) {
+      const float targetF = std::clamp(best->freqHz, fMin, fMax);
+      const float targetT = std::clamp(0.5f * (best->startSec + best->endSec), viewStart, viewEnd);
+      if (!app->confidenceCameraValid) {
+        app->confidenceCameraFreqHz = targetF;
+        app->confidenceCameraTimeSec = targetT;
+        app->confidenceCameraValid = true;
+      } else {
+        const float jumpF = std::fabs(targetF - app->confidenceCameraFreqHz);
+        const float jumpT = std::fabs(targetT - app->confidenceCameraTimeSec);
+        const bool allowSwitch = (jumpF < 12.0f && jumpT < 1.0f) || bestScore > 0.86f;
+        const float a = allowSwitch ? 0.24f : 0.08f;
+        app->confidenceCameraFreqHz = (1.0f - a) * app->confidenceCameraFreqHz + a * targetF;
+        app->confidenceCameraTimeSec = (1.0f - a) * app->confidenceCameraTimeSec + a * targetT;
+      }
+
+      RECT cc = {plot.right - 144, plot.top + 146, plot.right - 10, plot.top + 240};
+      if (cc.bottom < plot.bottom - 12) {
+        HBRUSH cbg = CreateSolidBrush(RGB(8, 14, 22));
+        FillRect(hdc, &cc, cbg);
+        DeleteObject(cbg);
+        HPEN cp = CreatePen(PS_SOLID, 1, RGB(66, 98, 126));
+        auto oldCp = reinterpret_cast<HPEN>(SelectObject(hdc, cp));
+        MoveToEx(hdc, cc.left, cc.top, nullptr);
+        LineTo(hdc, cc.right - 1, cc.top);
+        LineTo(hdc, cc.right - 1, cc.bottom - 1);
+        LineTo(hdc, cc.left, cc.bottom - 1);
+        LineTo(hdc, cc.left, cc.top);
+        SelectObject(hdc, oldCp);
+        DeleteObject(cp);
+
+        const int sw = std::max(40, srcW / 5);
+        const int sh = std::max(28, app->waterfallH / 8);
+        const int sx = std::clamp(static_cast<int>(((app->confidenceCameraTimeSec / std::max(0.1f, dur)) * app->waterfallW)) - sw / 2,
+                                  0, std::max(0, app->waterfallW - sw));
+        const float yN = 1.0f - (app->confidenceCameraFreqHz - fMin) / std::max(1.0f, fMax - fMin);
+        const int cy = std::clamp(static_cast<int>(yN * std::max(1, app->waterfallH - 1)), 0, app->waterfallH - 1);
+        const int sy = std::clamp(cy - sh / 2, 0, std::max(0, app->waterfallH - sh));
+        BITMAPINFO cbi = {};
+        cbi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        cbi.bmiHeader.biWidth = sw;
+        cbi.bmiHeader.biHeight = -sh;
+        cbi.bmiHeader.biPlanes = 1;
+        cbi.bmiHeader.biBitCount = 24;
+        cbi.bmiHeader.biCompression = BI_RGB;
+        std::vector<std::uint8_t> cam(static_cast<std::size_t>(sw * sh * 3), 0);
+        for (int yy = 0; yy < sh; ++yy) {
+          for (int xx = 0; xx < sw; ++xx) {
+            const std::size_t sidx = static_cast<std::size_t>(((sy + yy) * app->waterfallW + (sx + xx)) * 3);
+            const std::size_t didx = static_cast<std::size_t>((yy * sw + xx) * 3);
+            cam[didx + 0] = app->waterfallRgb[sidx + 0];
+            cam[didx + 1] = app->waterfallRgb[sidx + 1];
+            cam[didx + 2] = app->waterfallRgb[sidx + 2];
+          }
+        }
+        StretchDIBits(hdc, cc.left + 4, cc.top + 14, cc.right - cc.left - 8, cc.bottom - cc.top - 18,
+                      0, 0, sw, sh, cam.data(), &cbi, DIB_RGB_COLORS, SRCCOPY);
+        RECT ct = {cc.left + 4, cc.top + 1, cc.right - 4, cc.top + 13};
+        SetTextColor(hdc, RGB(176, 220, 242));
+        DrawTextW(hdc, L"Confidence cam", -1, &ct, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+      }
+    }
+  }
+
+  // QRM Direction Map: local vector-flow of disturbance dynamics.
+  if (!app->waterfallDbRender.empty()) {
+    RECT qm = {plot.left + 230, plot.top + 2, std::min(plot.left + 348, plot.right - 260), plot.top + 52};
+    if (qm.right - qm.left >= 80) {
+      HBRUSH qbg = CreateSolidBrush(RGB(8, 14, 22));
+      FillRect(hdc, &qm, qbg);
+      DeleteObject(qbg);
+      HPEN qp = CreatePen(PS_SOLID, 1, RGB(66, 98, 126));
+      auto oldQp = reinterpret_cast<HPEN>(SelectObject(hdc, qp));
+      MoveToEx(hdc, qm.left, qm.top, nullptr);
+      LineTo(hdc, qm.right - 1, qm.top);
+      LineTo(hdc, qm.right - 1, qm.bottom - 1);
+      LineTo(hdc, qm.left, qm.bottom - 1);
+      LineTo(hdc, qm.left, qm.top);
+      SelectObject(hdc, oldQp);
+      DeleteObject(qp);
+      for (int x = qm.left + 8; x < qm.right - 8; x += 12) {
+        for (int y = qm.top + 10; y < qm.bottom - 6; y += 10) {
+          const float xn = static_cast<float>(x - qm.left) / std::max(1.0f, static_cast<float>(qm.right - qm.left - 1));
+          const float yn = static_cast<float>(y - qm.top) / std::max(1.0f, static_cast<float>(qm.bottom - qm.top - 1));
+          const int sx = std::clamp(srcX + static_cast<int>(xn * std::max(1, srcW - 2)), 1, app->waterfallW - 2);
+          const int sy = std::clamp(static_cast<int>(yn * std::max(1, app->waterfallH - 2)), 1, app->waterfallH - 2);
+          const float dt = app->waterfallDbRender[static_cast<std::size_t>(sy * app->waterfallW + (sx + 1))] -
+                           app->waterfallDbRender[static_cast<std::size_t>(sy * app->waterfallW + (sx - 1))];
+          const float df = app->waterfallDbRender[static_cast<std::size_t>((sy + 1) * app->waterfallW + sx)] -
+                           app->waterfallDbRender[static_cast<std::size_t>((sy - 1) * app->waterfallW + sx)];
+          const int ex = x + static_cast<int>(std::round(std::clamp(dt / 4.0f, -1.0f, 1.0f) * 5.0f));
+          const int ey = y + static_cast<int>(std::round(std::clamp(df / 4.0f, -1.0f, 1.0f) * 5.0f));
+          HPEN vp = CreatePen(PS_SOLID, 1, RGB(142, 204, 236));
+          auto oldVp = reinterpret_cast<HPEN>(SelectObject(hdc, vp));
+          MoveToEx(hdc, x, y, nullptr);
+          LineTo(hdc, ex, ey);
+          SelectObject(hdc, oldVp);
+          DeleteObject(vp);
+        }
+      }
+      RECT qt = {qm.left + 4, qm.top + 1, qm.right - 4, qm.top + 12};
+      SetTextColor(hdc, RGB(176, 216, 238));
+      DrawTextW(hdc, L"QRM direction", -1, &qt, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+    }
+  }
+
   SetTextColor(hdc, RGB(166, 194, 220));
   RECT xLab = {plot.left, plot.bottom + 2, plot.right, plot.bottom + 20};
   DrawTextW(hdc, L"Time ->", -1, &xLab, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
@@ -4675,6 +4861,23 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
           spark(rr.left + 136, top[i].cont, RGB(208, 186, 246));
         }
       }
+
+      // Track collision predictor (co-channel convergence warning).
+      if (top.size() >= 2) {
+        float minDf = std::fabs(top[0].freq - top[1].freq);
+        for (std::size_t i = 0; i < top.size(); ++i) {
+          for (std::size_t j = i + 1; j < top.size(); ++j) {
+            minDf = std::min(minDf, std::fabs(top[i].freq - top[j].freq));
+          }
+        }
+        if (minDf < 8.0f) {
+          RECT wrn = {sv.left + 6, sv.bottom - 13, sv.right - 6, sv.bottom - 1};
+          SetTextColor(hdc, RGB(255, 188, 150));
+          std::wstringstream ws;
+          ws << L"COLLISION WARN  df~" << std::fixed << std::setprecision(1) << minDf << L" Hz";
+          DrawTextW(hdc, ws.str().c_str(), -1, &wrn, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+        }
+      }
     }
 
     // Time-warp decode lens around selected/highest-score track.
@@ -4960,6 +5163,32 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
       RECT st = {sk.left + 2, sk.top - 12, sk.right - 2, sk.top};
       SetTextColor(hdc, RGB(172, 220, 242));
       DrawTextW(hdc, L"Morse skeleton", -1, &st, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+
+      // Morse token rail (., -, char gap, word gap) with confidence tint.
+      RECT trl = {sk.left, sk.top - 40, std::min(plot.right - 8, sk.right + 120), sk.top - 24};
+      HBRUSH trbg = CreateSolidBrush(RGB(8, 14, 22));
+      FillRect(hdc, &trl, trbg);
+      DeleteObject(trbg);
+      HPEN trp = CreatePen(PS_SOLID, 1, RGB(64, 96, 128));
+      auto oldTrp = reinterpret_cast<HPEN>(SelectObject(hdc, trp));
+      MoveToEx(hdc, trl.left, trl.top, nullptr);
+      LineTo(hdc, trl.right - 1, trl.top);
+      LineTo(hdc, trl.right - 1, trl.bottom - 1);
+      LineTo(hdc, trl.left, trl.bottom - 1);
+      LineTo(hdc, trl.left, trl.top);
+      SelectObject(hdc, oldTrp);
+      DeleteObject(trp);
+      std::wstring tok;
+      const float ck = std::clamp(focus->keyingPeriodicityScore, 0.0f, 1.0f);
+      for (int i = 0; i < 16; ++i) {
+        if (i % 7 == 6) tok += L" /";
+        else if (i % 4 == 3) tok += L" _";
+        else tok += (ck > 0.52f && (i % 2 == 0)) ? L" -" : L" .";
+      }
+      RECT trt = {trl.left + 4, trl.top + 1, trl.right - 4, trl.bottom - 1};
+      const int tint = static_cast<int>(60.0f * std::clamp(focus->confidence, 0.0f, 1.0f));
+      SetTextColor(hdc, RGB(170 + tint, 210 + tint / 2, 236));
+      DrawTextW(hdc, tok.c_str(), -1, &trt, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
 
       // Confidence volumetric stack (conf/stab/key layers).
       RECT vs = {ld.right + 4, ld.top, std::min(plot.right - 8, ld.right + 56), ld.bottom};
@@ -6806,6 +7035,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                                         (HMENU)kIdFreezeButton, nullptr, nullptr);
       CreateWindowW(L"BUTTON", L"3D DX Weak Preset", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                     m + 1762, y + 80, 132, 26, hwnd, (HMENU)kIdWaterfallDxPreset, nullptr, nullptr);
+      CreateWindowW(L"BUTTON", L"ID Fast", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                    m + 1502, y + 80, 62, 24, hwnd, (HMENU)kIdHudPresetIdFast, nullptr, nullptr);
+      CreateWindowW(L"BUTTON", L"HUD DX", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                    m + 1566, y + 80, 62, 24, hwnd, (HMENU)kIdHudPresetDxWeak, nullptr, nullptr);
+      CreateWindowW(L"BUTTON", L"HUD QRM", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                    m + 1630, y + 80, 62, 24, hwnd, (HMENU)kIdHudPresetQrmHeavy, nullptr, nullptr);
+      CreateWindowW(L"BUTTON", L"HUD Split", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                    m + 1694, y + 80, 64, 24, hwnd, (HMENU)kIdHudPresetSplit, nullptr, nullptr);
       UpdateWaterfallToggleButtons(app);
       UpdateFreezeButton(app);
       y += 112;
@@ -7319,6 +7556,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           SaveUiState(app);
           InvalidateWaterfallCache(app);
           InvalidateRect(app->chartPanel, nullptr, TRUE);
+          return 0;
+        case kIdHudPresetIdFast:
+          ApplyOperatorHudPreset(app, 0, L"ID Fast");
+          return 0;
+        case kIdHudPresetDxWeak:
+          ApplyOperatorHudPreset(app, 1, L"DX Weak");
+          return 0;
+        case kIdHudPresetQrmHeavy:
+          ApplyOperatorHudPreset(app, 2, L"QRM Heavy");
+          return 0;
+        case kIdHudPresetSplit:
+          ApplyOperatorHudPreset(app, 3, L"Split/Co-channel");
           return 0;
         case kIdWaterfallFpsCombo:
           if (HIWORD(wParam) == CBN_SELCHANGE && app->waterfallFpsCombo) {
