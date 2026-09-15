@@ -128,6 +128,10 @@ constexpr int kIdTrustRankingCheck = 1093;
 constexpr int kIdExplainabilityCheck = 1094;
 constexpr int kIdDriftHistogramCheck = 1095;
 constexpr int kIdRegimeTimelineCheck = 1096;
+constexpr int kIdMacroSceneScout = 1097;
+constexpr int kIdMacroSceneVerify = 1098;
+constexpr int kIdMacroSceneDecode = 1099;
+constexpr int kIdMacroSceneQrmFight = 1100;
 
 constexpr UINT kMsgProgress = WM_APP + 1;
 constexpr UINT kMsgDone = WM_APP + 2;
@@ -231,6 +235,10 @@ struct AppState {
   HWND explainabilityCheck = nullptr;
   HWND driftHistogramCheck = nullptr;
   HWND regimeTimelineCheck = nullptr;
+  HWND macroSceneScoutBtn = nullptr;
+  HWND macroSceneVerifyBtn = nullptr;
+  HWND macroSceneDecodeBtn = nullptr;
+  HWND macroSceneQrmFightBtn = nullptr;
   HWND fftPreviewCombo = nullptr;
   HWND autoBookmarkCheck = nullptr;
   HWND autoBookmarkConfSlider = nullptr;
@@ -321,6 +329,7 @@ struct AppState {
   bool showExplainabilityTooltip = true;
   bool showDriftHistogram = true;
   bool showRegimeTimeline = true;
+  int macroSceneMode = 0;  // 0 scout, 1 verify, 2 decode, 3 qrm
   bool autoFocusEnabled = true;
   float autoFocusStrength = 0.28f;
   float agcFloorOffsetDb = -3.0f;
@@ -393,6 +402,9 @@ struct AppState {
   std::vector<float> decodeStabilityReplay;
   ULONGLONG decodeStabilityReplayTickMs = 0;
   float notchImpactDb = 0.0f;
+  std::vector<float> temporalCoherenceHistory;
+  std::vector<float> temporalIdConsistencyHistory;
+  std::vector<float> baselineDriftHistory;
   int selectedTrackId = -1;
   bool mouseLeaveArmed = false;
   bool suppressNextResetConfirm = false;
@@ -1006,6 +1018,7 @@ void SaveUiState(AppState* app) {
   WritePrivateProfileStringW(L"view", L"explainability", app->showExplainabilityTooltip ? L"1" : L"0", s);
   WritePrivateProfileStringW(L"view", L"drift_histogram", app->showDriftHistogram ? L"1" : L"0", s);
   WritePrivateProfileStringW(L"view", L"regime_timeline", app->showRegimeTimeline ? L"1" : L"0", s);
+  WritePrivateProfileStringW(L"view", L"macro_scene_mode", std::to_wstring(app->macroSceneMode).c_str(), s);
   WritePrivateProfileStringW(L"view", L"frozen", app->waterfallFrozen ? L"1" : L"0", s);
   WritePrivateProfileStringW(L"view", L"freeze_col", std::to_wstring(app->waterfallFreezeCenterCol).c_str(), s);
   WritePrivateProfileStringW(L"view", L"zoom", std::to_wstring(app->waterfallZoom).c_str(), s);
@@ -1095,6 +1108,7 @@ void LoadUiState(AppState* app) {
   app->showExplainabilityTooltip = IniReadBool(app->uiStatePath, L"view", L"explainability", app->showExplainabilityTooltip);
   app->showDriftHistogram = IniReadBool(app->uiStatePath, L"view", L"drift_histogram", app->showDriftHistogram);
   app->showRegimeTimeline = IniReadBool(app->uiStatePath, L"view", L"regime_timeline", app->showRegimeTimeline);
+  app->macroSceneMode = std::clamp(IniReadInt(app->uiStatePath, L"view", L"macro_scene_mode", app->macroSceneMode), 0, 3);
   app->waterfallFrozen = IniReadBool(app->uiStatePath, L"view", L"frozen", app->waterfallFrozen);
   app->waterfallFreezeCenterCol = IniReadInt(app->uiStatePath, L"view", L"freeze_col", app->waterfallFreezeCenterCol);
   app->waterfallZoom = std::clamp(static_cast<double>(IniReadFloat(app->uiStatePath, L"view", L"zoom", static_cast<float>(app->waterfallZoom))), 1.0, 8.0);
@@ -1495,6 +1509,38 @@ void ApplyOperatorHudPreset(AppState* app, int mode, const wchar_t* name) {
   SetStatus(app, ss.str());
 }
 
+void ApplyMacroScene(AppState* app, int mode, const wchar_t* name) {
+  if (!app) return;
+  app->macroSceneMode = std::clamp(mode, 0, 3);
+  if (mode == 0) {  // Scout
+    app->showWideView = true;
+    app->showLookNextHeatmap = true;
+    app->showTrackZoomLanes = false;
+    app->showExplainabilityTooltip = false;
+  } else if (mode == 1) {  // Verify
+    app->showWideView = false;
+    app->showTrackZoomLanes = true;
+    app->showExplainabilityTooltip = true;
+    app->showDriftHistogram = true;
+  } else if (mode == 2) {  // Decode
+    app->showCadenceStrip = true;
+    app->showTimeWarpLens = true;
+    app->showTrackSparkbars = true;
+    app->showExplainabilityTooltip = true;
+  } else {  // QRM Fight
+    app->showRegimeTimeline = true;
+    app->showNoiseProfileRibbon = true;
+    app->showSnrIsolines = true;
+    app->qrmBirdieSuppression = 1.40f;
+    app->qrmRidgeAggressiveness = 1.35f;
+  }
+  SaveUiState(app);
+  InvalidateRect(app->chartPanel, nullptr, TRUE);
+  std::wstringstream ss;
+  ss << L"Macro scene " << name << L" applied";
+  SetStatus(app, ss.str());
+}
+
 void ResetUiSessionState(AppState* app) {
   if (!app) {
     return;
@@ -1530,6 +1576,7 @@ void ResetUiSessionState(AppState* app) {
   app->showExplainabilityTooltip = true;
   app->showDriftHistogram = true;
   app->showRegimeTimeline = true;
+  app->macroSceneMode = 0;
   app->waterfallZoom = 1.0;
   app->waterfallPanPx = 0;
   app->waterfallFrozen = false;
@@ -2060,7 +2107,10 @@ void EnsureWaterfallPreview(AppState* app) {
   // (more smoothing along time, conservative across frequency).
   std::vector<float> den = norm;
   auto at = [&](int tt, int bb) -> float {
-    return norm[static_cast<std::size_t>(tt * spec.binCount + bb)];
+    const int ttc = std::clamp(tt, 0, std::max(0, spec.frameCount - 1));
+    const int bbc = std::clamp(bb, 0, std::max(0, spec.binCount - 1));
+    const std::size_t idx = static_cast<std::size_t>(ttc * spec.binCount + bbc);
+    return (idx < norm.size()) ? norm[idx] : 0.0f;
   };
   for (int t = 2; t + 2 < spec.frameCount; ++t) {
     for (int b = 2; b + 2 < spec.binCount; ++b) {
@@ -4614,7 +4664,7 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
     }
     RECT hk = {map.left, map.top - 16, map.right, map.top - 1};
     SetTextColor(hdc, RGB(178, 206, 228));
-    DrawTextW(hdc, L"Hotkeys: A show auto, B/C add-clear, D del, F freeze, G dotdash, X diff, H coh, J halo, K cadence, Y heat, U lanes, L lock readout, M manual notch, O ridge, V wide, F6/F7/F8 visual presets, Ctrl+F6..F9 HUD presets, Ctrl+Click set B cursor, N/P nav, 1..9 jump, E/I exp-imp, Shift+Drag zoom box, Ctrl+R reset (Shift=skip prompt)",
+    DrawTextW(hdc, L"Hotkeys: A show auto, B/C add-clear, D del, F freeze, G dotdash, X diff, H coh, J halo, K cadence, Y heat, U lanes, L lock readout, M manual notch, O ridge, V wide, F6/F7/F8 visual presets, Ctrl+F6..F9 HUD presets, Ctrl+1..4 macro scenes, Ctrl+Click set B cursor, N/P nav, 1..9 jump, E/I exp-imp, Shift+Drag zoom box, Ctrl+R reset (Shift=skip prompt)",
               -1, &hk,
               DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
   }
@@ -5382,6 +5432,129 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
         SetTextColor(hdc, RGB(174, 216, 238));
         DrawTextW(hdc, L"Time-warp lens", -1, &tt, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
       }
+    }
+  }
+
+  // Dual-track comparator + uncertainty zoom + recommender + coherence scoreboard.
+  if (app && !app->overlayRows.empty() && app->previewWav.sampleRate > 0) {
+    struct Cand {
+      int id = -1;
+      float s = -1.0f;
+      float c = 0.0f;
+      float st = 0.0f;
+      float k = 0.0f;
+      float cont = 0.0f;
+      float f = 0.0f;
+    };
+    std::vector<Cand> cand;
+    for (const auto& r : app->overlayRows) {
+      if (r.endSec < viewStart || r.startSec > viewEnd) continue;
+      const float s = 0.45f * std::clamp(r.confidence, 0.0f, 1.0f) +
+                      0.30f * std::clamp(r.freqStabilityScore, 0.0f, 1.0f) +
+                      0.15f * std::clamp(r.keyingPeriodicityScore, 0.0f, 1.0f) +
+                      0.10f * std::clamp(r.continuityScore, 0.0f, 1.0f);
+      bool found = false;
+      for (auto& c : cand) {
+        if (c.id == r.trackId) {
+          if (s > c.s) {
+            c = {r.trackId, s, r.confidence, r.freqStabilityScore, r.keyingPeriodicityScore, r.continuityScore, r.freqHz};
+          }
+          found = true;
+          break;
+        }
+      }
+      if (!found) cand.push_back({r.trackId, s, r.confidence, r.freqStabilityScore, r.keyingPeriodicityScore, r.continuityScore, r.freqHz});
+    }
+    std::sort(cand.begin(), cand.end(), [](const Cand& a, const Cand& b) { return a.s > b.s; });
+    if (cand.size() > 2) cand.resize(2);
+
+    // Adaptive zoom by uncertainty.
+    if (!cand.empty()) {
+      const float unc = 1.0f - std::clamp(0.6f * cand[0].st + 0.4f * cand[0].c, 0.0f, 1.0f);
+      const double targetZoom = 1.0 + 2.2 * std::clamp(static_cast<double>(unc), 0.0, 1.0);
+      app->waterfallZoom = std::clamp(0.92 * app->waterfallZoom + 0.08 * targetZoom, 1.0, 8.0);
+      if (app->waterfallW > 0) {
+        const float nyq = 0.5f * static_cast<float>(app->previewWav.sampleRate);
+        const float fMin = 80.0f;
+        const float fMax = std::min(2200.0f, nyq - 20.0f);
+        const float yn = 1.0f - (std::clamp(cand[0].f, fMin, fMax) - fMin) / std::max(1.0f, (fMax - fMin));
+        const int bin = std::clamp(static_cast<int>(yn * std::max(1, app->waterfallH - 1)), 0, std::max(0, app->waterfallH - 1));
+        app->peakLockBin = bin;
+      }
+    }
+
+    // Temporal coherence scoreboard and baseline guard history.
+    if (!cand.empty()) {
+      const float coh = std::clamp((cand[0].k + cand[0].st + cand[0].cont) / 3.0f, 0.0f, 1.0f);
+      const float idc = std::clamp(cand[0].c * 0.6f + cand[0].cont * 0.4f, 0.0f, 1.0f);
+      app->temporalCoherenceHistory.push_back(coh);
+      app->temporalIdConsistencyHistory.push_back(idc);
+      if (app->temporalCoherenceHistory.size() > 180) app->temporalCoherenceHistory.erase(app->temporalCoherenceHistory.begin());
+      if (app->temporalIdConsistencyHistory.size() > 180) app->temporalIdConsistencyHistory.erase(app->temporalIdConsistencyHistory.begin());
+    }
+    app->baselineDriftHistory.push_back(app->panMinDb);
+    if (app->baselineDriftHistory.size() > 180) app->baselineDriftHistory.erase(app->baselineDriftHistory.begin());
+
+    RECT dc = {plot.left + 214, plot.top + 54, std::min(plot.left + 430, plot.right - 244), plot.top + 122};
+    if (dc.right - dc.left > 160) {
+      HBRUSH dbg = CreateSolidBrush(RGB(8, 14, 22));
+      FillRect(hdc, &dc, dbg);
+      DeleteObject(dbg);
+      HPEN dp = CreatePen(PS_SOLID, 1, RGB(66, 98, 126));
+      auto oldDp = reinterpret_cast<HPEN>(SelectObject(hdc, dp));
+      MoveToEx(hdc, dc.left, dc.top, nullptr);
+      LineTo(hdc, dc.right - 1, dc.top);
+      LineTo(hdc, dc.right - 1, dc.bottom - 1);
+      LineTo(hdc, dc.left, dc.bottom - 1);
+      LineTo(hdc, dc.left, dc.top);
+      SelectObject(hdc, oldDp);
+      DeleteObject(dp);
+      RECT dt = {dc.left + 4, dc.top + 1, dc.right - 4, dc.top + 13};
+      SetTextColor(hdc, RGB(176, 216, 238));
+      DrawTextW(hdc, L"Dual-track comparator", -1, &dt, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+      if (cand.size() >= 1) {
+        std::wstringstream s0;
+        s0 << L"A T" << cand[0].id << L" c" << std::fixed << std::setprecision(2) << cand[0].c
+           << L" s" << cand[0].st << L" k" << cand[0].k;
+        RECT r0 = {dc.left + 6, dc.top + 16, dc.right - 6, dc.top + 30};
+        SetTextColor(hdc, RGB(168, 236, 190));
+        DrawTextW(hdc, s0.str().c_str(), -1, &r0, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+      }
+      if (cand.size() >= 2) {
+        std::wstringstream s1;
+        s1 << L"B T" << cand[1].id << L" c" << std::fixed << std::setprecision(2) << cand[1].c
+           << L" s" << cand[1].st << L" k" << cand[1].k;
+        RECT r1 = {dc.left + 6, dc.top + 31, dc.right - 6, dc.top + 45};
+        SetTextColor(hdc, RGB(168, 214, 252));
+        DrawTextW(hdc, s1.str().c_str(), -1, &r1, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+      }
+
+      // QRM action recommender + coherence scoreboard + baseline guard.
+      float cohAvg = 0.0f;
+      for (float v : app->temporalCoherenceHistory) cohAvg += v;
+      cohAvg /= std::max(1.0f, static_cast<float>(app->temporalCoherenceHistory.size()));
+      float idAvg = 0.0f;
+      for (float v : app->temporalIdConsistencyHistory) idAvg += v;
+      idAvg /= std::max(1.0f, static_cast<float>(app->temporalIdConsistencyHistory.size()));
+      float bd = 0.0f;
+      if (app->baselineDriftHistory.size() >= 8) {
+        const float mn = *std::min_element(app->baselineDriftHistory.end() - 8, app->baselineDriftHistory.end());
+        const float mx = *std::max_element(app->baselineDriftHistory.end() - 8, app->baselineDriftHistory.end());
+        bd = mx - mn;
+      }
+      std::wstring rec = L"Keep current";
+      if (app->qrmImpulseScore > 0.62f) rec = L"Use HUD QRM: impulsive";
+      else if (app->qrmBirdieScore > 0.60f) rec = L"Increase notch width";
+      else if (app->enableAutoClutterOpacity && cand.size() > 1 && std::fabs(cand[0].f - cand[1].f) < 9.0f) rec = L"Switch Split scene";
+      RECT rr = {dc.left + 6, dc.top + 46, dc.right - 6, dc.top + 58};
+      SetTextColor(hdc, RGB(238, 220, 166));
+      DrawTextW(hdc, rec.c_str(), -1, &rr, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+      std::wstringstream sc;
+      sc << L"Coh " << std::fixed << std::setprecision(2) << cohAvg << L"  ID " << idAvg
+         << L"  BaseDrift " << std::setprecision(1) << bd << L"dB";
+      RECT sr = {dc.left + 6, dc.top + 58, dc.right - 6, dc.bottom - 2};
+      SetTextColor(hdc, bd > 4.0f ? RGB(255, 182, 170) : RGB(176, 210, 236));
+      DrawTextW(hdc, sc.str().c_str(), -1, &sr, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
     }
   }
 
@@ -6852,6 +7025,22 @@ LRESULT CALLBACK ChartProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           ApplyOperatorHudPreset(app, 3, L"Split/Co-channel");
           return 0;
         }
+        if (ctrl && vk == '1') {
+          ApplyMacroScene(app, 0, L"Scout");
+          return 0;
+        }
+        if (ctrl && vk == '2') {
+          ApplyMacroScene(app, 1, L"Verify");
+          return 0;
+        }
+        if (ctrl && vk == '3') {
+          ApplyMacroScene(app, 2, L"Decode");
+          return 0;
+        }
+        if (ctrl && vk == '4') {
+          ApplyMacroScene(app, 3, L"QRM Fight");
+          return 0;
+        }
         if (vk == VK_F6) {
           ApplyVisualTuningPreset(app, 1.38f, 1.25f, 0.52f, 0.45f, L"DX Weak");
           return 0;
@@ -7614,9 +7803,21 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           (HMENU)kIdRegimeTimelineCheck, nullptr, nullptr);
       SendMessageW(app->regimeTimelineCheck, BM_SETCHECK,
                    app->showRegimeTimeline ? BST_CHECKED : BST_UNCHECKED, 0);
+      app->macroSceneScoutBtn = CreateWindowW(L"BUTTON", L"Scout", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                               m + 1772, y + 122, 54, 22, hwnd,
+                                               (HMENU)kIdMacroSceneScout, nullptr, nullptr);
+      app->macroSceneVerifyBtn = CreateWindowW(L"BUTTON", L"Verify", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                                m + 1828, y + 122, 58, 22, hwnd,
+                                                (HMENU)kIdMacroSceneVerify, nullptr, nullptr);
+      app->macroSceneDecodeBtn = CreateWindowW(L"BUTTON", L"Decode", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                                m + 1772, y + 146, 54, 22, hwnd,
+                                                (HMENU)kIdMacroSceneDecode, nullptr, nullptr);
+      app->macroSceneQrmFightBtn = CreateWindowW(L"BUTTON", L"QRM", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                                  m + 1828, y + 146, 58, 22, hwnd,
+                                                  (HMENU)kIdMacroSceneQrmFight, nullptr, nullptr);
       UpdateWaterfallToggleButtons(app);
       UpdateFreezeButton(app);
-      y += 146;
+      y += 172;
 
       CreateWindowW(L"STATIC", L"Pan Avg Alpha", WS_CHILD | WS_VISIBLE, m + 1092, y + 6, 92, 22,
                     hwnd, nullptr, nullptr, nullptr);
@@ -8148,6 +8349,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             else if (sel == 2) ApplyOperatorHudPreset(app, 2, L"QRM Heavy");
             else ApplyOperatorHudPreset(app, 3, L"Split/Co-channel");
           }
+          return 0;
+        case kIdMacroSceneScout:
+          ApplyMacroScene(app, 0, L"Scout");
+          return 0;
+        case kIdMacroSceneVerify:
+          ApplyMacroScene(app, 1, L"Verify");
+          return 0;
+        case kIdMacroSceneDecode:
+          ApplyMacroScene(app, 2, L"Decode");
+          return 0;
+        case kIdMacroSceneQrmFight:
+          ApplyMacroScene(app, 3, L"QRM Fight");
           return 0;
         case kIdWaterfallFpsCombo:
           if (HIWORD(wParam) == CBN_SELCHANGE && app->waterfallFpsCombo) {
@@ -8855,7 +9068,7 @@ int RunGuiApplication(HINSTANCE instance, int nCmdShow) {
                                                                                               WS_CAPTION |
                                                                                               WS_SYSMENU |
                                                                                               WS_MINIMIZEBOX,
-                              CW_USEDEFAULT, CW_USEDEFAULT, 1860, 1760, nullptr, nullptr, instance,
+                              CW_USEDEFAULT, CW_USEDEFAULT, 1580, 1180, nullptr, nullptr, instance,
                               &app);
   if (!hwnd) {
     return 1;
