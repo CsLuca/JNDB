@@ -1439,6 +1439,9 @@ void ApplyResponsiveLayout(AppState* app) {
     if (!IsWindow(c.hwnd)) continue;
     if (c.hwnd == app->chartPanel) continue;
     if (c.hwnd == app->summaryText) continue;
+    if (c.hwnd == app->runButton) continue;
+    if (c.hwnd == app->progressBar) continue;
+    if (c.hwnd == app->statusText) continue;
     const int x = static_cast<int>(std::round(c.rc.left * sx));
     const int y = static_cast<int>(std::round(c.rc.top * sy));
     const int w = std::max(24, static_cast<int>(std::round((c.rc.right - c.rc.left) * sx)));
@@ -1453,11 +1456,30 @@ void ApplyResponsiveLayout(AppState* app) {
     return a.rc.left < b.rc.left;
   });
 
+  const int stripPad = 8;
+  int stripBottom = stripPad;
+  if (app->runButton && IsWindow(app->runButton)) {
+    MoveWindow(app->runButton, stripPad, stripPad, 152, 32, TRUE);
+    stripBottom = std::max(stripBottom, stripPad + 32);
+  }
+  if (app->progressBar && IsWindow(app->progressBar)) {
+    const int px = stripPad + 160;
+    const int pw = std::max(220, cw - px - stripPad);
+    MoveWindow(app->progressBar, px, stripPad + 2, pw, 16, TRUE);
+    stripBottom = std::max(stripBottom, stripPad + 18);
+  }
+  if (app->statusText && IsWindow(app->statusText)) {
+    const int sxTxt = stripPad + 160;
+    const int swTxt = std::max(220, cw - sxTxt - stripPad);
+    MoveWindow(app->statusText, sxTxt, stripPad + 20, swTxt, 20, TRUE);
+    stripBottom = std::max(stripBottom, stripPad + 40);
+  }
+
   int curX = 8;
-  int curY = 8;
+  int curY = stripBottom + 8;
   int rowH = 0;
   int lastTop = std::numeric_limits<int>::min();
-  int topBottom = 0;
+  int topBottom = stripBottom;
   for (const auto& it : topControls) {
     if (std::abs(static_cast<int>(it.rc.top) - lastTop) > 18) {
       if (rowH > 0) {
