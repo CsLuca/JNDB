@@ -123,6 +123,7 @@ constexpr int kIdHudPresetIdFast = 1088;
 constexpr int kIdHudPresetDxWeak = 1089;
 constexpr int kIdHudPresetQrmHeavy = 1090;
 constexpr int kIdHudPresetSplit = 1091;
+constexpr int kIdHudPresetCombo = 1092;
 
 constexpr UINT kMsgProgress = WM_APP + 1;
 constexpr UINT kMsgDone = WM_APP + 2;
@@ -221,6 +222,7 @@ struct AppState {
   HWND noiseRibbonCheck = nullptr;
   HWND trackSparkbarsCheck = nullptr;
   HWND autoClutterCheck = nullptr;
+  HWND hudPresetCombo = nullptr;
   HWND fftPreviewCombo = nullptr;
   HWND autoBookmarkCheck = nullptr;
   HWND autoBookmarkConfSlider = nullptr;
@@ -306,6 +308,7 @@ struct AppState {
   bool showNoiseProfileRibbon = true;
   bool showTrackSparkbars = true;
   bool enableAutoClutterOpacity = true;
+  int hudPresetMode = 0;  // 0 ID Fast, 1 DX Weak, 2 QRM Heavy, 3 Split
   bool autoFocusEnabled = true;
   float autoFocusStrength = 0.28f;
   float agcFloorOffsetDb = -3.0f;
@@ -983,6 +986,7 @@ void SaveUiState(AppState* app) {
   WritePrivateProfileStringW(L"view", L"noise_ribbon", app->showNoiseProfileRibbon ? L"1" : L"0", s);
   WritePrivateProfileStringW(L"view", L"track_sparkbars", app->showTrackSparkbars ? L"1" : L"0", s);
   WritePrivateProfileStringW(L"view", L"auto_clutter", app->enableAutoClutterOpacity ? L"1" : L"0", s);
+  WritePrivateProfileStringW(L"view", L"hud_preset_mode", std::to_wstring(app->hudPresetMode).c_str(), s);
   WritePrivateProfileStringW(L"view", L"frozen", app->waterfallFrozen ? L"1" : L"0", s);
   WritePrivateProfileStringW(L"view", L"freeze_col", std::to_wstring(app->waterfallFreezeCenterCol).c_str(), s);
   WritePrivateProfileStringW(L"view", L"zoom", std::to_wstring(app->waterfallZoom).c_str(), s);
@@ -1067,6 +1071,7 @@ void LoadUiState(AppState* app) {
   app->showNoiseProfileRibbon = IniReadBool(app->uiStatePath, L"view", L"noise_ribbon", app->showNoiseProfileRibbon);
   app->showTrackSparkbars = IniReadBool(app->uiStatePath, L"view", L"track_sparkbars", app->showTrackSparkbars);
   app->enableAutoClutterOpacity = IniReadBool(app->uiStatePath, L"view", L"auto_clutter", app->enableAutoClutterOpacity);
+  app->hudPresetMode = std::clamp(IniReadInt(app->uiStatePath, L"view", L"hud_preset_mode", app->hudPresetMode), 0, 3);
   app->waterfallFrozen = IniReadBool(app->uiStatePath, L"view", L"frozen", app->waterfallFrozen);
   app->waterfallFreezeCenterCol = IniReadInt(app->uiStatePath, L"view", L"freeze_col", app->waterfallFreezeCenterCol);
   app->waterfallZoom = std::clamp(static_cast<double>(IniReadFloat(app->uiStatePath, L"view", L"zoom", static_cast<float>(app->waterfallZoom))), 1.0, 8.0);
@@ -1215,6 +1220,9 @@ void LoadUiState(AppState* app) {
   if (app->autoClutterCheck) {
     SendMessageW(app->autoClutterCheck, BM_SETCHECK,
                  app->enableAutoClutterOpacity ? BST_CHECKED : BST_UNCHECKED, 0);
+  }
+  if (app->hudPresetCombo) {
+    SendMessageW(app->hudPresetCombo, CB_SETCURSEL, app->hudPresetMode, 0);
   }
   UpdateWaterfallToggleButtons(app);
   UpdateFreezeButton(app);
@@ -1392,6 +1400,7 @@ void ApplyOperatorHudPreset(AppState* app, int mode, const wchar_t* name) {
   if (!app) {
     return;
   }
+  app->hudPresetMode = std::clamp(mode, 0, 3);
   // 0 ID Fast, 1 DX Weak, 2 QRM Heavy, 3 Split/Co-channel
   if (mode == 0) {
     app->showTimeWarpLens = true;
@@ -1437,6 +1446,9 @@ void ApplyOperatorHudPreset(AppState* app, int mode, const wchar_t* name) {
   sync(app->noiseRibbonCheck, app->showNoiseProfileRibbon);
   sync(app->trackSparkbarsCheck, app->showTrackSparkbars);
   sync(app->autoClutterCheck, app->enableAutoClutterOpacity);
+  if (app->hudPresetCombo) {
+    SendMessageW(app->hudPresetCombo, CB_SETCURSEL, app->hudPresetMode, 0);
+  }
   SaveUiState(app);
   InvalidateRect(app->chartPanel, nullptr, TRUE);
   std::wstringstream ss;
@@ -1474,6 +1486,7 @@ void ResetUiSessionState(AppState* app) {
   app->showNoiseProfileRibbon = true;
   app->showTrackSparkbars = true;
   app->enableAutoClutterOpacity = true;
+  app->hudPresetMode = 0;
   app->waterfallZoom = 1.0;
   app->waterfallPanPx = 0;
   app->waterfallFrozen = false;
@@ -1538,6 +1551,7 @@ void ResetUiSessionState(AppState* app) {
   if (app->noiseRibbonCheck) SendMessageW(app->noiseRibbonCheck, BM_SETCHECK, BST_CHECKED, 0);
   if (app->trackSparkbarsCheck) SendMessageW(app->trackSparkbarsCheck, BM_SETCHECK, BST_CHECKED, 0);
   if (app->autoClutterCheck) SendMessageW(app->autoClutterCheck, BM_SETCHECK, BST_CHECKED, 0);
+  if (app->hudPresetCombo) SendMessageW(app->hudPresetCombo, CB_SETCURSEL, app->hudPresetMode, 0);
   UpdateWaterfallToggleButtons(app);
   UpdateFreezeButton(app);
   if (app->agcFloorSlider) SendMessageW(app->agcFloorSlider, TBM_SETPOS, TRUE, static_cast<LPARAM>(app->agcFloorOffsetDb));
@@ -3411,6 +3425,29 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
     }
   }
 
+  // Stability heat curtain: subtly dims low-reliability regions.
+  if (!app->waterfallCoherenceMask.empty() && !app->waterfallPhaseMask.empty()) {
+    for (int x = plot.left; x < plot.right; x += 3) {
+      const float xn = static_cast<float>(x - plot.left) /
+                       std::max<int>(1, static_cast<int>(plot.right - plot.left - 1));
+      const int sx = std::clamp(srcX + static_cast<int>(xn * std::max(1, srcW - 1)), 0,
+                                app->waterfallW - 1);
+      for (int y = plot.top; y < plot.bottom; y += 3) {
+        const float yn = static_cast<float>(y - plot.top) /
+                         std::max<int>(1, static_cast<int>(plot.bottom - plot.top - 1));
+        const int sy = std::clamp(static_cast<int>(yn * std::max(1, app->waterfallH - 1)), 0,
+                                  app->waterfallH - 1);
+        const std::size_t mi = static_cast<std::size_t>(sy * app->waterfallW + sx);
+        const float st = std::max(app->waterfallCoherenceMask[mi], app->waterfallPhaseMask[mi]) / 255.0f;
+        const float dim = std::clamp((0.50f - st) * 2.0f, 0.0f, 1.0f);
+        if (dim > 0.10f) {
+          const int c = static_cast<int>(10 + 70 * dim);
+          SetPixelV(hdc, x, y, RGB(c / 2, c / 2, c));
+        }
+      }
+    }
+  }
+
   // SNR isolines (contours over dB-NF): helps spotting usable corridors.
   if (app->showSnrIsolines && !app->waterfallDbRender.empty()) {
     const float snrLv[4] = {3.0f, 6.0f, 10.0f, 14.0f};
@@ -3844,6 +3881,45 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
       RECT rr = {plot.left + 4, plot.top + 16, plot.left + 132, plot.top + 30};
       SetTextColor(hdc, RGB(160, 206, 236));
       DrawTextW(hdc, L"Adaptive ruler", -1, &rr, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+    }
+
+    // Explainability tooltip (why this track).
+    if (app->selectedTrackId >= 0) {
+      const ndb::DecodeResult* sr = nullptr;
+      float best = -1.0f;
+      for (const auto& r : app->overlayRows) {
+        if (r.trackId != app->selectedTrackId) continue;
+        const float s = 0.35f * std::clamp(r.confidence, 0.0f, 1.0f) +
+                        0.25f * std::clamp(r.freqStabilityScore, 0.0f, 1.0f) +
+                        0.20f * std::clamp(r.keyingPeriodicityScore, 0.0f, 1.0f) +
+                        0.20f * std::clamp(r.continuityScore, 0.0f, 1.0f);
+        if (s > best) {
+          best = s;
+          sr = &r;
+        }
+      }
+      if (sr) {
+        RECT ex = {plot.left + 8, plot.top + 86, std::min(plot.left + 280, plot.right - 240), plot.top + 136};
+        HBRUSH ebg = CreateSolidBrush(RGB(8, 14, 22));
+        FillRect(hdc, &ex, ebg);
+        DeleteObject(ebg);
+        HPEN ep = CreatePen(PS_SOLID, 1, RGB(72, 102, 132));
+        auto oldEp = reinterpret_cast<HPEN>(SelectObject(hdc, ep));
+        MoveToEx(hdc, ex.left, ex.top, nullptr);
+        LineTo(hdc, ex.right - 1, ex.top);
+        LineTo(hdc, ex.right - 1, ex.bottom - 1);
+        LineTo(hdc, ex.left, ex.bottom - 1);
+        LineTo(hdc, ex.left, ex.top);
+        SelectObject(hdc, oldEp);
+        DeleteObject(ep);
+        std::wstringstream es;
+        es << L"Why T" << sr->trackId << L": C " << std::fixed << std::setprecision(2) << sr->confidence
+           << L" | S " << sr->freqStabilityScore << L" | K " << sr->keyingPeriodicityScore
+           << L" | N " << sr->continuityScore << L" | P " << sr->plausibleIdScore;
+        RECT et = {ex.left + 6, ex.top + 4, ex.right - 6, ex.bottom - 4};
+        SetTextColor(hdc, RGB(180, 220, 244));
+        DrawTextW(hdc, es.str().c_str(), -1, &et, DT_LEFT | DT_WORDBREAK | DT_END_ELLIPSIS);
+      }
     }
   }
 
@@ -4289,9 +4365,32 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
       SetTextColor(hdc, RGB(255, 196, 120));
       DrawTextW(hdc, bss.str().c_str(), -1, &br, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
     }
+    // Noise regime timeline (quiet/impulsive/birdie/sweep).
+    RECT nt = {map.left, map.top - 30, std::min(map.right, map.left + 360), map.top - 18};
+    HBRUSH nbg = CreateSolidBrush(RGB(8, 14, 22));
+    FillRect(hdc, &nt, nbg);
+    DeleteObject(nbg);
+    float rv[4] = {app->qrmWidebandScore * 0.5f,
+                   app->qrmImpulseScore,
+                   app->qrmBirdieScore,
+                   app->qrmSweepScore};
+    COLORREF rc[4] = {RGB(128, 186, 228), RGB(236, 170, 156), RGB(240, 206, 132), RGB(170, 232, 186)};
+    int x0 = nt.left + 4;
+    for (int i = 0; i < 4; ++i) {
+      const int w = static_cast<int>(std::round(std::clamp(rv[i], 0.0f, 1.0f) * 82.0f));
+      RECT b = {x0, nt.top + 2, x0 + w, nt.bottom - 2};
+      HBRUSH bb = CreateSolidBrush(rc[i]);
+      FillRect(hdc, &b, bb);
+      DeleteObject(bb);
+      x0 += 88;
+    }
+    RECT nl = {nt.left + 4, nt.top - 12, nt.right, nt.top};
+    SetTextColor(hdc, RGB(170, 210, 232));
+    DrawTextW(hdc, L"Noise regime: quiet | impulsive | birdie | sweep", -1, &nl,
+              DT_LEFT | DT_SINGLELINE | DT_VCENTER);
     RECT hk = {map.left, map.top - 16, map.right, map.top - 1};
     SetTextColor(hdc, RGB(178, 206, 228));
-    DrawTextW(hdc, L"Hotkeys: A show auto, B/C add-clear, D del, F freeze, G dotdash, X diff, H coh, J halo, K cadence, Y heat, U lanes, L lock readout, M manual notch, O ridge, V wide, F6/F7/F8 visual presets, Ctrl+Click set B cursor, N/P nav, 1..9 jump, E/I exp-imp, Shift+Drag zoom box, Ctrl+R reset (Shift=skip prompt)",
+    DrawTextW(hdc, L"Hotkeys: A show auto, B/C add-clear, D del, F freeze, G dotdash, X diff, H coh, J halo, K cadence, Y heat, U lanes, L lock readout, M manual notch, O ridge, V wide, F6/F7/F8 visual presets, Ctrl+F6..F9 HUD presets, Ctrl+Click set B cursor, N/P nav, 1..9 jump, E/I exp-imp, Shift+Drag zoom box, Ctrl+R reset (Shift=skip prompt)",
               -1, &hk,
               DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
   }
@@ -4668,6 +4767,23 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
       SelectObject(hdc, oldT);
       DeleteObject(trk);
 
+      // Reliability envelope: tighter when confidence/stability/continuity are high.
+      const float rel = std::clamp((std::clamp(r.confidence, 0.0f, 1.0f) +
+                                    std::clamp(r.freqStabilityScore, 0.0f, 1.0f) +
+                                    std::clamp(r.continuityScore, 0.0f, 1.0f)) /
+                                       3.0f,
+                                   0.0f, 1.0f);
+      const int env = std::max(1, static_cast<int>(std::round(6.0f - 4.0f * rel)));
+      HPEN ep = CreatePen(PS_SOLID, 1, RGB(static_cast<int>(90 + 80 * rel), static_cast<int>(130 + 90 * rel),
+                                           static_cast<int>(150 + 70 * rel)));
+      auto oldEp = reinterpret_cast<HPEN>(SelectObject(hdc, ep));
+      MoveToEx(hdc, x0, y - env, nullptr);
+      LineTo(hdc, std::max(x0 + 1, x1), y - env);
+      MoveToEx(hdc, x0, y + env, nullptr);
+      LineTo(hdc, std::max(x0 + 1, x1), y + env);
+      SelectObject(hdc, oldEp);
+      DeleteObject(ep);
+
       // Drift prediction ghost line (1-3s extrapolation for focus track).
       if (app->showDriftPredictionGhost && app->selectedTrackId >= 0 && r.trackId == app->selectedTrackId) {
         float slopeHzPerSec = 0.0f;
@@ -4801,6 +4917,34 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
     }
     std::sort(top.begin(), top.end(), [](const SepTrack& a, const SepTrack& b) { return a.score > b.score; });
     if (top.size() > 3) top.resize(3);
+
+    // Track trust ranking panel.
+    RECT rk = {plot.left + 8, plot.top + 138, std::min(plot.left + 210, plot.right - 250), plot.top + 204};
+    if (rk.right - rk.left >= 140 && !top.empty()) {
+      HBRUSH rbg = CreateSolidBrush(RGB(8, 14, 22));
+      FillRect(hdc, &rk, rbg);
+      DeleteObject(rbg);
+      HPEN rp = CreatePen(PS_SOLID, 1, RGB(66, 98, 126));
+      auto oldRp = reinterpret_cast<HPEN>(SelectObject(hdc, rp));
+      MoveToEx(hdc, rk.left, rk.top, nullptr);
+      LineTo(hdc, rk.right - 1, rk.top);
+      LineTo(hdc, rk.right - 1, rk.bottom - 1);
+      LineTo(hdc, rk.left, rk.bottom - 1);
+      LineTo(hdc, rk.left, rk.top);
+      SelectObject(hdc, oldRp);
+      DeleteObject(rp);
+      RECT rt = {rk.left + 6, rk.top + 2, rk.right - 6, rk.top + 14};
+      SetTextColor(hdc, RGB(176, 214, 238));
+      DrawTextW(hdc, L"Track trust", -1, &rt, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+      for (std::size_t i = 0; i < top.size(); ++i) {
+        RECT lr = {rk.left + 6, rk.top + 16 + static_cast<int>(i) * 14, rk.right - 6,
+                   rk.top + 30 + static_cast<int>(i) * 14};
+        std::wstringstream ls;
+        ls << (i + 1) << L") T" << top[i].id << L"  " << std::fixed << std::setprecision(2) << top[i].score;
+        SetTextColor(hdc, i == 0 ? RGB(186, 240, 200) : RGB(170, 204, 228));
+        DrawTextW(hdc, ls.str().c_str(), -1, &lr, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+      }
+    }
 
     RECT sv = {plot.right - 236, plot.top + 90, plot.right - 10, std::min(plot.bottom - 92, plot.top + 248)};
     if (app->showBeaconSeparationView && sv.bottom - sv.top >= 84 && !top.empty()) {
@@ -5035,6 +5179,22 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
     RECT dr = {plot.right - 180, yLock - 14, plot.right - 6, yLock + 2};
     SetTextColor(hdc, RGB(186, 236, 252));
     DrawTextW(hdc, L"Dot/Dash Assist", -1, &dr, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
+
+    // Dot/Dash Boundary Assistant: transition markers with local score.
+    HPEN bp = CreatePen(PS_SOLID, 1, RGB(236, 248, 182));
+    auto oldBp = reinterpret_cast<HPEN>(SelectObject(hdc, bp));
+    for (int x = plot.left + 10; x < plot.right - 10; x += std::max(10, dotPx + gapPx)) {
+      MoveToEx(hdc, x, yLock - 8, nullptr);
+      LineTo(hdc, x, yLock + 8);
+      RECT br = {x + 1, yLock - 9, x + 20, yLock - 1};
+      const int bs = static_cast<int>(60 + 40 * std::fabs(std::sin((x - plot.left) * 0.09)));
+      wchar_t bbuf[8] = {};
+      swprintf(bbuf, 8, L"%d", bs);
+      SetTextColor(hdc, RGB(220, 236, 178));
+      DrawTextW(hdc, bbuf, -1, &br, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+    }
+    SelectObject(hdc, oldBp);
+    DeleteObject(bp);
   }
 
   // CW cadence strip for selected/best track in view.
@@ -5273,6 +5433,42 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
         RECT pt = {pd.left + 4, pd.top + 1, pd.right - 2, pd.top + 12};
         SetTextColor(hdc, RGB(166, 214, 238));
         DrawTextW(hdc, L"Polar drift", -1, &pt, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+
+        // Frequency drift histogram (Hz/s) for focus track.
+        RECT dh = {pd.left, pd.bottom + 2, pd.right, pd.bottom + 34};
+        if (dh.bottom < plot.bottom - 4) {
+          HBRUSH dbg = CreateSolidBrush(RGB(8, 14, 22));
+          FillRect(hdc, &dh, dbg);
+          DeleteObject(dbg);
+          HPEN dbp = CreatePen(PS_SOLID, 1, RGB(66, 98, 126));
+          auto oldDbp = reinterpret_cast<HPEN>(SelectObject(hdc, dbp));
+          MoveToEx(hdc, dh.left, dh.top, nullptr);
+          LineTo(hdc, dh.right - 1, dh.top);
+          LineTo(hdc, dh.right - 1, dh.bottom - 1);
+          LineTo(hdc, dh.left, dh.bottom - 1);
+          LineTo(hdc, dh.left, dh.top);
+          SelectObject(hdc, oldDbp);
+          DeleteObject(dbp);
+          float bins[8] = {};
+          for (std::size_t i = 1; i < segs.size(); ++i) {
+            const float dt = std::max(0.05f, segs[i]->startSec - segs[i - 1]->startSec);
+            const float d = (segs[i]->freqHz - segs[i - 1]->freqHz) / dt;
+            const int bi = std::clamp(static_cast<int>(std::floor((d + 4.0f) / 1.0f)), 0, 7);
+            bins[bi] += 1.0f;
+          }
+          float mx = 1.0f;
+          for (float v : bins) mx = std::max(mx, v);
+          for (int i = 0; i < 8; ++i) {
+            RECT br = {dh.left + 4 + i * 12, dh.bottom - 4 - static_cast<int>(std::round((bins[i] / mx) * 18.0f)),
+                       dh.left + 14 + i * 12, dh.bottom - 4};
+            HBRUSH bb = CreateSolidBrush(RGB(136, 214, 244));
+            FillRect(hdc, &br, bb);
+            DeleteObject(bb);
+          }
+          RECT dt = {dh.left + 4, dh.top + 1, dh.right - 4, dh.top + 12};
+          SetTextColor(hdc, RGB(166, 214, 238));
+          DrawTextW(hdc, L"Drift hist", -1, &dt, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+        }
       }
     }
   }
@@ -6315,6 +6511,23 @@ LRESULT CALLBACK ChartProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_KEYDOWN:
       if (app) {
         const UINT vk = static_cast<UINT>(wParam);
+        const bool ctrl = ((GetKeyState(VK_CONTROL) & 0x8000) != 0);
+        if (ctrl && vk == VK_F6) {
+          ApplyOperatorHudPreset(app, 0, L"ID Fast");
+          return 0;
+        }
+        if (ctrl && vk == VK_F7) {
+          ApplyOperatorHudPreset(app, 1, L"DX Weak");
+          return 0;
+        }
+        if (ctrl && vk == VK_F8) {
+          ApplyOperatorHudPreset(app, 2, L"QRM Heavy");
+          return 0;
+        }
+        if (ctrl && vk == VK_F9) {
+          ApplyOperatorHudPreset(app, 3, L"Split/Co-channel");
+          return 0;
+        }
         if (vk == VK_F6) {
           ApplyVisualTuningPreset(app, 1.38f, 1.25f, 0.52f, 0.45f, L"DX Weak");
           return 0;
@@ -7043,9 +7256,19 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     m + 1630, y + 80, 62, 24, hwnd, (HMENU)kIdHudPresetQrmHeavy, nullptr, nullptr);
       CreateWindowW(L"BUTTON", L"HUD Split", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                     m + 1694, y + 80, 64, 24, hwnd, (HMENU)kIdHudPresetSplit, nullptr, nullptr);
+      CreateWindowW(L"STATIC", L"HUD", WS_CHILD | WS_VISIBLE, m + 1502, y + 104, 30, 20, hwnd,
+                    nullptr, nullptr, nullptr);
+      app->hudPresetCombo = CreateWindowW(
+          L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | WS_VSCROLL | CBS_DROPDOWNLIST,
+          m + 1534, y + 100, 164, 120, hwnd, (HMENU)kIdHudPresetCombo, nullptr, nullptr);
+      SendMessageW(app->hudPresetCombo, CB_ADDSTRING, 0, (LPARAM)L"ID Fast");
+      SendMessageW(app->hudPresetCombo, CB_ADDSTRING, 0, (LPARAM)L"DX Weak");
+      SendMessageW(app->hudPresetCombo, CB_ADDSTRING, 0, (LPARAM)L"QRM Heavy");
+      SendMessageW(app->hudPresetCombo, CB_ADDSTRING, 0, (LPARAM)L"Split/Co-channel");
+      SendMessageW(app->hudPresetCombo, CB_SETCURSEL, app->hudPresetMode, 0);
       UpdateWaterfallToggleButtons(app);
       UpdateFreezeButton(app);
-      y += 112;
+      y += 124;
 
       CreateWindowW(L"STATIC", L"Pan Avg Alpha", WS_CHILD | WS_VISIBLE, m + 1092, y + 6, 92, 22,
                     hwnd, nullptr, nullptr, nullptr);
@@ -7568,6 +7791,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           return 0;
         case kIdHudPresetSplit:
           ApplyOperatorHudPreset(app, 3, L"Split/Co-channel");
+          return 0;
+        case kIdHudPresetCombo:
+          if (HIWORD(wParam) == CBN_SELCHANGE && app->hudPresetCombo) {
+            const int sel = static_cast<int>(SendMessageW(app->hudPresetCombo, CB_GETCURSEL, 0, 0));
+            if (sel == 0) ApplyOperatorHudPreset(app, 0, L"ID Fast");
+            else if (sel == 1) ApplyOperatorHudPreset(app, 1, L"DX Weak");
+            else if (sel == 2) ApplyOperatorHudPreset(app, 2, L"QRM Heavy");
+            else ApplyOperatorHudPreset(app, 3, L"Split/Co-channel");
+          }
           return 0;
         case kIdWaterfallFpsCombo:
           if (HIWORD(wParam) == CBN_SELCHANGE && app->waterfallFpsCombo) {
