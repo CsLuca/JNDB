@@ -390,6 +390,9 @@ struct AppState {
   bool confidenceCameraValid = false;
   float confidenceCameraFreqHz = 0.0f;
   float confidenceCameraTimeSec = 0.0f;
+  std::vector<float> decodeStabilityReplay;
+  ULONGLONG decodeStabilityReplayTickMs = 0;
+  float notchImpactDb = 0.0f;
   int selectedTrackId = -1;
   bool mouseLeaveArmed = false;
   bool suppressNextResetConfirm = false;
@@ -1922,6 +1925,28 @@ void EnsureWaterfallPreview(AppState* app) {
       const std::size_t idx = static_cast<std::size_t>(t * spec.binCount + b);
       lvAdj[idx] = lv[idx] - app->bgRemovalStrength * colFloor[static_cast<std::size_t>(t)];
       dbAdjVals.push_back(lvAdj[idx]);
+    }
+  }
+
+  // Estimate notch impact (local dB uplift around operator notch bands).
+  app->notchImpactDb = 0.0f;
+  if (app->manualNotchEnabled && !app->manualNotches.empty()) {
+    double acc = 0.0;
+    int cnt = 0;
+    const float nyq = 0.5f * static_cast<float>(std::max(1, app->previewWav.sampleRate));
+    const float fMin = 80.0f;
+    const float fMax = std::min(2200.0f, nyq - 20.0f);
+    for (const auto& nb : app->manualNotches) {
+      const float fy = std::clamp((fMax - nb.freqHz) / std::max(1.0f, (fMax - fMin)), 0.0f, 1.0f);
+      const int b0 = std::clamp(static_cast<int>(std::round(1.0f + fy * std::max(1, spec.binCount - 2))), 1, spec.binCount - 1);
+      for (int t = std::max(0, spec.frameCount - 24); t < spec.frameCount; ++t) {
+        const std::size_t idx = static_cast<std::size_t>(t * spec.binCount + b0);
+        acc += static_cast<double>(lvAdj[idx] - lv[idx]);
+        ++cnt;
+      }
+    }
+    if (cnt > 0) {
+      app->notchImpactDb = static_cast<float>(acc / static_cast<double>(cnt));
     }
   }
 
@@ -4095,6 +4120,64 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
     DeleteObject(sp);
   }
 
+  // Spectral purity meter + notch impact visualizer + decode stability replay.
+  if (app) {
+    RECT pm = {rp.left + 8, rp.bottom + 24, rp.right - 8, rp.bottom + 40};
+    HBRUSH pmbg = CreateSolidBrush(RGB(10, 18, 28));
+    FillRect(hdc, &pm, pmbg);
+    DeleteObject(pmbg);
+    float purity = 0.0f;
+    if (!app->overlayRows.empty()) {
+      const ndb::DecodeResult* best = nullptr;
+      float bs = -1.0f;
+      for (const auto& r : app->overlayRows) {
+        const float s = 0.55f * std::clamp(r.confidence, 0.0f, 1.0f) +
+                        0.45f * std::clamp(r.freqStabilityScore, 0.0f, 1.0f);
+        if (s > bs) {
+          bs = s;
+          best = &r;
+        }
+      }
+      if (best) {
+        purity = 100.0f * std::clamp(0.45f * best->confidence + 0.30f * best->freqStabilityScore +
+                                         0.25f * best->continuityScore,
+                                     0.0f, 1.0f);
+      }
+    }
+    RECT pb = {pm.left + 2, pm.top + 2, pm.left + 2 + static_cast<int>(std::round(std::clamp(purity, 0.0f, 100.0f) * 0.9f)), pm.bottom - 2};
+    HBRUSH pbf = CreateSolidBrush(RGB(136, 218, 186));
+    FillRect(hdc, &pb, pbf);
+    DeleteObject(pbf);
+    std::wstringstream pms;
+    pms << L"Purity " << std::fixed << std::setprecision(0) << purity << L"  Notch "
+        << std::showpos << std::setprecision(1) << app->notchImpactDb << L" dB" << std::noshowpos;
+    RECT pl = {pm.left + 4, pm.top - 12, pm.right - 4, pm.top};
+    SetTextColor(hdc, RGB(176, 220, 244));
+    DrawTextW(hdc, pms.str().c_str(), -1, &pl, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+
+    app->decodeStabilityReplayTickMs = GetTickCount64();
+    if (!app->overlayRows.empty()) {
+      const auto& r = app->overlayRows.front();
+      const float st = std::clamp((r.confidence + r.freqStabilityScore + r.continuityScore) / 3.0f, 0.0f, 1.0f);
+      app->decodeStabilityReplay.push_back(st);
+      if (app->decodeStabilityReplay.size() > 120) app->decodeStabilityReplay.erase(app->decodeStabilityReplay.begin());
+    }
+    if (app->decodeStabilityReplay.size() >= 2) {
+      RECT rr = {pm.left, pm.bottom + 2, pm.right, pm.bottom + 16};
+      HPEN rp2 = CreatePen(PS_SOLID, 1, RGB(148, 206, 236));
+      auto oldRp2 = reinterpret_cast<HPEN>(SelectObject(hdc, rp2));
+      for (std::size_t i = 0; i < app->decodeStabilityReplay.size(); ++i) {
+        const float u = static_cast<float>(i) / std::max(1.0f, static_cast<float>(app->decodeStabilityReplay.size() - 1));
+        const int x = rr.left + static_cast<int>(u * (rr.right - rr.left));
+        const int y = rr.bottom - static_cast<int>(app->decodeStabilityReplay[i] * (rr.bottom - rr.top));
+        if (i == 0) MoveToEx(hdc, x, y, nullptr);
+        else LineTo(hdc, x, y);
+      }
+      SelectObject(hdc, oldRp2);
+      DeleteObject(rp2);
+    }
+  }
+
   RECT ps = {rp.left, rp.bottom + 8, rp.right, rp.bottom + 52};
   HBRUSH pbg = CreateSolidBrush(RGB(10, 18, 28));
   FillRect(hdc, &ps, pbg);
@@ -4739,12 +4822,37 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
       }
     }
     const float clutter = std::clamp((static_cast<float>(visibleTracks) - 8.0f) / 22.0f, 0.0f, 1.0f);
+    float focusFreq = -1.0f;
+    if (app->selectedTrackId >= 0) {
+      for (const auto& r : app->overlayRows) {
+        if (r.trackId == app->selectedTrackId) {
+          focusFreq = r.freqHz;
+          break;
+        }
+      }
+    }
+    std::vector<const ndb::DecodeResult*> drawRows;
+    drawRows.reserve(app->overlayRows.size());
+    for (const auto& r : app->overlayRows) {
+      if (!(r.endSec < viewStart || r.startSec > viewEnd)) {
+        drawRows.push_back(&r);
+      }
+    }
+    std::sort(drawRows.begin(), drawRows.end(), [&](const ndb::DecodeResult* a, const ndb::DecodeResult* b) {
+      auto pr = [&](const ndb::DecodeResult* r) {
+        const float base = 0.42f * std::clamp(r->confidence, 0.0f, 1.0f) +
+                           0.28f * std::clamp(r->freqStabilityScore, 0.0f, 1.0f) +
+                           0.20f * std::clamp(r->continuityScore, 0.0f, 1.0f) +
+                           0.10f * std::clamp(r->plausibleIdScore, 0.0f, 1.0f);
+        const float prox = (focusFreq > 0.0f) ? (1.0f - std::clamp(std::fabs(r->freqHz - focusFreq) / 18.0f, 0.0f, 1.0f)) : 0.6f;
+        return 0.85f * base + 0.15f * prox;
+      };
+      return pr(a) > pr(b);
+    });
     int lastLblX = -9999;
     int lastLblY = -9999;
-    for (const auto& r : app->overlayRows) {
-      if (r.endSec < viewStart || r.startSec > viewEnd) {
-        continue;
-      }
+    for (const auto* rp : drawRows) {
+      const auto& r = *rp;
       const float f = std::clamp(r.freqHz, fMin, fMax);
       const float yN = 1.0f - (f - fMin) / std::max(1.0f, (fMax - fMin));
       const int y = plot.top + static_cast<int>(yN * (plot.bottom - plot.top));
@@ -5395,6 +5503,22 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
       const int tint = static_cast<int>(60.0f * std::clamp(focus->confidence, 0.0f, 1.0f));
       SetTextColor(hdc, RGB(170 + tint, 210 + tint / 2, 236));
       DrawTextW(hdc, tok.c_str(), -1, &trt, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+
+      // Token confidence waterline with dynamic threshold.
+      const float thr = std::clamp(0.54f + 0.18f * (1.0f - std::clamp(focus->freqStabilityScore, 0.0f, 1.0f)), 0.45f, 0.78f);
+      const int wy = trl.bottom + 2;
+      HPEN wlp = CreatePen(PS_SOLID, 1, RGB(122, 192, 232));
+      auto oldWlp = reinterpret_cast<HPEN>(SelectObject(hdc, wlp));
+      MoveToEx(hdc, trl.left + 2, wy, nullptr);
+      int xw = trl.left + 2;
+      for (; xw < trl.right - 2; ++xw) {
+        const float u = static_cast<float>(xw - (trl.left + 2)) / std::max(1.0f, static_cast<float>(trl.right - trl.left - 4));
+        const float c = std::clamp(0.45f + 0.45f * std::fabs(std::sin(12.0f * u + 2.0f * ck)), 0.0f, 1.0f);
+        const int yv = wy + static_cast<int>(std::round((thr - c) * 8.0f));
+        LineTo(hdc, xw, yv);
+      }
+      SelectObject(hdc, oldWlp);
+      DeleteObject(wlp);
 
       // Confidence volumetric stack (conf/stab/key layers).
       RECT vs = {ld.right + 4, ld.top, std::min(plot.right - 8, ld.right + 56), ld.bottom};
