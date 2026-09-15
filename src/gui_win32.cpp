@@ -2856,8 +2856,12 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
 
   // Active mode badges
   int bx = rc.left + 220;
+  const int badgeStopX = rc.right - 342;
   const int by = rc.top + 6;
   auto drawBadge = [&](const wchar_t* txt, COLORREF fg, COLORREF bg) {
+    if (bx + 72 >= badgeStopX) {
+      return;
+    }
     RECT br = {bx, by, bx + 78, by + 18};
     HBRUSH bb = CreateSolidBrush(bg);
     FillRect(hdc, &br, bb);
@@ -2893,6 +2897,21 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
       drawBadge(L"QRM NO", RGB(212, 255, 220), RGB(44, 98, 66));
     }
   }
+  if (app && app->showCoherenceOverlay) {
+    drawBadge(L"COH", RGB(208, 244, 252), RGB(42, 84, 102));
+  }
+  if (app && app->showUncertaintyHalos) {
+    drawBadge(L"HALO", RGB(214, 232, 255), RGB(52, 72, 100));
+  }
+  if (app && app->showCadenceStrip) {
+    drawBadge(L"CAD", RGB(202, 238, 255), RGB(34, 76, 104));
+  }
+  if (app && app->showLookNextHeatmap) {
+    drawBadge(L"HEAT", RGB(244, 236, 212), RGB(96, 84, 34));
+  }
+  if (app && app->showTrackZoomLanes) {
+    drawBadge(L"LANES", RGB(210, 246, 224), RGB(36, 92, 64));
+  }
 
   // Quick legend for advanced visual controls.
   RECT lg = {rc.right - 338, rc.top + 6, rc.right - 10, rc.top + 44};
@@ -2913,7 +2932,7 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
   SetTextColor(hdc, RGB(184, 212, 236));
   DrawTextW(hdc, L"F9/F10/F11 snap A/B/clear | Ctrl+Click set B", -1, &l1,
             DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
-  DrawTextW(hdc, L"X diff | G dotdash | F freeze", -1, &l2,
+  DrawTextW(hdc, L"X diff | G dotdash | F freeze | H/J/K/Y/U overlays", -1, &l2,
             DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
 
   const int panH = 112;
@@ -3604,7 +3623,7 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
     }
     RECT hk = {map.left, map.top - 16, map.right, map.top - 1};
     SetTextColor(hdc, RGB(178, 206, 228));
-    DrawTextW(hdc, L"Hotkeys: A show auto, B/C add-clear, D del, F freeze, G dotdash, X diff, L lock readout, M manual notch, O ridge, V wide, F6/F7/F8 visual presets, Ctrl+Click set B cursor, N/P nav, 1..9 jump, E/I exp-imp, Shift+Drag zoom box, Ctrl+R reset (Shift=skip prompt)",
+    DrawTextW(hdc, L"Hotkeys: A show auto, B/C add-clear, D del, F freeze, G dotdash, X diff, H coh, J halo, K cadence, Y heat, U lanes, L lock readout, M manual notch, O ridge, V wide, F6/F7/F8 visual presets, Ctrl+Click set B cursor, N/P nav, 1..9 jump, E/I exp-imp, Shift+Drag zoom box, Ctrl+R reset (Shift=skip prompt)",
               -1, &hk,
               DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
   }
@@ -5181,6 +5200,66 @@ LRESULT CALLBACK ChartProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           InvalidateRect(hwnd, nullptr, TRUE);
           return 0;
         }
+        if (vk == 'H') {
+          app->showCoherenceOverlay = !app->showCoherenceOverlay;
+          if (app->coherenceOverlayCheck) {
+            SendMessageW(app->coherenceOverlayCheck, BM_SETCHECK,
+                         app->showCoherenceOverlay ? BST_CHECKED : BST_UNCHECKED, 0);
+          }
+          SaveUiState(app);
+          SetStatus(app, app->showCoherenceOverlay ? L"Coherence overlay ON [H]"
+                                                   : L"Coherence overlay OFF [H]");
+          InvalidateRect(hwnd, nullptr, TRUE);
+          return 0;
+        }
+        if (vk == 'J') {
+          app->showUncertaintyHalos = !app->showUncertaintyHalos;
+          if (app->uncertaintyHalosCheck) {
+            SendMessageW(app->uncertaintyHalosCheck, BM_SETCHECK,
+                         app->showUncertaintyHalos ? BST_CHECKED : BST_UNCHECKED, 0);
+          }
+          SaveUiState(app);
+          SetStatus(app, app->showUncertaintyHalos ? L"Uncertainty halos ON [J]"
+                                                   : L"Uncertainty halos OFF [J]");
+          InvalidateRect(hwnd, nullptr, TRUE);
+          return 0;
+        }
+        if (vk == 'K') {
+          app->showCadenceStrip = !app->showCadenceStrip;
+          if (app->cadenceStripCheck) {
+            SendMessageW(app->cadenceStripCheck, BM_SETCHECK,
+                         app->showCadenceStrip ? BST_CHECKED : BST_UNCHECKED, 0);
+          }
+          SaveUiState(app);
+          SetStatus(app, app->showCadenceStrip ? L"Cadence strip ON [K]"
+                                               : L"Cadence strip OFF [K]");
+          InvalidateRect(hwnd, nullptr, TRUE);
+          return 0;
+        }
+        if (vk == 'Y') {
+          app->showLookNextHeatmap = !app->showLookNextHeatmap;
+          if (app->lookNextHeatmapCheck) {
+            SendMessageW(app->lookNextHeatmapCheck, BM_SETCHECK,
+                         app->showLookNextHeatmap ? BST_CHECKED : BST_UNCHECKED, 0);
+          }
+          SaveUiState(app);
+          SetStatus(app, app->showLookNextHeatmap ? L"Look-next heatmap ON [Y]"
+                                                  : L"Look-next heatmap OFF [Y]");
+          InvalidateRect(hwnd, nullptr, TRUE);
+          return 0;
+        }
+        if (vk == 'U') {
+          app->showTrackZoomLanes = !app->showTrackZoomLanes;
+          if (app->trackZoomLanesCheck) {
+            SendMessageW(app->trackZoomLanesCheck, BM_SETCHECK,
+                         app->showTrackZoomLanes ? BST_CHECKED : BST_UNCHECKED, 0);
+          }
+          SaveUiState(app);
+          SetStatus(app, app->showTrackZoomLanes ? L"Track zoom lanes ON [U]"
+                                                 : L"Track zoom lanes OFF [U]");
+          InvalidateRect(hwnd, nullptr, TRUE);
+          return 0;
+        }
         if (vk == 'V') {
           app->showWideView = !app->showWideView;
           if (app->wideViewCheck) {
@@ -6285,30 +6364,35 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           app->showCoherenceOverlay =
               (SendMessageW(app->coherenceOverlayCheck, BM_GETCHECK, 0, 0) == BST_CHECKED);
           SaveUiState(app);
+          SetStatus(app, app->showCoherenceOverlay ? L"Coherence overlay ON" : L"Coherence overlay OFF");
           InvalidateRect(app->chartPanel, nullptr, TRUE);
           return 0;
         case kIdUncertaintyHalosCheck:
           app->showUncertaintyHalos =
               (SendMessageW(app->uncertaintyHalosCheck, BM_GETCHECK, 0, 0) == BST_CHECKED);
           SaveUiState(app);
+          SetStatus(app, app->showUncertaintyHalos ? L"Uncertainty halos ON" : L"Uncertainty halos OFF");
           InvalidateRect(app->chartPanel, nullptr, TRUE);
           return 0;
         case kIdCadenceStripCheck:
           app->showCadenceStrip =
               (SendMessageW(app->cadenceStripCheck, BM_GETCHECK, 0, 0) == BST_CHECKED);
           SaveUiState(app);
+          SetStatus(app, app->showCadenceStrip ? L"Cadence strip ON" : L"Cadence strip OFF");
           InvalidateRect(app->chartPanel, nullptr, TRUE);
           return 0;
         case kIdLookNextHeatmapCheck:
           app->showLookNextHeatmap =
               (SendMessageW(app->lookNextHeatmapCheck, BM_GETCHECK, 0, 0) == BST_CHECKED);
           SaveUiState(app);
+          SetStatus(app, app->showLookNextHeatmap ? L"Look-next heatmap ON" : L"Look-next heatmap OFF");
           InvalidateRect(app->chartPanel, nullptr, TRUE);
           return 0;
         case kIdTrackZoomLanesCheck:
           app->showTrackZoomLanes =
               (SendMessageW(app->trackZoomLanesCheck, BM_GETCHECK, 0, 0) == BST_CHECKED);
           SaveUiState(app);
+          SetStatus(app, app->showTrackZoomLanes ? L"Track zoom lanes ON" : L"Track zoom lanes OFF");
           InvalidateRect(app->chartPanel, nullptr, TRUE);
           return 0;
         case kIdWideViewButton:
