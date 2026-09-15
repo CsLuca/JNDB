@@ -89,6 +89,8 @@ constexpr int kIdManualNotchClear = 1054;
 constexpr int kIdManualNotchExport = 1055;
 constexpr int kIdManualNotchImport = 1056;
 constexpr int kIdWaterfallPersistCombo = 1057;
+constexpr int kIdWideViewCheck = 1058;
+constexpr int kIdRidgeOverlayCheck = 1059;
 
 constexpr UINT kMsgProgress = WM_APP + 1;
 constexpr UINT kMsgDone = WM_APP + 2;
@@ -163,6 +165,8 @@ struct AppState {
   HWND agcAutoCheck = nullptr;
   HWND peakLockButton = nullptr;
   HWND manualNotchCheck = nullptr;
+  HWND wideViewCheck = nullptr;
+  HWND ridgeOverlayCheck = nullptr;
   HWND autoBookmarkCheck = nullptr;
   HWND autoBookmarkConfSlider = nullptr;
   HWND autoBookmarkMidSlider = nullptr;
@@ -216,6 +220,8 @@ struct AppState {
   std::wstring customPalettePath;
   int waterfallFps = 30;
   int waterfallPersistenceMode = 1;  // 0 Fast, 1 Medium, 2 Long
+  bool showWideView = true;
+  bool showRidgeOverlay = true;
   float agcFloorOffsetDb = -3.0f;
   float agcSpanDb = 22.0f;
   float agcGain = 1.35f;
@@ -811,6 +817,8 @@ void SaveUiState(AppState* app) {
   WritePrivateProfileStringW(L"view", L"pitch", std::to_wstring(app->pitchDeg).c_str(), s);
   WritePrivateProfileStringW(L"view", L"fps", std::to_wstring(app->waterfallFps).c_str(), s);
   WritePrivateProfileStringW(L"view", L"persist_mode", std::to_wstring(app->waterfallPersistenceMode).c_str(), s);
+  WritePrivateProfileStringW(L"view", L"show_wide", app->showWideView ? L"1" : L"0", s);
+  WritePrivateProfileStringW(L"view", L"show_ridge", app->showRidgeOverlay ? L"1" : L"0", s);
   WritePrivateProfileStringW(L"view", L"zoom", std::to_wstring(app->waterfallZoom).c_str(), s);
   WritePrivateProfileStringW(L"view", L"pan", std::to_wstring(app->waterfallPanPx).c_str(), s);
   WritePrivateProfileStringW(L"view", L"shading", app->shadingEnabled ? L"1" : L"0", s);
@@ -869,6 +877,8 @@ void LoadUiState(AppState* app) {
   app->pitchDeg = std::clamp(IniReadInt(app->uiStatePath, L"view", L"pitch", app->pitchDeg), 8, 60);
   app->waterfallFps = std::clamp(IniReadInt(app->uiStatePath, L"view", L"fps", app->waterfallFps), 10, 120);
   app->waterfallPersistenceMode = std::clamp(IniReadInt(app->uiStatePath, L"view", L"persist_mode", app->waterfallPersistenceMode), 0, 2);
+  app->showWideView = IniReadBool(app->uiStatePath, L"view", L"show_wide", app->showWideView);
+  app->showRidgeOverlay = IniReadBool(app->uiStatePath, L"view", L"show_ridge", app->showRidgeOverlay);
   app->waterfallZoom = std::clamp(static_cast<double>(IniReadFloat(app->uiStatePath, L"view", L"zoom", static_cast<float>(app->waterfallZoom))), 1.0, 8.0);
   app->waterfallPanPx = std::max(0, IniReadInt(app->uiStatePath, L"view", L"pan", app->waterfallPanPx));
   app->shadingEnabled = IniReadBool(app->uiStatePath, L"view", L"shading", app->shadingEnabled);
@@ -938,6 +948,13 @@ void LoadUiState(AppState* app) {
   }
   if (app->waterfallPersistCombo) {
     SendMessageW(app->waterfallPersistCombo, CB_SETCURSEL, app->waterfallPersistenceMode, 0);
+  }
+  if (app->wideViewCheck) {
+    SendMessageW(app->wideViewCheck, BM_SETCHECK, app->showWideView ? BST_CHECKED : BST_UNCHECKED, 0);
+  }
+  if (app->ridgeOverlayCheck) {
+    SendMessageW(app->ridgeOverlayCheck, BM_SETCHECK,
+                 app->showRidgeOverlay ? BST_CHECKED : BST_UNCHECKED, 0);
   }
   if (app->shadingCheck) {
     SendMessageW(app->shadingCheck, BM_SETCHECK,
@@ -1068,6 +1085,8 @@ void ResetUiSessionState(AppState* app) {
   app->palettePreset = 0;
   app->waterfallFps = 30;
   app->waterfallPersistenceMode = 1;
+  app->showWideView = true;
+  app->showRidgeOverlay = true;
   app->waterfallZoom = 1.0;
   app->waterfallPanPx = 0;
   app->chartZoom = 1.0;
@@ -1100,6 +1119,8 @@ void ResetUiSessionState(AppState* app) {
   if (app->palettePresetCombo) SendMessageW(app->palettePresetCombo, CB_SETCURSEL, app->palettePreset, 0);
   if (app->waterfallFpsCombo) SendMessageW(app->waterfallFpsCombo, CB_SETCURSEL, 0, 0);
   if (app->waterfallPersistCombo) SendMessageW(app->waterfallPersistCombo, CB_SETCURSEL, app->waterfallPersistenceMode, 0);
+  if (app->wideViewCheck) SendMessageW(app->wideViewCheck, BM_SETCHECK, BST_CHECKED, 0);
+  if (app->ridgeOverlayCheck) SendMessageW(app->ridgeOverlayCheck, BM_SETCHECK, BST_CHECKED, 0);
   if (app->agcFloorSlider) SendMessageW(app->agcFloorSlider, TBM_SETPOS, TRUE, static_cast<LPARAM>(app->agcFloorOffsetDb));
   if (app->agcSpanSlider) SendMessageW(app->agcSpanSlider, TBM_SETPOS, TRUE, static_cast<LPARAM>(app->agcSpanDb));
   if (app->agcGainSlider) SendMessageW(app->agcGainSlider, TBM_SETPOS, TRUE, static_cast<LPARAM>(std::round(app->agcGain * 100.0f)));
@@ -2408,7 +2429,7 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
                 SRCCOPY);
 
   // Ridge overlay: highlight thin CW-like tonal lines.
-  if (!app->waterfallRidgeMask.empty()) {
+  if (app->showRidgeOverlay && !app->waterfallRidgeMask.empty()) {
     HPEN ridgePen = CreatePen(PS_SOLID, 1, RGB(160, 255, 186));
     auto oldRp = reinterpret_cast<HPEN>(SelectObject(hdc, ridgePen));
     for (int x = plot.left; x < plot.right; x += 2) {
@@ -2447,7 +2468,7 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
   // Dual waterfall view: wide context strip with current zoom window marker.
   RECT wide = {plot.left + 8, plot.top + 8, std::min(plot.right - 8, plot.left + 208),
                std::min(plot.bottom - 8, plot.top + 74)};
-  if ((wide.right - wide.left) > 80 && (wide.bottom - wide.top) > 24) {
+  if (app->showWideView && (wide.right - wide.left) > 80 && (wide.bottom - wide.top) > 24) {
     StretchDIBits(hdc, wide.left, wide.top, wide.right - wide.left, wide.bottom - wide.top,
                   0, 0, app->waterfallW, app->waterfallH, app->waterfallRgb.data(), &bmi,
                   DIB_RGB_COLORS, SRCCOPY);
@@ -2783,7 +2804,7 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
     }
     RECT hk = {map.left, map.top - 16, map.right, map.top - 1};
     SetTextColor(hdc, RGB(178, 206, 228));
-    DrawTextW(hdc, L"Hotkeys: A show auto, B/C add-clear, D del, L lock readout, M manual notch, N/P nav, 1..9 jump, E/I exp-imp, Shift+Drag zoom box, Ctrl+R reset (Shift=skip prompt)",
+    DrawTextW(hdc, L"Hotkeys: A show auto, B/C add-clear, D del, L lock readout, M manual notch, O ridge, V wide, N/P nav, 1..9 jump, E/I exp-imp, Shift+Drag zoom box, Ctrl+R reset (Shift=skip prompt)",
               -1, &hk,
               DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
   }
@@ -3851,6 +3872,29 @@ LRESULT CALLBACK ChartProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           InvalidateRect(hwnd, nullptr, TRUE);
           return 0;
         }
+        if (vk == 'V') {
+          app->showWideView = !app->showWideView;
+          if (app->wideViewCheck) {
+            SendMessageW(app->wideViewCheck, BM_SETCHECK,
+                         app->showWideView ? BST_CHECKED : BST_UNCHECKED, 0);
+          }
+          SaveUiState(app);
+          SetStatus(app, app->showWideView ? L"Wide view ON [V]" : L"Wide view OFF [V]");
+          InvalidateRect(hwnd, nullptr, TRUE);
+          return 0;
+        }
+        if (vk == 'O') {
+          app->showRidgeOverlay = !app->showRidgeOverlay;
+          if (app->ridgeOverlayCheck) {
+            SendMessageW(app->ridgeOverlayCheck, BM_SETCHECK,
+                         app->showRidgeOverlay ? BST_CHECKED : BST_UNCHECKED, 0);
+          }
+          SaveUiState(app);
+          SetStatus(app, app->showRidgeOverlay ? L"Ridge overlay ON [O]"
+                                               : L"Ridge overlay OFF [O]");
+          InvalidateRect(hwnd, nullptr, TRUE);
+          return 0;
+        }
         if (vk == 'B') {
           const std::size_t before = app->bookmarksSec.size();
           AddBookmarkAtCurrent(app);
@@ -4238,8 +4282,19 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       SendMessageW(app->waterfallPersistCombo, CB_ADDSTRING, 0, (LPARAM)L"Medium");
       SendMessageW(app->waterfallPersistCombo, CB_ADDSTRING, 0, (LPARAM)L"Long");
       SendMessageW(app->waterfallPersistCombo, CB_SETCURSEL, app->waterfallPersistenceMode, 0);
+      app->wideViewCheck = CreateWindowW(L"BUTTON", L"Wide View",
+                                         WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, m + 1246, y + 4,
+                                         92, 24, hwnd, (HMENU)kIdWideViewCheck, nullptr, nullptr);
+      SendMessageW(app->wideViewCheck, BM_SETCHECK,
+                   app->showWideView ? BST_CHECKED : BST_UNCHECKED, 0);
+      app->ridgeOverlayCheck = CreateWindowW(
+          L"BUTTON", L"Ridge",
+          WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, m + 1340, y + 4, 72, 24, hwnd,
+          (HMENU)kIdRidgeOverlayCheck, nullptr, nullptr);
+      SendMessageW(app->ridgeOverlayCheck, BM_SETCHECK,
+                   app->showRidgeOverlay ? BST_CHECKED : BST_UNCHECKED, 0);
       CreateWindowW(L"BUTTON", L"3D DX Weak Preset", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                    m + 1246, y, 156, 30, hwnd, (HMENU)kIdWaterfallDxPreset, nullptr, nullptr);
+                    m + 1418, y, 156, 30, hwnd, (HMENU)kIdWaterfallDxPreset, nullptr, nullptr);
       y += 38;
 
       CreateWindowW(L"STATIC", L"Pan Avg Alpha", WS_CHILD | WS_VISIBLE, m + 1092, y + 6, 92, 22,
@@ -4442,7 +4497,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                                app->palettePresetCombo, app->paletteLoadButton,
                                app->yawSlider, app->pitchSlider, app->shadingCheck,
                                app->colormapCombo, app->waterfallFpsCombo,
-                               app->waterfallPersistCombo,
+                               app->waterfallPersistCombo, app->wideViewCheck,
+                               app->ridgeOverlayCheck,
                                app->panAvgAlphaSlider, app->panPeakDecaySlider,
                                app->agcFloorSlider, app->agcSpanSlider, app->agcGainSlider,
                                app->agcGammaSlider, app->agcAutoCheck,
@@ -4711,6 +4767,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             InvalidateWaterfallCache(app);
             InvalidateRect(app->chartPanel, nullptr, TRUE);
           }
+          return 0;
+        case kIdWideViewCheck:
+          app->showWideView =
+              (SendMessageW(app->wideViewCheck, BM_GETCHECK, 0, 0) == BST_CHECKED);
+          SaveUiState(app);
+          InvalidateRect(app->chartPanel, nullptr, TRUE);
+          return 0;
+        case kIdRidgeOverlayCheck:
+          app->showRidgeOverlay =
+              (SendMessageW(app->ridgeOverlayCheck, BM_GETCHECK, 0, 0) == BST_CHECKED);
+          SaveUiState(app);
+          InvalidateRect(app->chartPanel, nullptr, TRUE);
           return 0;
         case kIdAgcAutoCheck:
           app->agcAutoContrast =
