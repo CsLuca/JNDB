@@ -103,6 +103,8 @@ constexpr int kIdVisualPresetClean = 1068;
 constexpr int kIdFreezeButton = 1069;
 constexpr int kIdQrmPresetNo = 1070;
 constexpr int kIdQrmPresetHeavy = 1071;
+constexpr int kIdDiffWaterfallCheck = 1072;
+constexpr int kIdDotDashAssistCheck = 1073;
 
 constexpr UINT kMsgProgress = WM_APP + 1;
 constexpr UINT kMsgDone = WM_APP + 2;
@@ -186,6 +188,8 @@ struct AppState {
   HWND wideViewButton = nullptr;
   HWND ridgeOverlayButton = nullptr;
   HWND freezeButton = nullptr;
+  HWND diffWaterfallCheck = nullptr;
+  HWND dotDashAssistCheck = nullptr;
   HWND autoBookmarkCheck = nullptr;
   HWND autoBookmarkConfSlider = nullptr;
   HWND autoBookmarkMidSlider = nullptr;
@@ -212,6 +216,7 @@ struct AppState {
   std::vector<HistoryEntry> historyCompare;
   ndb::WavData previewWav;
   std::vector<std::uint8_t> waterfallRgb;
+  std::vector<std::uint8_t> waterfallDiffRgb;
   std::vector<std::uint8_t> waterfallRidgeMask;
   std::vector<float> waterfallDbRender;
   int waterfallW = 0;
@@ -239,13 +244,15 @@ struct AppState {
   int pitchDeg = 24;
   bool shadingEnabled = true;
   int colormap3d = 0;
-  int palettePreset = 0;  // 0 HDSDR, 1 SDR#, 2 CubicSDR, 3 Custom
+  int palettePreset = 0;  // 0 HDSDR, 1 SDR#, 2 CubicSDR, 3 Custom, 4 Cividis, 5 Viridis
   std::vector<ColorStop> customPalette;
   std::wstring customPalettePath;
   int waterfallFps = 30;
   int waterfallPersistenceMode = 1;  // 0 Fast, 1 Medium, 2 Long
   bool showWideView = true;
   bool showRidgeOverlay = true;
+  bool differenceWaterfallEnabled = false;
+  bool dotDashAssistEnabled = true;
   bool autoFocusEnabled = true;
   float autoFocusStrength = 0.28f;
   float agcFloorOffsetDb = -3.0f;
@@ -278,6 +285,9 @@ struct AppState {
   POINT waterfallZoomBoxEnd = {0, 0};
   bool waterfallFrozen = false;
   int waterfallFreezeCenterCol = -1;
+  bool notchGhostActive = false;
+  float notchGhostFreqHz = 0.0f;
+  float notchGhostWidthHz = 24.0f;
   double chartZoom = 1.0;
   int chartPanPx = 0;
   bool dragging = false;
@@ -298,6 +308,11 @@ struct AppState {
   float waterfallReadoutNoiseFloorDb = -120.0f;
   float waterfallReadoutDeltaFreqHz = 0.0f;
   std::vector<float> readoutSnrTrend;
+  bool compareCursorBValid = false;
+  POINT compareCursorBPt = {0, 0};
+  float compareCursorBFreqHz = 0.0f;
+  float compareCursorBTimeSec = 0.0f;
+  float compareCursorBDb = -120.0f;
   bool mouseLeaveArmed = false;
   bool suppressNextResetConfirm = false;
   int baseClientW = 0;
@@ -889,6 +904,8 @@ void SaveUiState(AppState* app) {
   WritePrivateProfileStringW(L"view", L"persist_mode", std::to_wstring(app->waterfallPersistenceMode).c_str(), s);
   WritePrivateProfileStringW(L"view", L"show_wide", app->showWideView ? L"1" : L"0", s);
   WritePrivateProfileStringW(L"view", L"show_ridge", app->showRidgeOverlay ? L"1" : L"0", s);
+  WritePrivateProfileStringW(L"view", L"diff_waterfall", app->differenceWaterfallEnabled ? L"1" : L"0", s);
+  WritePrivateProfileStringW(L"view", L"dotdash_assist", app->dotDashAssistEnabled ? L"1" : L"0", s);
   WritePrivateProfileStringW(L"view", L"frozen", app->waterfallFrozen ? L"1" : L"0", s);
   WritePrivateProfileStringW(L"view", L"freeze_col", std::to_wstring(app->waterfallFreezeCenterCol).c_str(), s);
   WritePrivateProfileStringW(L"view", L"zoom", std::to_wstring(app->waterfallZoom).c_str(), s);
@@ -957,13 +974,15 @@ void LoadUiState(AppState* app) {
   app->waterfallPersistenceMode = std::clamp(IniReadInt(app->uiStatePath, L"view", L"persist_mode", app->waterfallPersistenceMode), 0, 2);
   app->showWideView = IniReadBool(app->uiStatePath, L"view", L"show_wide", app->showWideView);
   app->showRidgeOverlay = IniReadBool(app->uiStatePath, L"view", L"show_ridge", app->showRidgeOverlay);
+  app->differenceWaterfallEnabled = IniReadBool(app->uiStatePath, L"view", L"diff_waterfall", app->differenceWaterfallEnabled);
+  app->dotDashAssistEnabled = IniReadBool(app->uiStatePath, L"view", L"dotdash_assist", app->dotDashAssistEnabled);
   app->waterfallFrozen = IniReadBool(app->uiStatePath, L"view", L"frozen", app->waterfallFrozen);
   app->waterfallFreezeCenterCol = IniReadInt(app->uiStatePath, L"view", L"freeze_col", app->waterfallFreezeCenterCol);
   app->waterfallZoom = std::clamp(static_cast<double>(IniReadFloat(app->uiStatePath, L"view", L"zoom", static_cast<float>(app->waterfallZoom))), 1.0, 8.0);
   app->waterfallPanPx = std::max(0, IniReadInt(app->uiStatePath, L"view", L"pan", app->waterfallPanPx));
   app->shadingEnabled = IniReadBool(app->uiStatePath, L"view", L"shading", app->shadingEnabled);
   app->colormap3d = std::clamp(IniReadInt(app->uiStatePath, L"view", L"colormap3d", app->colormap3d), 0, 2);
-  app->palettePreset = std::clamp(IniReadInt(app->uiStatePath, L"view", L"palette_preset", app->palettePreset), 0, 3);
+  app->palettePreset = std::clamp(IniReadInt(app->uiStatePath, L"view", L"palette_preset", app->palettePreset), 0, 5);
   app->peakLockEnabled = IniReadBool(app->uiStatePath, L"view", L"peak_lock", app->peakLockEnabled);
   app->manualNotchEnabled = IniReadBool(app->uiStatePath, L"view", L"manual_notch", app->manualNotchEnabled);
   app->chartZoom = std::clamp(static_cast<double>(IniReadFloat(app->uiStatePath, L"charts", L"zoom", static_cast<float>(app->chartZoom))), 1.0, 8.0);
@@ -1041,6 +1060,14 @@ void LoadUiState(AppState* app) {
   if (app->ridgeOverlayCheck) {
     SendMessageW(app->ridgeOverlayCheck, BM_SETCHECK,
                  app->showRidgeOverlay ? BST_CHECKED : BST_UNCHECKED, 0);
+  }
+  if (app->diffWaterfallCheck) {
+    SendMessageW(app->diffWaterfallCheck, BM_SETCHECK,
+                 app->differenceWaterfallEnabled ? BST_CHECKED : BST_UNCHECKED, 0);
+  }
+  if (app->dotDashAssistCheck) {
+    SendMessageW(app->dotDashAssistCheck, BM_SETCHECK,
+                 app->dotDashAssistEnabled ? BST_CHECKED : BST_UNCHECKED, 0);
   }
   UpdateWaterfallToggleButtons(app);
   UpdateFreezeButton(app);
@@ -1228,10 +1255,14 @@ void ResetUiSessionState(AppState* app) {
   app->waterfallPersistenceMode = 1;
   app->showWideView = true;
   app->showRidgeOverlay = true;
+  app->differenceWaterfallEnabled = false;
+  app->dotDashAssistEnabled = true;
   app->waterfallZoom = 1.0;
   app->waterfallPanPx = 0;
   app->waterfallFrozen = false;
   app->waterfallFreezeCenterCol = -1;
+  app->notchGhostActive = false;
+  app->compareCursorBValid = false;
   app->chartZoom = 1.0;
   app->chartPanPx = 0;
   app->agcFloorOffsetDb = -3.0f;
@@ -1271,6 +1302,8 @@ void ResetUiSessionState(AppState* app) {
   if (app->waterfallPersistCombo) SendMessageW(app->waterfallPersistCombo, CB_SETCURSEL, app->waterfallPersistenceMode, 0);
   if (app->wideViewCheck) SendMessageW(app->wideViewCheck, BM_SETCHECK, BST_CHECKED, 0);
   if (app->ridgeOverlayCheck) SendMessageW(app->ridgeOverlayCheck, BM_SETCHECK, BST_CHECKED, 0);
+  if (app->diffWaterfallCheck) SendMessageW(app->diffWaterfallCheck, BM_SETCHECK, BST_UNCHECKED, 0);
+  if (app->dotDashAssistCheck) SendMessageW(app->dotDashAssistCheck, BM_SETCHECK, BST_CHECKED, 0);
   UpdateWaterfallToggleButtons(app);
   UpdateFreezeButton(app);
   if (app->agcFloorSlider) SendMessageW(app->agcFloorSlider, TBM_SETPOS, TRUE, static_cast<LPARAM>(app->agcFloorOffsetDb));
@@ -1373,6 +1406,20 @@ std::vector<ColorStop> PaletteStopsByPreset(const AppState* app) {
   }
   if (preset == 3 && app && !app->customPalette.empty()) {
     return app->customPalette;
+  }
+  if (preset == 4) {
+    return {
+        {0.00f, 0, 34, 78},   {0.16f, 34, 63, 112}, {0.32f, 65, 91, 126},
+        {0.50f, 96, 118, 129}, {0.68f, 132, 146, 123}, {0.84f, 182, 176, 105},
+        {1.00f, 252, 231, 92},
+    };
+  }
+  if (preset == 5) {
+    return {
+        {0.00f, 68, 1, 84},   {0.16f, 59, 82, 139}, {0.32f, 33, 145, 140},
+        {0.50f, 94, 201, 98}, {0.68f, 170, 220, 50}, {0.84f, 219, 227, 39},
+        {1.00f, 253, 231, 37},
+    };
   }
   return {
       {0.00f, 0, 0, 0},       {0.12f, 0, 10, 50},   {0.24f, 0, 45, 140},
@@ -1852,6 +1899,26 @@ void EnsureWaterfallPreview(AppState* app) {
       app->waterfallRgb[idx + 2] = GetRValue(c);
       app->waterfallRidgeMask[static_cast<std::size_t>(y * app->waterfallW + t)] = ridge;
       app->waterfallDbRender[static_cast<std::size_t>(y * app->waterfallW + t)] = v;
+    }
+  }
+
+  app->waterfallDiffRgb.assign(static_cast<std::size_t>(app->waterfallW * app->waterfallH * 3), 0);
+  for (int y = 0; y < app->waterfallH; ++y) {
+    for (int t = 1; t < app->waterfallW; ++t) {
+      const float d0 = app->waterfallDbRender[static_cast<std::size_t>(y * app->waterfallW + (t - 1))];
+      const float d1 = app->waterfallDbRender[static_cast<std::size_t>(y * app->waterfallW + t)];
+      const float dd = std::clamp((d1 - d0) / 8.0f, -1.0f, 1.0f);
+      const float a = std::fabs(dd);
+      const std::size_t idx = static_cast<std::size_t>((y * app->waterfallW + t) * 3);
+      if (dd >= 0.0f) {
+        app->waterfallDiffRgb[idx + 2] = static_cast<std::uint8_t>(40 + 215 * a);
+        app->waterfallDiffRgb[idx + 1] = static_cast<std::uint8_t>(20 + 190 * a);
+        app->waterfallDiffRgb[idx + 0] = static_cast<std::uint8_t>(18 + 86 * a);
+      } else {
+        app->waterfallDiffRgb[idx + 2] = static_cast<std::uint8_t>(18 + 80 * a);
+        app->waterfallDiffRgb[idx + 1] = static_cast<std::uint8_t>(28 + 170 * a);
+        app->waterfallDiffRgb[idx + 0] = static_cast<std::uint8_t>(40 + 215 * a);
+      }
     }
   }
 }
@@ -2688,9 +2755,13 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
   int srcX = 0;
   int srcW = app->waterfallW;
   ComputeWaterfallSourceWindow(app, &srcX, &srcW);
+  const std::vector<std::uint8_t>& wfBase =
+      (app->differenceWaterfallEnabled && !app->waterfallDiffRgb.empty())
+          ? app->waterfallDiffRgb
+          : app->waterfallRgb;
 
   StretchDIBits(hdc, plot.left, plot.top, plot.right - plot.left, plot.bottom - plot.top,
-                srcX, 0, srcW, app->waterfallH, app->waterfallRgb.data(), &bmi, DIB_RGB_COLORS,
+                srcX, 0, srcW, app->waterfallH, wfBase.data(), &bmi, DIB_RGB_COLORS,
                 SRCCOPY);
 
   // Ridge overlay: highlight thin CW-like tonal lines.
@@ -2735,7 +2806,7 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
                std::min(plot.bottom - 8, plot.top + 74)};
   if (app->showWideView && (wide.right - wide.left) > 80 && (wide.bottom - wide.top) > 24) {
     StretchDIBits(hdc, wide.left, wide.top, wide.right - wide.left, wide.bottom - wide.top,
-                  0, 0, app->waterfallW, app->waterfallH, app->waterfallRgb.data(), &bmi,
+                  0, 0, app->waterfallW, app->waterfallH, wfBase.data(), &bmi,
                   DIB_RGB_COLORS, SRCCOPY);
     HPEN wb = CreatePen(PS_SOLID, 1, RGB(120, 160, 194));
     auto oldWb = reinterpret_cast<HPEN>(SelectObject(hdc, wb));
@@ -2808,9 +2879,9 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
           const int sy = sy0 + yy;
           const std::size_t sidx = static_cast<std::size_t>((sy * app->waterfallW + sx) * 3);
           const std::size_t didx = static_cast<std::size_t>((yy * sw + xx) * 3);
-          float r = app->waterfallRgb[sidx + 2] / 255.0f;
-          float g = app->waterfallRgb[sidx + 1] / 255.0f;
-          float b = app->waterfallRgb[sidx + 0] / 255.0f;
+          float r = wfBase[sidx + 2] / 255.0f;
+          float g = wfBase[sidx + 1] / 255.0f;
+          float b = wfBase[sidx + 0] / 255.0f;
           const float yLum = 0.2126f * r + 0.7152f * g + 0.0722f * b;
           float boost = std::pow(std::clamp(yLum, 0.0f, 1.0f), 0.72f);
           const float lensK = std::clamp(app->lensStrength, 0.50f, 2.00f);
@@ -3025,9 +3096,54 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
   if (app->palettePreset == 1) pname = L"Palette: SDR#";
   else if (app->palettePreset == 2) pname = L"Palette: CubicSDR";
   else if (app->palettePreset == 3) pname = L"Palette: Custom LUT";
+  else if (app->palettePreset == 4) pname = L"Palette: Cividis";
+  else if (app->palettePreset == 5) pname = L"Palette: Viridis";
   RECT pt = {ps.left + 8, ps.top + 2, ps.right - 8, ps.top + 18};
   SetTextColor(hdc, RGB(184, 212, 236));
   DrawTextW(hdc, pname.c_str(), -1, &pt, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+
+  if (app && !app->overlayRows.empty()) {
+    RECT tpnl = {ps.left, ps.bottom + 6, ps.right, ps.bottom + 64};
+    HBRUSH tbg = CreateSolidBrush(RGB(10, 18, 28));
+    FillRect(hdc, &tpnl, tbg);
+    DeleteObject(tbg);
+    HPEN tpen = CreatePen(PS_SOLID, 1, RGB(74, 104, 134));
+    auto oldTp = reinterpret_cast<HPEN>(SelectObject(hdc, tpen));
+    MoveToEx(hdc, tpnl.left, tpnl.top, nullptr);
+    LineTo(hdc, tpnl.right - 1, tpnl.top);
+    LineTo(hdc, tpnl.right - 1, tpnl.bottom - 1);
+    LineTo(hdc, tpnl.left, tpnl.bottom - 1);
+    LineTo(hdc, tpnl.left, tpnl.top);
+    SelectObject(hdc, oldTp);
+    DeleteObject(tpen);
+
+    const ndb::DecodeResult* best = nullptr;
+    float bestC = -1.0f;
+    for (const auto& r : app->overlayRows) {
+      if (r.confidence > bestC) {
+        bestC = r.confidence;
+        best = &r;
+      }
+    }
+    if (best) {
+      RECT trc = {tpnl.left + 8, tpnl.top + 2, tpnl.right - 8, tpnl.top + 16};
+      std::wstring tname = L"Track conf timeline: " + ToWide(!best->plausibleId.empty() ? best->plausibleId : best->text);
+      SetTextColor(hdc, RGB(182, 216, 240));
+      DrawTextW(hdc, tname.c_str(), -1, &trc, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+      RECT plotc = {tpnl.left + 8, tpnl.top + 18, tpnl.right - 8, tpnl.bottom - 8};
+      HPEN cp = CreatePen(PS_SOLID, 2, RGB(130, 255, 170));
+      auto oldCp = reinterpret_cast<HPEN>(SelectObject(hdc, cp));
+      const float x0n = std::clamp((best->startSec - viewStart) / std::max(0.1f, viewDur), 0.0f, 1.0f);
+      const float x1n = std::clamp((best->endSec - viewStart) / std::max(0.1f, viewDur), 0.0f, 1.0f);
+      const int x0 = plotc.left + static_cast<int>(x0n * (plotc.right - plotc.left));
+      const int x1 = plotc.left + static_cast<int>(x1n * (plotc.right - plotc.left));
+      const int yv = plotc.bottom - static_cast<int>(std::clamp(best->confidence, 0.0f, 1.0f) * (plotc.bottom - plotc.top));
+      MoveToEx(hdc, x0, yv, nullptr);
+      LineTo(hdc, std::max(x0 + 1, x1), yv);
+      SelectObject(hdc, oldCp);
+      DeleteObject(cp);
+    }
+  }
 
   const float nyqTicks = app && app->previewWav.sampleRate > 0
                              ? 0.5f * static_cast<float>(app->previewWav.sampleRate)
@@ -3200,7 +3316,7 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
     }
     RECT hk = {map.left, map.top - 16, map.right, map.top - 1};
     SetTextColor(hdc, RGB(178, 206, 228));
-    DrawTextW(hdc, L"Hotkeys: A show auto, B/C add-clear, D del, F freeze, L lock readout, M manual notch, O ridge, V wide, F6/F7/F8 visual presets, N/P nav, 1..9 jump, E/I exp-imp, Shift+Drag zoom box, Ctrl+R reset (Shift=skip prompt)",
+    DrawTextW(hdc, L"Hotkeys: A show auto, B/C add-clear, D del, F freeze, G dotdash, X diff, L lock readout, M manual notch, O ridge, V wide, F6/F7/F8 visual presets, Ctrl+Click set B cursor, N/P nav, 1..9 jump, E/I exp-imp, Shift+Drag zoom box, Ctrl+R reset (Shift=skip prompt)",
               -1, &hk,
               DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
   }
@@ -3275,6 +3391,30 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
     LineTo(hdc, app->waterfallHoverPoint.x, plot.bottom);
     SelectObject(hdc, oldCr);
     DeleteObject(cr);
+  }
+
+  if (app && app->compareCursorBValid && PtInRect(&plot, app->compareCursorBPt)) {
+    HPEN cb = CreatePen(PS_DASH, 1, RGB(255, 164, 170));
+    auto oldCb = reinterpret_cast<HPEN>(SelectObject(hdc, cb));
+    MoveToEx(hdc, plot.left, app->compareCursorBPt.y, nullptr);
+    LineTo(hdc, plot.right, app->compareCursorBPt.y);
+    MoveToEx(hdc, app->compareCursorBPt.x, plot.top, nullptr);
+    LineTo(hdc, app->compareCursorBPt.x, plot.bottom);
+    SelectObject(hdc, oldCb);
+    DeleteObject(cb);
+
+    if (app->waterfallReadoutValid) {
+      const float df = app->waterfallReadoutFreqHz - app->compareCursorBFreqHz;
+      const float dt = app->waterfallReadoutTimeSec - app->compareCursorBTimeSec;
+      const float dd = app->waterfallReadoutDb - app->compareCursorBDb;
+      RECT dr = {plot.left + 8, plot.bottom - 30, std::min(plot.right - 8, plot.left + 360), plot.bottom - 12};
+      std::wstringstream ds;
+      ds << L"A-B: df=" << std::showpos << std::fixed << std::setprecision(1) << df
+         << L" Hz  dt=" << std::setprecision(2) << dt << L" s  ddB=" << std::setprecision(1)
+         << dd << std::noshowpos;
+      SetTextColor(hdc, RGB(255, 186, 196));
+      DrawTextW(hdc, ds.str().c_str(), -1, &dr, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+    }
   }
 
   if (viewMode != 0 && app->waterfallW > 4 && app->waterfallH > 8) {
@@ -3488,6 +3628,48 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
        << L"  (Alt+Click add/select, Alt+Drag move, Shift+Wheel width, Del remove)";
     SetTextColor(hdc, RGB(248, 188, 148));
     DrawTextW(hdc, ns.str().c_str(), -1, &nr, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+  }
+
+  if (app && app->manualNotchEnabled && app->notchGhostActive) {
+    const int y = FreqToY(app, plot, app->notchGhostFreqHz);
+    const float fMin = WaterfallFreqRangeMinHz(app);
+    const float fMax = WaterfallFreqRangeMaxHz(app);
+    const float widthFrac = app->notchGhostWidthHz / std::max(1.0f, (fMax - fMin));
+    const int halfH = std::max(1, static_cast<int>(std::round(widthFrac * (plot.bottom - plot.top) * 0.5f)));
+    RECT nb = {plot.left + 1, y - halfH, plot.right - 1, y + halfH};
+    HBRUSH fill = CreateSolidBrush(RGB(72, 74, 52));
+    FillRect(hdc, &nb, fill);
+    DeleteObject(fill);
+    HPEN gp = CreatePen(PS_DOT, 1, RGB(255, 230, 148));
+    auto oldGp = reinterpret_cast<HPEN>(SelectObject(hdc, gp));
+    MoveToEx(hdc, plot.left + 1, y, nullptr);
+    LineTo(hdc, plot.right - 1, y);
+    SelectObject(hdc, oldGp);
+    DeleteObject(gp);
+    RECT gr = {plot.left + 8, y - 12, plot.left + 210, y + 2};
+    SetTextColor(hdc, RGB(255, 236, 168));
+    DrawTextW(hdc, L"Notch ghost preview", -1, &gr, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+  }
+
+  if (app && app->dotDashAssistEnabled && app->peakLockEnabled && app->peakLockHz > 0.0f) {
+    const int yLock = FreqToY(app, plot, app->peakLockHz);
+    const int dotPx = std::max<int>(8, static_cast<int>((plot.right - plot.left) / 42));
+    const int gapPx = std::max(4, dotPx / 2);
+    const int dashPx = dotPx * 3;
+    HPEN dp = CreatePen(PS_SOLID, 1, RGB(164, 232, 255));
+    auto oldDp = reinterpret_cast<HPEN>(SelectObject(hdc, dp));
+    for (int x = plot.left + 2; x + dotPx < plot.right - 2; x += (dotPx + gapPx) * 2) {
+      MoveToEx(hdc, x, yLock - 2, nullptr);
+      LineTo(hdc, x + dotPx, yLock - 2);
+      const int x2 = x + dotPx + gapPx;
+      MoveToEx(hdc, x2, yLock + 2, nullptr);
+      LineTo(hdc, std::min<int>(static_cast<int>(plot.right) - 2, x2 + dashPx), yLock + 2);
+    }
+    SelectObject(hdc, oldDp);
+    DeleteObject(dp);
+    RECT dr = {plot.right - 180, yLock - 14, plot.right - 6, yLock + 2};
+    SetTextColor(hdc, RGB(186, 236, 252));
+    DrawTextW(hdc, L"Dot/Dash Assist", -1, &dr, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
   }
 
   if (app->waterfallZoomBoxActive) {
@@ -4016,6 +4198,7 @@ void InvalidateWaterfallCache(AppState* app) {
     return;
   }
   app->waterfallRgb.clear();
+  app->waterfallDiffRgb.clear();
   app->waterfallRidgeMask.clear();
   app->waterfallDbRender.clear();
   app->panInstantDb.clear();
@@ -4279,6 +4462,19 @@ LRESULT CALLBACK ChartProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         GetClientRect(hwnd, &rc);
         const RECT wfPlot = GetWaterfallPlotRect(rc);
         const RECT wfMap = GetWaterfallMapRect(rc);
+        if ((GetKeyState(VK_CONTROL) & 0x8000) && PtInRect(&wfPlot, p)) {
+          auto wf = HitTestWaterfall(app, rc, p);
+          if (wf.ok) {
+            app->compareCursorBValid = true;
+            app->compareCursorBPt = wf.pt;
+            app->compareCursorBFreqHz = wf.freqHz;
+            app->compareCursorBTimeSec = wf.timeSec;
+            app->compareCursorBDb = wf.db;
+            SetStatus(app, L"Compare cursor B set [Ctrl+Click]");
+            InvalidateRect(hwnd, nullptr, TRUE);
+          }
+          return 0;
+        }
         if (app->waterfallFrozen && PtInRect(&wfMap, p) && app->waterfallW > 0) {
           const float xn = static_cast<float>(p.x - wfMap.left) /
                            std::max<int>(1, static_cast<int>(wfMap.right - wfMap.left - 1));
@@ -4369,6 +4565,30 @@ LRESULT CALLBACK ChartProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           app->manualNotchEnabled = !app->manualNotchEnabled;
           SaveUiState(app);
           SetStatus(app, app->manualNotchEnabled ? L"Manual notch ON [M]" : L"Manual notch OFF [M]");
+          InvalidateRect(hwnd, nullptr, TRUE);
+          return 0;
+        }
+        if (vk == 'X') {
+          app->differenceWaterfallEnabled = !app->differenceWaterfallEnabled;
+          if (app->diffWaterfallCheck) {
+            SendMessageW(app->diffWaterfallCheck, BM_SETCHECK,
+                         app->differenceWaterfallEnabled ? BST_CHECKED : BST_UNCHECKED, 0);
+          }
+          SaveUiState(app);
+          SetStatus(app, app->differenceWaterfallEnabled ? L"Difference waterfall ON [X]"
+                                                         : L"Difference waterfall OFF [X]");
+          InvalidateRect(hwnd, nullptr, TRUE);
+          return 0;
+        }
+        if (vk == 'G') {
+          app->dotDashAssistEnabled = !app->dotDashAssistEnabled;
+          if (app->dotDashAssistCheck) {
+            SendMessageW(app->dotDashAssistCheck, BM_SETCHECK,
+                         app->dotDashAssistEnabled ? BST_CHECKED : BST_UNCHECKED, 0);
+          }
+          SaveUiState(app);
+          SetStatus(app, app->dotDashAssistEnabled ? L"Dot/Dash assist ON [G]"
+                                                   : L"Dot/Dash assist OFF [G]");
           InvalidateRect(hwnd, nullptr, TRUE);
           return 0;
         }
@@ -4484,6 +4704,13 @@ LRESULT CALLBACK ChartProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         RECT rc;
         GetClientRect(hwnd, &rc);
         const RECT wfPlot = GetWaterfallPlotRect(rc);
+        if ((GetKeyState(VK_MENU) & 0x8000) && PtInRect(&wfPlot, p) && app->manualNotchEnabled) {
+          app->notchGhostActive = true;
+          app->notchGhostFreqHz = YToFreqHz(app, wfPlot, p.y);
+          app->notchGhostWidthHz = 24.0f;
+        } else {
+          app->notchGhostActive = false;
+        }
         if (app->manualNotchDragging) {
           UpdateActiveManualNotchFromPoint(app, wfPlot, p);
           InvalidateRect(hwnd, nullptr, TRUE);
@@ -4609,6 +4836,7 @@ LRESULT CALLBACK ChartProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         app->mouseLeaveArmed = false;
         app->hoverActive = false;
         app->waterfallHoverActive = false;
+        app->notchGhostActive = false;
         InvalidateRect(hwnd, nullptr, TRUE);
       }
       return 0;
@@ -4748,6 +4976,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       SendMessageW(app->palettePresetCombo, CB_ADDSTRING, 0, (LPARAM)L"SDR#");
       SendMessageW(app->palettePresetCombo, CB_ADDSTRING, 0, (LPARAM)L"CubicSDR");
       SendMessageW(app->palettePresetCombo, CB_ADDSTRING, 0, (LPARAM)L"Custom LUT");
+      SendMessageW(app->palettePresetCombo, CB_ADDSTRING, 0, (LPARAM)L"Cividis");
+      SendMessageW(app->palettePresetCombo, CB_ADDSTRING, 0, (LPARAM)L"Viridis");
       SendMessageW(app->palettePresetCombo, CB_SETCURSEL, app->palettePreset, 0);
       app->paletteLoadButton = CreateWindowW(L"BUTTON", L"Load LUT", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                                              m + 776, y, 92, 30, hwnd, (HMENU)kIdPaletteLoadLut,
@@ -4816,23 +5046,35 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           (HMENU)kIdRidgeOverlayCheck, nullptr, nullptr);
       SendMessageW(app->ridgeOverlayCheck, BM_SETCHECK,
                    app->showRidgeOverlay ? BST_CHECKED : BST_UNCHECKED, 0);
+      app->diffWaterfallCheck = CreateWindowW(
+          L"BUTTON", L"Diff",
+          WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, m + 1416, y + 4, 58, 24, hwnd,
+          (HMENU)kIdDiffWaterfallCheck, nullptr, nullptr);
+      SendMessageW(app->diffWaterfallCheck, BM_SETCHECK,
+                   app->differenceWaterfallEnabled ? BST_CHECKED : BST_UNCHECKED, 0);
+      app->dotDashAssistCheck = CreateWindowW(
+          L"BUTTON", L"DotDash",
+          WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, m + 1476, y + 4, 78, 24, hwnd,
+          (HMENU)kIdDotDashAssistCheck, nullptr, nullptr);
+      SendMessageW(app->dotDashAssistCheck, BM_SETCHECK,
+                   app->dotDashAssistEnabled ? BST_CHECKED : BST_UNCHECKED, 0);
       app->wideViewButton = CreateWindowW(L"BUTTON", L"WIDE ON",
                                           WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                          m + 1418, y, 86, 30, hwnd,
+                                          m + 1558, y, 78, 30, hwnd,
                                           (HMENU)kIdWideViewButton, nullptr, nullptr);
       app->ridgeOverlayButton = CreateWindowW(L"BUTTON", L"RIDGE ON",
                                               WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                              m + 1508, y, 86, 30, hwnd,
+                                              m + 1640, y, 82, 30, hwnd,
                                               (HMENU)kIdRidgeOverlayButton, nullptr, nullptr);
       app->freezeButton = CreateWindowW(L"BUTTON", L"FREEZE OFF",
                                         WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                        m + 1598, y, 96, 30, hwnd,
+                                        m + 1726, y, 92, 30, hwnd,
                                         (HMENU)kIdFreezeButton, nullptr, nullptr);
       CreateWindowW(L"BUTTON", L"3D DX Weak Preset", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                    m + 1698, y, 110, 30, hwnd, (HMENU)kIdWaterfallDxPreset, nullptr, nullptr);
+                    m + 1568, y + 32, 132, 26, hwnd, (HMENU)kIdWaterfallDxPreset, nullptr, nullptr);
       UpdateWaterfallToggleButtons(app);
       UpdateFreezeButton(app);
-      y += 38;
+      y += 62;
 
       CreateWindowW(L"STATIC", L"Pan Avg Alpha", WS_CHILD | WS_VISIBLE, m + 1092, y + 6, 92, 22,
                     hwnd, nullptr, nullptr, nullptr);
@@ -5089,7 +5331,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                                app->yawSlider, app->pitchSlider, app->shadingCheck,
                                app->colormapCombo, app->waterfallFpsCombo,
                                app->waterfallPersistCombo, app->wideViewCheck,
-                               app->ridgeOverlayCheck, app->wideViewButton,
+                               app->ridgeOverlayCheck, app->diffWaterfallCheck,
+                               app->dotDashAssistCheck, app->wideViewButton,
                                app->ridgeOverlayButton, app->freezeButton,
                                app->panAvgAlphaSlider, app->panPeakDecaySlider,
                                app->lensStrengthSlider, app->bgRemovalSlider,
@@ -5236,7 +5479,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case kIdPalettePresetCombo:
           if (HIWORD(wParam) == CBN_SELCHANGE && app->palettePresetCombo) {
             const int sel = static_cast<int>(SendMessageW(app->palettePresetCombo, CB_GETCURSEL, 0, 0));
-            app->palettePreset = std::clamp(sel, 0, 3);
+            app->palettePreset = std::clamp(sel, 0, 5);
             if (app->palettePreset == 3 && app->customPalette.empty()) {
               app->palettePreset = 0;
               SendMessageW(app->palettePresetCombo, CB_SETCURSEL, 0, 0);
@@ -5373,6 +5616,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           app->showRidgeOverlay =
               (SendMessageW(app->ridgeOverlayCheck, BM_GETCHECK, 0, 0) == BST_CHECKED);
           UpdateWaterfallToggleButtons(app);
+          SaveUiState(app);
+          InvalidateRect(app->chartPanel, nullptr, TRUE);
+          return 0;
+        case kIdDiffWaterfallCheck:
+          app->differenceWaterfallEnabled =
+              (SendMessageW(app->diffWaterfallCheck, BM_GETCHECK, 0, 0) == BST_CHECKED);
+          SaveUiState(app);
+          InvalidateRect(app->chartPanel, nullptr, TRUE);
+          return 0;
+        case kIdDotDashAssistCheck:
+          app->dotDashAssistEnabled =
+              (SendMessageW(app->dotDashAssistCheck, BM_GETCHECK, 0, 0) == BST_CHECKED);
           SaveUiState(app);
           InvalidateRect(app->chartPanel, nullptr, TRUE);
           return 0;
