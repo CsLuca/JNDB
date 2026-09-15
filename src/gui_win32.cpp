@@ -113,6 +113,12 @@ constexpr int kIdLookNextHeatmapCheck = 1078;
 constexpr int kIdTrackZoomLanesCheck = 1079;
 constexpr int kIdPhaseOverlayCheck = 1080;
 constexpr int kIdSnrIsolinesCheck = 1081;
+constexpr int kIdBeaconSplitCheck = 1082;
+constexpr int kIdTimeWarpLensCheck = 1083;
+constexpr int kIdDriftGhostCheck = 1084;
+constexpr int kIdNoiseRibbonCheck = 1085;
+constexpr int kIdTrackSparkbarsCheck = 1086;
+constexpr int kIdAutoClutterCheck = 1087;
 
 constexpr UINT kMsgProgress = WM_APP + 1;
 constexpr UINT kMsgDone = WM_APP + 2;
@@ -205,6 +211,12 @@ struct AppState {
   HWND trackZoomLanesCheck = nullptr;
   HWND phaseOverlayCheck = nullptr;
   HWND snrIsolinesCheck = nullptr;
+  HWND beaconSplitCheck = nullptr;
+  HWND timeWarpLensCheck = nullptr;
+  HWND driftGhostCheck = nullptr;
+  HWND noiseRibbonCheck = nullptr;
+  HWND trackSparkbarsCheck = nullptr;
+  HWND autoClutterCheck = nullptr;
   HWND fftPreviewCombo = nullptr;
   HWND autoBookmarkCheck = nullptr;
   HWND autoBookmarkConfSlider = nullptr;
@@ -284,6 +296,12 @@ struct AppState {
   bool showTrackZoomLanes = true;
   bool showPhaseOverlay = true;
   bool showSnrIsolines = true;
+  bool showBeaconSeparationView = true;
+  bool showTimeWarpLens = true;
+  bool showDriftPredictionGhost = true;
+  bool showNoiseProfileRibbon = true;
+  bool showTrackSparkbars = true;
+  bool enableAutoClutterOpacity = true;
   bool autoFocusEnabled = true;
   float autoFocusStrength = 0.28f;
   float agcFloorOffsetDb = -3.0f;
@@ -952,6 +970,12 @@ void SaveUiState(AppState* app) {
   WritePrivateProfileStringW(L"view", L"track_zoom_lanes", app->showTrackZoomLanes ? L"1" : L"0", s);
   WritePrivateProfileStringW(L"view", L"phase_overlay", app->showPhaseOverlay ? L"1" : L"0", s);
   WritePrivateProfileStringW(L"view", L"snr_isolines", app->showSnrIsolines ? L"1" : L"0", s);
+  WritePrivateProfileStringW(L"view", L"beacon_split", app->showBeaconSeparationView ? L"1" : L"0", s);
+  WritePrivateProfileStringW(L"view", L"timewarp_lens", app->showTimeWarpLens ? L"1" : L"0", s);
+  WritePrivateProfileStringW(L"view", L"drift_ghost", app->showDriftPredictionGhost ? L"1" : L"0", s);
+  WritePrivateProfileStringW(L"view", L"noise_ribbon", app->showNoiseProfileRibbon ? L"1" : L"0", s);
+  WritePrivateProfileStringW(L"view", L"track_sparkbars", app->showTrackSparkbars ? L"1" : L"0", s);
+  WritePrivateProfileStringW(L"view", L"auto_clutter", app->enableAutoClutterOpacity ? L"1" : L"0", s);
   WritePrivateProfileStringW(L"view", L"frozen", app->waterfallFrozen ? L"1" : L"0", s);
   WritePrivateProfileStringW(L"view", L"freeze_col", std::to_wstring(app->waterfallFreezeCenterCol).c_str(), s);
   WritePrivateProfileStringW(L"view", L"zoom", std::to_wstring(app->waterfallZoom).c_str(), s);
@@ -1030,6 +1054,12 @@ void LoadUiState(AppState* app) {
   app->showTrackZoomLanes = IniReadBool(app->uiStatePath, L"view", L"track_zoom_lanes", app->showTrackZoomLanes);
   app->showPhaseOverlay = IniReadBool(app->uiStatePath, L"view", L"phase_overlay", app->showPhaseOverlay);
   app->showSnrIsolines = IniReadBool(app->uiStatePath, L"view", L"snr_isolines", app->showSnrIsolines);
+  app->showBeaconSeparationView = IniReadBool(app->uiStatePath, L"view", L"beacon_split", app->showBeaconSeparationView);
+  app->showTimeWarpLens = IniReadBool(app->uiStatePath, L"view", L"timewarp_lens", app->showTimeWarpLens);
+  app->showDriftPredictionGhost = IniReadBool(app->uiStatePath, L"view", L"drift_ghost", app->showDriftPredictionGhost);
+  app->showNoiseProfileRibbon = IniReadBool(app->uiStatePath, L"view", L"noise_ribbon", app->showNoiseProfileRibbon);
+  app->showTrackSparkbars = IniReadBool(app->uiStatePath, L"view", L"track_sparkbars", app->showTrackSparkbars);
+  app->enableAutoClutterOpacity = IniReadBool(app->uiStatePath, L"view", L"auto_clutter", app->enableAutoClutterOpacity);
   app->waterfallFrozen = IniReadBool(app->uiStatePath, L"view", L"frozen", app->waterfallFrozen);
   app->waterfallFreezeCenterCol = IniReadInt(app->uiStatePath, L"view", L"freeze_col", app->waterfallFreezeCenterCol);
   app->waterfallZoom = std::clamp(static_cast<double>(IniReadFloat(app->uiStatePath, L"view", L"zoom", static_cast<float>(app->waterfallZoom))), 1.0, 8.0);
@@ -1154,6 +1184,30 @@ void LoadUiState(AppState* app) {
   if (app->snrIsolinesCheck) {
     SendMessageW(app->snrIsolinesCheck, BM_SETCHECK,
                  app->showSnrIsolines ? BST_CHECKED : BST_UNCHECKED, 0);
+  }
+  if (app->beaconSplitCheck) {
+    SendMessageW(app->beaconSplitCheck, BM_SETCHECK,
+                 app->showBeaconSeparationView ? BST_CHECKED : BST_UNCHECKED, 0);
+  }
+  if (app->timeWarpLensCheck) {
+    SendMessageW(app->timeWarpLensCheck, BM_SETCHECK,
+                 app->showTimeWarpLens ? BST_CHECKED : BST_UNCHECKED, 0);
+  }
+  if (app->driftGhostCheck) {
+    SendMessageW(app->driftGhostCheck, BM_SETCHECK,
+                 app->showDriftPredictionGhost ? BST_CHECKED : BST_UNCHECKED, 0);
+  }
+  if (app->noiseRibbonCheck) {
+    SendMessageW(app->noiseRibbonCheck, BM_SETCHECK,
+                 app->showNoiseProfileRibbon ? BST_CHECKED : BST_UNCHECKED, 0);
+  }
+  if (app->trackSparkbarsCheck) {
+    SendMessageW(app->trackSparkbarsCheck, BM_SETCHECK,
+                 app->showTrackSparkbars ? BST_CHECKED : BST_UNCHECKED, 0);
+  }
+  if (app->autoClutterCheck) {
+    SendMessageW(app->autoClutterCheck, BM_SETCHECK,
+                 app->enableAutoClutterOpacity ? BST_CHECKED : BST_UNCHECKED, 0);
   }
   UpdateWaterfallToggleButtons(app);
   UpdateFreezeButton(app);
@@ -1351,6 +1405,12 @@ void ResetUiSessionState(AppState* app) {
   app->showTrackZoomLanes = true;
   app->showPhaseOverlay = true;
   app->showSnrIsolines = true;
+  app->showBeaconSeparationView = true;
+  app->showTimeWarpLens = true;
+  app->showDriftPredictionGhost = true;
+  app->showNoiseProfileRibbon = true;
+  app->showTrackSparkbars = true;
+  app->enableAutoClutterOpacity = true;
   app->waterfallZoom = 1.0;
   app->waterfallPanPx = 0;
   app->waterfallFrozen = false;
@@ -1409,6 +1469,12 @@ void ResetUiSessionState(AppState* app) {
   if (app->trackZoomLanesCheck) SendMessageW(app->trackZoomLanesCheck, BM_SETCHECK, BST_CHECKED, 0);
   if (app->phaseOverlayCheck) SendMessageW(app->phaseOverlayCheck, BM_SETCHECK, BST_CHECKED, 0);
   if (app->snrIsolinesCheck) SendMessageW(app->snrIsolinesCheck, BM_SETCHECK, BST_CHECKED, 0);
+  if (app->beaconSplitCheck) SendMessageW(app->beaconSplitCheck, BM_SETCHECK, BST_CHECKED, 0);
+  if (app->timeWarpLensCheck) SendMessageW(app->timeWarpLensCheck, BM_SETCHECK, BST_CHECKED, 0);
+  if (app->driftGhostCheck) SendMessageW(app->driftGhostCheck, BM_SETCHECK, BST_CHECKED, 0);
+  if (app->noiseRibbonCheck) SendMessageW(app->noiseRibbonCheck, BM_SETCHECK, BST_CHECKED, 0);
+  if (app->trackSparkbarsCheck) SendMessageW(app->trackSparkbarsCheck, BM_SETCHECK, BST_CHECKED, 0);
+  if (app->autoClutterCheck) SendMessageW(app->autoClutterCheck, BM_SETCHECK, BST_CHECKED, 0);
   UpdateWaterfallToggleButtons(app);
   UpdateFreezeButton(app);
   if (app->agcFloorSlider) SendMessageW(app->agcFloorSlider, TBM_SETPOS, TRUE, static_cast<LPARAM>(app->agcFloorOffsetDb));
@@ -3512,7 +3578,7 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
   DrawTextW(hdc, L"Frequency (kHz)", -1, &yLab, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
 
   // Multi-band noise profile ribbon (low/mid/high + local around lock).
-  if (!app->waterfallDbRender.empty()) {
+  if (app->showNoiseProfileRibbon && !app->waterfallDbRender.empty()) {
     RECT nr = {plot.left + 6, plot.top + 2, std::min(plot.right - 260, plot.left + 320), plot.top + 18};
     HBRUSH nbg = CreateSolidBrush(RGB(8, 16, 24));
     FillRect(hdc, &nr, nbg);
@@ -4313,7 +4379,7 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
       DeleteObject(trk);
 
       // Drift prediction ghost line (1-3s extrapolation for focus track).
-      if (app->selectedTrackId >= 0 && r.trackId == app->selectedTrackId) {
+      if (app->showDriftPredictionGhost && app->selectedTrackId >= 0 && r.trackId == app->selectedTrackId) {
         float slopeHzPerSec = 0.0f;
         int nSlope = 0;
         for (const auto& rr : app->overlayRows) {
@@ -4363,10 +4429,11 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
 
       const int lblX = x0 + 4;
       const int lblY = y - 14;
-      const int nearDx = static_cast<int>(64 + 30 * clutter);
-      const int nearDy = static_cast<int>(16 + 10 * clutter);
+      const float clutterK = app->enableAutoClutterOpacity ? clutter : 0.0f;
+      const int nearDx = static_cast<int>(64 + 30 * clutterK);
+      const int nearDy = static_cast<int>(16 + 10 * clutterK);
       const bool nearOther = (std::abs(lblX - lastLblX) < nearDx && std::abs(lblY - lastLblY) < nearDy);
-      const float confGate = 0.72f + 0.14f * clutter;
+      const float confGate = 0.72f + 0.14f * clutterK;
       const bool showLbl = (r.confidence >= confGate) || !nearOther;
       if (showLbl) {
         RECT lbl = {lblX, lblY, std::min<int>(plot.right - 4, x0 + 120), y + 2};
@@ -4376,7 +4443,7 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
           return RGB(static_cast<int>(GetRValue(c) * f), static_cast<int>(GetGValue(c) * f),
                      static_cast<int>(GetBValue(c) * f));
         };
-        SetTextColor(hdc, dim(cc, clutter));
+        SetTextColor(hdc, dim(cc, clutterK));
         DrawTextW(hdc, tag.c_str(), -1, &lbl, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
         lastLblX = lblX;
         lastLblY = lblY;
@@ -4385,7 +4452,8 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
   }
 
   // Beacon separation view (co-channel splitter) + confidence/stability sparkbars.
-  if (app && !app->overlayRows.empty() && app->previewWav.sampleRate > 0) {
+  if (app && !app->overlayRows.empty() && app->previewWav.sampleRate > 0 &&
+      (app->showBeaconSeparationView || app->showTimeWarpLens || app->showTrackSparkbars)) {
     struct SepTrack {
       int id = -1;
       float score = -1.0f;
@@ -4429,7 +4497,7 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
     if (top.size() > 3) top.resize(3);
 
     RECT sv = {plot.right - 236, plot.top + 90, plot.right - 10, std::min(plot.bottom - 92, plot.top + 248)};
-    if (sv.bottom - sv.top >= 84 && !top.empty()) {
+    if (app->showBeaconSeparationView && sv.bottom - sv.top >= 84 && !top.empty()) {
       HBRUSH sbg = CreateSolidBrush(RGB(8, 14, 22));
       FillRect(hdc, &sv, sbg);
       DeleteObject(sbg);
@@ -4480,10 +4548,12 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
           FillRect(hdc, &fv, fb);
           DeleteObject(fb);
         };
-        spark(rr.left + 4, top[i].conf, RGB(124, 220, 250));
-        spark(rr.left + 48, top[i].stab, RGB(146, 236, 190));
-        spark(rr.left + 92, top[i].key, RGB(240, 216, 136));
-        spark(rr.left + 136, top[i].cont, RGB(208, 186, 246));
+        if (app->showTrackSparkbars) {
+          spark(rr.left + 4, top[i].conf, RGB(124, 220, 250));
+          spark(rr.left + 48, top[i].stab, RGB(146, 236, 190));
+          spark(rr.left + 92, top[i].key, RGB(240, 216, 136));
+          spark(rr.left + 136, top[i].cont, RGB(208, 186, 246));
+        }
       }
     }
 
@@ -4500,7 +4570,7 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
         }
       }
     }
-    if (focus && srcW > 8) {
+    if (app->showTimeWarpLens && focus && srcW > 8) {
       RECT tw = {plot.left + 12, plot.bottom - 98, std::min(plot.left + 270, plot.right - 246), plot.bottom - 24};
       if (tw.right - tw.left >= 120) {
         HBRUSH tbg = CreateSolidBrush(RGB(8, 14, 22));
@@ -6533,15 +6603,51 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           (HMENU)kIdSnrIsolinesCheck, nullptr, nullptr);
       SendMessageW(app->snrIsolinesCheck, BM_SETCHECK,
                    app->showSnrIsolines ? BST_CHECKED : BST_UNCHECKED, 0);
+      app->beaconSplitCheck = CreateWindowW(
+          L"BUTTON", L"Split",
+          WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, m + 1502, y + 56, 58, 24, hwnd,
+          (HMENU)kIdBeaconSplitCheck, nullptr, nullptr);
+      SendMessageW(app->beaconSplitCheck, BM_SETCHECK,
+                   app->showBeaconSeparationView ? BST_CHECKED : BST_UNCHECKED, 0);
+      app->timeWarpLensCheck = CreateWindowW(
+          L"BUTTON", L"Warp",
+          WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, m + 1562, y + 56, 56, 24, hwnd,
+          (HMENU)kIdTimeWarpLensCheck, nullptr, nullptr);
+      SendMessageW(app->timeWarpLensCheck, BM_SETCHECK,
+                   app->showTimeWarpLens ? BST_CHECKED : BST_UNCHECKED, 0);
+      app->driftGhostCheck = CreateWindowW(
+          L"BUTTON", L"Ghost",
+          WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, m + 1620, y + 56, 62, 24, hwnd,
+          (HMENU)kIdDriftGhostCheck, nullptr, nullptr);
+      SendMessageW(app->driftGhostCheck, BM_SETCHECK,
+                   app->showDriftPredictionGhost ? BST_CHECKED : BST_UNCHECKED, 0);
+      app->noiseRibbonCheck = CreateWindowW(
+          L"BUTTON", L"Noise",
+          WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, m + 1684, y + 56, 62, 24, hwnd,
+          (HMENU)kIdNoiseRibbonCheck, nullptr, nullptr);
+      SendMessageW(app->noiseRibbonCheck, BM_SETCHECK,
+                   app->showNoiseProfileRibbon ? BST_CHECKED : BST_UNCHECKED, 0);
+      app->trackSparkbarsCheck = CreateWindowW(
+          L"BUTTON", L"Sparks",
+          WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, m + 1748, y + 56, 64, 24, hwnd,
+          (HMENU)kIdTrackSparkbarsCheck, nullptr, nullptr);
+      SendMessageW(app->trackSparkbarsCheck, BM_SETCHECK,
+                   app->showTrackSparkbars ? BST_CHECKED : BST_UNCHECKED, 0);
+      app->autoClutterCheck = CreateWindowW(
+          L"BUTTON", L"Clutter",
+          WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, m + 1814, y + 56, 70, 24, hwnd,
+          (HMENU)kIdAutoClutterCheck, nullptr, nullptr);
+      SendMessageW(app->autoClutterCheck, BM_SETCHECK,
+                   app->enableAutoClutterOpacity ? BST_CHECKED : BST_UNCHECKED, 0);
       app->freezeButton = CreateWindowW(L"BUTTON", L"FREEZE OFF",
                                         WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                        m + 1654, y + 56, 104, 26, hwnd,
+                                        m + 1654, y + 80, 104, 26, hwnd,
                                         (HMENU)kIdFreezeButton, nullptr, nullptr);
       CreateWindowW(L"BUTTON", L"3D DX Weak Preset", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                    m + 1762, y + 56, 132, 26, hwnd, (HMENU)kIdWaterfallDxPreset, nullptr, nullptr);
+                    m + 1762, y + 80, 132, 26, hwnd, (HMENU)kIdWaterfallDxPreset, nullptr, nullptr);
       UpdateWaterfallToggleButtons(app);
       UpdateFreezeButton(app);
-      y += 88;
+      y += 112;
 
       CreateWindowW(L"STATIC", L"Pan Avg Alpha", WS_CHILD | WS_VISIBLE, m + 1092, y + 6, 92, 22,
                     hwnd, nullptr, nullptr, nullptr);
@@ -7155,6 +7261,48 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
               (SendMessageW(app->snrIsolinesCheck, BM_GETCHECK, 0, 0) == BST_CHECKED);
           SaveUiState(app);
           SetStatus(app, app->showSnrIsolines ? L"SNR isolines ON" : L"SNR isolines OFF");
+          InvalidateRect(app->chartPanel, nullptr, TRUE);
+          return 0;
+        case kIdBeaconSplitCheck:
+          app->showBeaconSeparationView =
+              (SendMessageW(app->beaconSplitCheck, BM_GETCHECK, 0, 0) == BST_CHECKED);
+          SaveUiState(app);
+          SetStatus(app, app->showBeaconSeparationView ? L"Beacon split view ON" : L"Beacon split view OFF");
+          InvalidateRect(app->chartPanel, nullptr, TRUE);
+          return 0;
+        case kIdTimeWarpLensCheck:
+          app->showTimeWarpLens =
+              (SendMessageW(app->timeWarpLensCheck, BM_GETCHECK, 0, 0) == BST_CHECKED);
+          SaveUiState(app);
+          SetStatus(app, app->showTimeWarpLens ? L"Time-warp lens ON" : L"Time-warp lens OFF");
+          InvalidateRect(app->chartPanel, nullptr, TRUE);
+          return 0;
+        case kIdDriftGhostCheck:
+          app->showDriftPredictionGhost =
+              (SendMessageW(app->driftGhostCheck, BM_GETCHECK, 0, 0) == BST_CHECKED);
+          SaveUiState(app);
+          SetStatus(app, app->showDriftPredictionGhost ? L"Drift ghost ON" : L"Drift ghost OFF");
+          InvalidateRect(app->chartPanel, nullptr, TRUE);
+          return 0;
+        case kIdNoiseRibbonCheck:
+          app->showNoiseProfileRibbon =
+              (SendMessageW(app->noiseRibbonCheck, BM_GETCHECK, 0, 0) == BST_CHECKED);
+          SaveUiState(app);
+          SetStatus(app, app->showNoiseProfileRibbon ? L"Noise ribbon ON" : L"Noise ribbon OFF");
+          InvalidateRect(app->chartPanel, nullptr, TRUE);
+          return 0;
+        case kIdTrackSparkbarsCheck:
+          app->showTrackSparkbars =
+              (SendMessageW(app->trackSparkbarsCheck, BM_GETCHECK, 0, 0) == BST_CHECKED);
+          SaveUiState(app);
+          SetStatus(app, app->showTrackSparkbars ? L"Track sparkbars ON" : L"Track sparkbars OFF");
+          InvalidateRect(app->chartPanel, nullptr, TRUE);
+          return 0;
+        case kIdAutoClutterCheck:
+          app->enableAutoClutterOpacity =
+              (SendMessageW(app->autoClutterCheck, BM_GETCHECK, 0, 0) == BST_CHECKED);
+          SaveUiState(app);
+          SetStatus(app, app->enableAutoClutterOpacity ? L"Auto-clutter ON" : L"Auto-clutter OFF");
           InvalidateRect(app->chartPanel, nullptr, TRUE);
           return 0;
         case kIdWideViewButton:
