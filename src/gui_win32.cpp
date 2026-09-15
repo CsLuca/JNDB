@@ -111,6 +111,8 @@ constexpr int kIdUncertaintyHalosCheck = 1076;
 constexpr int kIdCadenceStripCheck = 1077;
 constexpr int kIdLookNextHeatmapCheck = 1078;
 constexpr int kIdTrackZoomLanesCheck = 1079;
+constexpr int kIdPhaseOverlayCheck = 1080;
+constexpr int kIdSnrIsolinesCheck = 1081;
 
 constexpr UINT kMsgProgress = WM_APP + 1;
 constexpr UINT kMsgDone = WM_APP + 2;
@@ -201,6 +203,8 @@ struct AppState {
   HWND cadenceStripCheck = nullptr;
   HWND lookNextHeatmapCheck = nullptr;
   HWND trackZoomLanesCheck = nullptr;
+  HWND phaseOverlayCheck = nullptr;
+  HWND snrIsolinesCheck = nullptr;
   HWND fftPreviewCombo = nullptr;
   HWND autoBookmarkCheck = nullptr;
   HWND autoBookmarkConfSlider = nullptr;
@@ -278,6 +282,8 @@ struct AppState {
   bool showCadenceStrip = true;
   bool showLookNextHeatmap = true;
   bool showTrackZoomLanes = true;
+  bool showPhaseOverlay = true;
+  bool showSnrIsolines = true;
   bool autoFocusEnabled = true;
   float autoFocusStrength = 0.28f;
   float agcFloorOffsetDb = -3.0f;
@@ -944,6 +950,8 @@ void SaveUiState(AppState* app) {
   WritePrivateProfileStringW(L"view", L"cadence_strip", app->showCadenceStrip ? L"1" : L"0", s);
   WritePrivateProfileStringW(L"view", L"looknext_heatmap", app->showLookNextHeatmap ? L"1" : L"0", s);
   WritePrivateProfileStringW(L"view", L"track_zoom_lanes", app->showTrackZoomLanes ? L"1" : L"0", s);
+  WritePrivateProfileStringW(L"view", L"phase_overlay", app->showPhaseOverlay ? L"1" : L"0", s);
+  WritePrivateProfileStringW(L"view", L"snr_isolines", app->showSnrIsolines ? L"1" : L"0", s);
   WritePrivateProfileStringW(L"view", L"frozen", app->waterfallFrozen ? L"1" : L"0", s);
   WritePrivateProfileStringW(L"view", L"freeze_col", std::to_wstring(app->waterfallFreezeCenterCol).c_str(), s);
   WritePrivateProfileStringW(L"view", L"zoom", std::to_wstring(app->waterfallZoom).c_str(), s);
@@ -1020,6 +1028,8 @@ void LoadUiState(AppState* app) {
   app->showCadenceStrip = IniReadBool(app->uiStatePath, L"view", L"cadence_strip", app->showCadenceStrip);
   app->showLookNextHeatmap = IniReadBool(app->uiStatePath, L"view", L"looknext_heatmap", app->showLookNextHeatmap);
   app->showTrackZoomLanes = IniReadBool(app->uiStatePath, L"view", L"track_zoom_lanes", app->showTrackZoomLanes);
+  app->showPhaseOverlay = IniReadBool(app->uiStatePath, L"view", L"phase_overlay", app->showPhaseOverlay);
+  app->showSnrIsolines = IniReadBool(app->uiStatePath, L"view", L"snr_isolines", app->showSnrIsolines);
   app->waterfallFrozen = IniReadBool(app->uiStatePath, L"view", L"frozen", app->waterfallFrozen);
   app->waterfallFreezeCenterCol = IniReadInt(app->uiStatePath, L"view", L"freeze_col", app->waterfallFreezeCenterCol);
   app->waterfallZoom = std::clamp(static_cast<double>(IniReadFloat(app->uiStatePath, L"view", L"zoom", static_cast<float>(app->waterfallZoom))), 1.0, 8.0);
@@ -1136,6 +1146,14 @@ void LoadUiState(AppState* app) {
   if (app->trackZoomLanesCheck) {
     SendMessageW(app->trackZoomLanesCheck, BM_SETCHECK,
                  app->showTrackZoomLanes ? BST_CHECKED : BST_UNCHECKED, 0);
+  }
+  if (app->phaseOverlayCheck) {
+    SendMessageW(app->phaseOverlayCheck, BM_SETCHECK,
+                 app->showPhaseOverlay ? BST_CHECKED : BST_UNCHECKED, 0);
+  }
+  if (app->snrIsolinesCheck) {
+    SendMessageW(app->snrIsolinesCheck, BM_SETCHECK,
+                 app->showSnrIsolines ? BST_CHECKED : BST_UNCHECKED, 0);
   }
   UpdateWaterfallToggleButtons(app);
   UpdateFreezeButton(app);
@@ -1331,6 +1349,8 @@ void ResetUiSessionState(AppState* app) {
   app->showCadenceStrip = true;
   app->showLookNextHeatmap = true;
   app->showTrackZoomLanes = true;
+  app->showPhaseOverlay = true;
+  app->showSnrIsolines = true;
   app->waterfallZoom = 1.0;
   app->waterfallPanPx = 0;
   app->waterfallFrozen = false;
@@ -1387,6 +1407,8 @@ void ResetUiSessionState(AppState* app) {
   if (app->cadenceStripCheck) SendMessageW(app->cadenceStripCheck, BM_SETCHECK, BST_CHECKED, 0);
   if (app->lookNextHeatmapCheck) SendMessageW(app->lookNextHeatmapCheck, BM_SETCHECK, BST_CHECKED, 0);
   if (app->trackZoomLanesCheck) SendMessageW(app->trackZoomLanesCheck, BM_SETCHECK, BST_CHECKED, 0);
+  if (app->phaseOverlayCheck) SendMessageW(app->phaseOverlayCheck, BM_SETCHECK, BST_CHECKED, 0);
+  if (app->snrIsolinesCheck) SendMessageW(app->snrIsolinesCheck, BM_SETCHECK, BST_CHECKED, 0);
   UpdateWaterfallToggleButtons(app);
   UpdateFreezeButton(app);
   if (app->agcFloorSlider) SendMessageW(app->agcFloorSlider, TBM_SETPOS, TRUE, static_cast<LPARAM>(app->agcFloorOffsetDb));
@@ -2986,6 +3008,8 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
   float cadBadgeIntensity = 0.35f;
   float heatBadgeIntensity = 0.35f;
   float lanesBadgeIntensity = 0.35f;
+  float phaseBadgeIntensity = 0.35f;
+  float isoBadgeIntensity = 0.35f;
   if (app) {
     if (!app->waterfallCoherenceMask.empty()) {
       int hi = 0;
@@ -3002,6 +3026,22 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
       }
       cohBadgeIntensity = std::clamp(0.20f + 1.35f * (static_cast<float>(hi) / std::max(1.0f, static_cast<float>(cnt))),
                                      0.0f, 1.0f);
+    }
+    if (!app->waterfallPhaseMask.empty()) {
+      int hi = 0;
+      int cnt = 0;
+      const int step = std::max(1, app->waterfallW / 120);
+      for (int y = 0; y < app->waterfallH; y += 3) {
+        for (int x = 0; x < app->waterfallW; x += step) {
+          const std::uint8_t v = app->waterfallPhaseMask[static_cast<std::size_t>(y * app->waterfallW + x)];
+          if (v >= 154) {
+            ++hi;
+          }
+          ++cnt;
+        }
+      }
+      phaseBadgeIntensity = std::clamp(0.20f + 1.25f * (static_cast<float>(hi) / std::max(1.0f, static_cast<float>(cnt))),
+                                       0.0f, 1.0f);
     }
     if (!app->overlayRows.empty()) {
       float maxHeat = 0.0f;
@@ -3027,6 +3067,7 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
       haloBadgeIntensity = std::clamp(0.12f + 0.95f * meanU, 0.0f, 1.0f);
       lanesBadgeIntensity = std::clamp(0.18f + 0.30f * static_cast<float>(std::min(3, static_cast<int>(uniq.size()))),
                                        0.0f, 1.0f);
+      isoBadgeIntensity = std::clamp(0.15f + 0.85f * std::clamp(maxHeat, 0.0f, 1.0f), 0.0f, 1.0f);
     }
   }
   if (app && app->differenceWaterfallEnabled) {
@@ -3049,6 +3090,12 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
   }
   if (app && app->showCoherenceOverlay) {
     drawBadge(L"COH", RGB(208, 244, 252), RGB(42, 84, 102), cohBadgeIntensity);
+  }
+  if (app && app->showPhaseOverlay) {
+    drawBadge(L"PHASE", RGB(194, 232, 252), RGB(46, 78, 112), phaseBadgeIntensity);
+  }
+  if (app && app->showSnrIsolines) {
+    drawBadge(L"ISO", RGB(212, 246, 238), RGB(44, 86, 70), isoBadgeIntensity);
   }
   if (app && app->showUncertaintyHalos) {
     drawBadge(L"HALO", RGB(214, 232, 255), RGB(52, 72, 100), haloBadgeIntensity);
@@ -3170,7 +3217,7 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
   }
 
   // Phase-consistency overlay: highlights phase-like stable structures.
-  if (!app->waterfallPhaseMask.empty()) {
+  if (app->showPhaseOverlay && !app->waterfallPhaseMask.empty()) {
     for (int x = plot.left; x < plot.right; x += 2) {
       const float xn = static_cast<float>(x - plot.left) /
                        std::max<int>(1, static_cast<int>(plot.right - plot.left - 1));
@@ -3194,7 +3241,7 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
   }
 
   // SNR isolines (contours over dB-NF): helps spotting usable corridors.
-  if (!app->waterfallDbRender.empty()) {
+  if (app->showSnrIsolines && !app->waterfallDbRender.empty()) {
     const float snrLv[4] = {3.0f, 6.0f, 10.0f, 14.0f};
     const COLORREF snrCol[4] = {RGB(120, 178, 220), RGB(146, 206, 240), RGB(180, 236, 246), RGB(220, 255, 232)};
     for (int li = 0; li < 4; ++li) {
@@ -6187,15 +6234,27 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           (HMENU)kIdTrackZoomLanesCheck, nullptr, nullptr);
       SendMessageW(app->trackZoomLanesCheck, BM_SETCHECK,
                    app->showTrackZoomLanes ? BST_CHECKED : BST_UNCHECKED, 0);
+      app->phaseOverlayCheck = CreateWindowW(
+          L"BUTTON", L"Phase",
+          WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, m + 1360, y + 56, 62, 24, hwnd,
+          (HMENU)kIdPhaseOverlayCheck, nullptr, nullptr);
+      SendMessageW(app->phaseOverlayCheck, BM_SETCHECK,
+                   app->showPhaseOverlay ? BST_CHECKED : BST_UNCHECKED, 0);
+      app->snrIsolinesCheck = CreateWindowW(
+          L"BUTTON", L"Isolines",
+          WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, m + 1424, y + 56, 74, 24, hwnd,
+          (HMENU)kIdSnrIsolinesCheck, nullptr, nullptr);
+      SendMessageW(app->snrIsolinesCheck, BM_SETCHECK,
+                   app->showSnrIsolines ? BST_CHECKED : BST_UNCHECKED, 0);
       app->freezeButton = CreateWindowW(L"BUTTON", L"FREEZE OFF",
                                         WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                        m + 1654, y + 32, 104, 26, hwnd,
+                                        m + 1654, y + 56, 104, 26, hwnd,
                                         (HMENU)kIdFreezeButton, nullptr, nullptr);
       CreateWindowW(L"BUTTON", L"3D DX Weak Preset", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                    m + 1762, y + 32, 132, 26, hwnd, (HMENU)kIdWaterfallDxPreset, nullptr, nullptr);
+                    m + 1762, y + 56, 132, 26, hwnd, (HMENU)kIdWaterfallDxPreset, nullptr, nullptr);
       UpdateWaterfallToggleButtons(app);
       UpdateFreezeButton(app);
-      y += 62;
+      y += 88;
 
       CreateWindowW(L"STATIC", L"Pan Avg Alpha", WS_CHILD | WS_VISIBLE, m + 1092, y + 6, 92, 22,
                     hwnd, nullptr, nullptr, nullptr);
@@ -6797,6 +6856,20 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           SetStatus(app, app->showTrackZoomLanes ? L"Track zoom lanes ON" : L"Track zoom lanes OFF");
           InvalidateRect(app->chartPanel, nullptr, TRUE);
           return 0;
+        case kIdPhaseOverlayCheck:
+          app->showPhaseOverlay =
+              (SendMessageW(app->phaseOverlayCheck, BM_GETCHECK, 0, 0) == BST_CHECKED);
+          SaveUiState(app);
+          SetStatus(app, app->showPhaseOverlay ? L"Phase overlay ON" : L"Phase overlay OFF");
+          InvalidateRect(app->chartPanel, nullptr, TRUE);
+          return 0;
+        case kIdSnrIsolinesCheck:
+          app->showSnrIsolines =
+              (SendMessageW(app->snrIsolinesCheck, BM_GETCHECK, 0, 0) == BST_CHECKED);
+          SaveUiState(app);
+          SetStatus(app, app->showSnrIsolines ? L"SNR isolines ON" : L"SNR isolines OFF");
+          InvalidateRect(app->chartPanel, nullptr, TRUE);
+          return 0;
         case kIdWideViewButton:
           app->showWideView = !app->showWideView;
           if (app->wideViewCheck) {
@@ -7273,6 +7346,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         const bool pulseActive = (!app->previewWav.samples.empty()) &&
                                  (app->showCoherenceOverlay || app->showUncertaintyHalos ||
                                   app->showCadenceStrip || app->showLookNextHeatmap ||
+                                  app->showPhaseOverlay || app->showSnrIsolines ||
                                   app->showTrackZoomLanes);
         if (!app->running && !pulseActive) {
           return 0;
