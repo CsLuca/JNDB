@@ -1489,6 +1489,8 @@ void ApplyResponsiveLayout(AppState* app) {
     const int panelW = std::max(260, cw - 16);
     const int panelH = std::max(180, ch - panelY - 8);
     MoveWindow(app->chartPanel, panelX, panelY, panelW, panelH, TRUE);
+    SetWindowPos(app->chartPanel, HWND_BOTTOM, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
   }
 }
 
@@ -8194,6 +8196,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                                       rightX, 16, rightW, 820, hwnd, (HMENU)kIdChartPanel, nullptr,
                                       nullptr);
       SetWindowLongPtrW(app->chartPanel, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(app));
+      SetWindowPos(app->chartPanel, HWND_BOTTOM, 0, 0, 0, 0,
+                   SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 
       const HWND controls[] = {app->runButton, app->statusText, app->historyEdit,
                                app->compareEdit, app->inputEdit, app->outputEdit, app->metricsEdit,
