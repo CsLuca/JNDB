@@ -2792,6 +2792,28 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
     }
   }
 
+  // Quick legend for advanced visual controls.
+  RECT lg = {rc.right - 338, rc.top + 6, rc.right - 10, rc.top + 44};
+  HBRUSH lbg = CreateSolidBrush(RGB(10, 18, 28));
+  FillRect(hdc, &lg, lbg);
+  DeleteObject(lbg);
+  HPEN lpen = CreatePen(PS_SOLID, 1, RGB(74, 104, 134));
+  auto oldLp = reinterpret_cast<HPEN>(SelectObject(hdc, lpen));
+  MoveToEx(hdc, lg.left, lg.top, nullptr);
+  LineTo(hdc, lg.right - 1, lg.top);
+  LineTo(hdc, lg.right - 1, lg.bottom - 1);
+  LineTo(hdc, lg.left, lg.bottom - 1);
+  LineTo(hdc, lg.left, lg.top);
+  SelectObject(hdc, oldLp);
+  DeleteObject(lpen);
+  RECT l1 = {lg.left + 8, lg.top + 2, lg.right - 8, lg.top + 18};
+  RECT l2 = {lg.left + 8, lg.top + 18, lg.right - 8, lg.bottom - 2};
+  SetTextColor(hdc, RGB(184, 212, 236));
+  DrawTextW(hdc, L"F9/F10/F11 snap A/B/clear | Ctrl+Click set B", -1, &l1,
+            DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+  DrawTextW(hdc, L"X diff | G dotdash | F freeze", -1, &l2,
+            DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+
   const int panH = 112;
   RECT panRc = {rc.left + 14, rc.top + 30, rc.right - 14, rc.top + 30 + panH};
   DrawPanadapter(hdc, panRc, app);
