@@ -80,6 +80,8 @@ constexpr int kIdAutoMarkPresetDx = 1045;
 constexpr int kIdAutoMarkPresetBalanced = 1046;
 constexpr int kIdAutoMarkPresetWeak = 1047;
 constexpr int kIdResetUiSession = 1048;
+constexpr int kIdPalettePresetCombo = 1049;
+constexpr int kIdPaletteLoadLut = 1050;
 
 constexpr UINT kMsgProgress = WM_APP + 1;
 constexpr UINT kMsgDone = WM_APP + 2;
@@ -115,6 +117,13 @@ struct ChartDef {
   bool lowerIsBetter = false;
 };
 
+struct ColorStop {
+  float p = 0.0f;
+  int r = 0;
+  int g = 0;
+  int b = 0;
+};
+
 struct AppState {
   HWND hwnd = nullptr;
   HWND inputEdit = nullptr;
@@ -129,6 +138,8 @@ struct AppState {
   HWND pitchSlider = nullptr;
   HWND shadingCheck = nullptr;
   HWND colormapCombo = nullptr;
+  HWND palettePresetCombo = nullptr;
+  HWND paletteLoadButton = nullptr;
   HWND waterfallFpsCombo = nullptr;
   HWND agcFloorSlider = nullptr;
   HWND agcSpanSlider = nullptr;
@@ -180,6 +191,9 @@ struct AppState {
   int pitchDeg = 24;
   bool shadingEnabled = true;
   int colormap3d = 0;
+  int palettePreset = 0;  // 0 HDSDR, 1 SDR#, 2 CubicSDR, 3 Custom
+  std::vector<ColorStop> customPalette;
+  std::wstring customPalettePath;
   int waterfallFps = 30;
   float agcFloorOffsetDb = -3.0f;
   float agcSpanDb = 22.0f;
@@ -699,6 +713,7 @@ void SaveUiState(AppState* app) {
   WritePrivateProfileStringW(L"view", L"pan", std::to_wstring(app->waterfallPanPx).c_str(), s);
   WritePrivateProfileStringW(L"view", L"shading", app->shadingEnabled ? L"1" : L"0", s);
   WritePrivateProfileStringW(L"view", L"colormap3d", std::to_wstring(app->colormap3d).c_str(), s);
+  WritePrivateProfileStringW(L"view", L"palette_preset", std::to_wstring(app->palettePreset).c_str(), s);
   WritePrivateProfileStringW(L"view", L"peak_lock", app->peakLockEnabled ? L"1" : L"0", s);
 
   WritePrivateProfileStringW(L"charts", L"zoom", std::to_wstring(app->chartZoom).c_str(), s);
@@ -735,6 +750,7 @@ void LoadUiState(AppState* app) {
   app->waterfallPanPx = std::max(0, IniReadInt(app->uiStatePath, L"view", L"pan", app->waterfallPanPx));
   app->shadingEnabled = IniReadBool(app->uiStatePath, L"view", L"shading", app->shadingEnabled);
   app->colormap3d = std::clamp(IniReadInt(app->uiStatePath, L"view", L"colormap3d", app->colormap3d), 0, 2);
+  app->palettePreset = std::clamp(IniReadInt(app->uiStatePath, L"view", L"palette_preset", app->palettePreset), 0, 3);
   app->peakLockEnabled = IniReadBool(app->uiStatePath, L"view", L"peak_lock", app->peakLockEnabled);
   app->chartZoom = std::clamp(static_cast<double>(IniReadFloat(app->uiStatePath, L"charts", L"zoom", static_cast<float>(app->chartZoom))), 1.0, 8.0);
   app->chartPanPx = IniReadInt(app->uiStatePath, L"charts", L"pan", app->chartPanPx);
@@ -763,6 +779,9 @@ void LoadUiState(AppState* app) {
   }
   if (app->waterfallViewCombo) {
     SendMessageW(app->waterfallViewCombo, CB_SETCURSEL, app->waterfallViewMode, 0);
+  }
+  if (app->palettePresetCombo) {
+    SendMessageW(app->palettePresetCombo, CB_SETCURSEL, app->palettePreset, 0);
   }
   if (app->yawSlider) {
     SendMessageW(app->yawSlider, TBM_SETPOS, TRUE, app->yawDeg);
@@ -887,6 +906,7 @@ void ResetUiSessionState(AppState* app) {
   app->pitchDeg = 24;
   app->shadingEnabled = true;
   app->colormap3d = 0;
+  app->palettePreset = 0;
   app->waterfallFps = 30;
   app->waterfallZoom = 1.0;
   app->waterfallPanPx = 0;
@@ -911,6 +931,7 @@ void ResetUiSessionState(AppState* app) {
   if (app->pitchSlider) SendMessageW(app->pitchSlider, TBM_SETPOS, TRUE, app->pitchDeg);
   if (app->shadingCheck) SendMessageW(app->shadingCheck, BM_SETCHECK, BST_CHECKED, 0);
   if (app->colormapCombo) SendMessageW(app->colormapCombo, CB_SETCURSEL, app->colormap3d, 0);
+  if (app->palettePresetCombo) SendMessageW(app->palettePresetCombo, CB_SETCURSEL, app->palettePreset, 0);
   if (app->waterfallFpsCombo) SendMessageW(app->waterfallFpsCombo, CB_SETCURSEL, 0, 0);
   if (app->agcFloorSlider) SendMessageW(app->agcFloorSlider, TBM_SETPOS, TRUE, static_cast<LPARAM>(app->agcFloorOffsetDb));
   if (app->agcSpanSlider) SendMessageW(app->agcSpanSlider, TBM_SETPOS, TRUE, static_cast<LPARAM>(app->agcSpanDb));
@@ -985,6 +1006,86 @@ bool ToDouble(const std::string& s, double* out) {
   } catch (...) {
     return false;
   }
+}
+
+std::vector<ColorStop> PaletteStopsByPreset(const AppState* app) {
+  const int preset = app ? app->palettePreset : 0;
+  if (preset == 1) {
+    return {
+        {0.00f, 0, 0, 0},   {0.15f, 8, 12, 64},  {0.32f, 12, 60, 168},
+        {0.48f, 16, 138, 168}, {0.62f, 26, 176, 98}, {0.78f, 220, 184, 30},
+        {0.90f, 245, 84, 24}, {1.00f, 255, 248, 232},
+    };
+  }
+  if (preset == 2) {
+    return {
+        {0.00f, 0, 0, 0},   {0.12f, 20, 12, 40}, {0.28f, 52, 42, 128},
+        {0.44f, 84, 96, 206}, {0.58f, 54, 154, 176}, {0.74f, 92, 196, 94},
+        {0.88f, 230, 170, 44}, {1.00f, 255, 250, 236},
+    };
+  }
+  if (preset == 3 && app && !app->customPalette.empty()) {
+    return app->customPalette;
+  }
+  return {
+      {0.00f, 0, 0, 0},       {0.12f, 0, 10, 50},   {0.24f, 0, 45, 140},
+      {0.36f, 0, 120, 190},   {0.50f, 0, 175, 90},  {0.66f, 220, 220, 0},
+      {0.82f, 240, 110, 0},   {0.93f, 255, 40, 20}, {1.00f, 255, 245, 230},
+  };
+}
+
+COLORREF SamplePalette(const std::vector<ColorStop>& stops, float x) {
+  if (stops.empty()) return RGB(0, 0, 0);
+  if (x <= stops.front().p) return RGB(stops.front().r, stops.front().g, stops.front().b);
+  if (x >= stops.back().p) return RGB(stops.back().r, stops.back().g, stops.back().b);
+  for (std::size_t i = 1; i < stops.size(); ++i) {
+    if (x <= stops[i].p) {
+      const auto& a = stops[i - 1];
+      const auto& b = stops[i];
+      const float t = (x - a.p) / std::max(1e-6f, (b.p - a.p));
+      const int r = static_cast<int>(std::round(a.r + t * (b.r - a.r)));
+      const int g = static_cast<int>(std::round(a.g + t * (b.g - a.g)));
+      const int bb = static_cast<int>(std::round(a.b + t * (b.b - a.b)));
+      return RGB(r, g, bb);
+    }
+  }
+  return RGB(stops.back().r, stops.back().g, stops.back().b);
+}
+
+bool LoadCustomPaletteLut(const std::wstring& path, std::vector<ColorStop>* outStops,
+                         std::string* error) {
+  if (!outStops) {
+    if (error) *error = "Internal error: null stops";
+    return false;
+  }
+  std::ifstream in(ToUtf8(path));
+  if (!in) {
+    if (error) *error = "Cannot open LUT file";
+    return false;
+  }
+  std::vector<ColorStop> stops;
+  std::string line;
+  while (std::getline(in, line)) {
+    if (line.empty() || line[0] == '#') continue;
+    std::replace(line.begin(), line.end(), ',', ' ');
+    std::istringstream iss(line);
+    float p = 0.0f;
+    int r = 0, g = 0, b = 0;
+    if (!(iss >> p >> r >> g >> b)) continue;
+    ColorStop s;
+    s.p = std::clamp(p, 0.0f, 1.0f);
+    s.r = std::clamp(r, 0, 255);
+    s.g = std::clamp(g, 0, 255);
+    s.b = std::clamp(b, 0, 255);
+    stops.push_back(s);
+  }
+  if (stops.size() < 2) {
+    if (error) *error = "LUT must contain >=2 rows: p r g b";
+    return false;
+  }
+  std::sort(stops.begin(), stops.end(), [](const ColorStop& a, const ColorStop& b) { return a.p < b.p; });
+  outStops->swap(stops);
+  return true;
 }
 
 bool LoadHistoryCsv(const std::string& path, std::vector<HistoryEntry>* out, std::string* error) {
@@ -1180,37 +1281,14 @@ void EnsureWaterfallPreview(AppState* app) {
   }
   norm.swap(den);
 
-  auto rampHdsdr = [](float x) {
-    x = std::clamp(x, 0.0f, 1.0f);
-    struct Stop {
-      float p;
-      int r;
-      int g;
-      int b;
-    };
-    constexpr Stop k[] = {
-        {0.00f, 0, 0, 0},       {0.12f, 0, 10, 50},   {0.24f, 0, 45, 140},
-        {0.36f, 0, 120, 190},   {0.50f, 0, 175, 90},  {0.66f, 220, 220, 0},
-        {0.82f, 240, 110, 0},   {0.93f, 255, 40, 20}, {1.00f, 255, 245, 230},
-    };
-    for (int i = 1; i < static_cast<int>(std::size(k)); ++i) {
-      if (x <= k[i].p) {
-        const float t = (x - k[i - 1].p) / std::max(1e-6f, (k[i].p - k[i - 1].p));
-        const int r = static_cast<int>(std::round(k[i - 1].r + t * (k[i].r - k[i - 1].r)));
-        const int g = static_cast<int>(std::round(k[i - 1].g + t * (k[i].g - k[i - 1].g)));
-        const int b = static_cast<int>(std::round(k[i - 1].b + t * (k[i].b - k[i - 1].b)));
-        return RGB(r, g, b);
-      }
-    }
-    return RGB(255, 245, 230);
-  };
+  const auto palette = PaletteStopsByPreset(app);
 
   for (int t = 0; t < app->waterfallW; ++t) {
     for (int y = 0; y < app->waterfallH; ++y) {
       const int b = app->waterfallH - y;
       const float v = lv[static_cast<std::size_t>(t * spec.binCount + b)];
       float n = norm[static_cast<std::size_t>(t * spec.binCount + b)];
-      const COLORREF c = rampHdsdr(n);
+      const COLORREF c = SamplePalette(palette, n);
       const std::size_t idx = static_cast<std::size_t>((y * app->waterfallW + t) * 3);
       app->waterfallRgb[idx + 0] = GetBValue(c);
       app->waterfallRgb[idx + 1] = GetGValue(c);
@@ -3393,6 +3471,19 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       SendMessageW(app->waterfallViewCombo, CB_ADDSTRING, 0, (LPARAM)L"2D + 3D");
       SendMessageW(app->waterfallViewCombo, CB_ADDSTRING, 0, (LPARAM)L"3D large");
       SendMessageW(app->waterfallViewCombo, CB_SETCURSEL, 1, 0);
+      CreateWindowW(L"STATIC", L"Palette", WS_CHILD | WS_VISIBLE, m + 540, y + 6, 56, 22, hwnd,
+                    nullptr, nullptr, nullptr);
+      app->palettePresetCombo = CreateWindowW(
+          L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | WS_VSCROLL | CBS_DROPDOWNLIST, m + 600, y,
+          170, 120, hwnd, (HMENU)kIdPalettePresetCombo, nullptr, nullptr);
+      SendMessageW(app->palettePresetCombo, CB_ADDSTRING, 0, (LPARAM)L"HDSDR");
+      SendMessageW(app->palettePresetCombo, CB_ADDSTRING, 0, (LPARAM)L"SDR#");
+      SendMessageW(app->palettePresetCombo, CB_ADDSTRING, 0, (LPARAM)L"CubicSDR");
+      SendMessageW(app->palettePresetCombo, CB_ADDSTRING, 0, (LPARAM)L"Custom LUT");
+      SendMessageW(app->palettePresetCombo, CB_SETCURSEL, app->palettePreset, 0);
+      app->paletteLoadButton = CreateWindowW(L"BUTTON", L"Load LUT", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                             m + 776, y, 92, 30, hwnd, (HMENU)kIdPaletteLoadLut,
+                                             nullptr, nullptr);
       y += 40;
 
       CreateWindowW(L"STATIC", L"Yaw", WS_CHILD | WS_VISIBLE, m, y + 6, 36, 22, hwnd, nullptr,
@@ -3601,6 +3692,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       const HWND controls[] = {app->runButton, app->statusText, app->historyEdit,
                                app->compareEdit, app->inputEdit, app->outputEdit, app->metricsEdit,
                                app->presetCombo, app->calibCombo, app->waterfallViewCombo,
+                               app->palettePresetCombo, app->paletteLoadButton,
                                app->yawSlider, app->pitchSlider, app->shadingCheck,
                                app->colormapCombo, app->waterfallFpsCombo,
                                app->agcFloorSlider, app->agcSpanSlider, app->agcGainSlider,
@@ -3742,6 +3834,41 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             InvalidateRect(app->chartPanel, nullptr, TRUE);
           }
           return 0;
+        case kIdPalettePresetCombo:
+          if (HIWORD(wParam) == CBN_SELCHANGE && app->palettePresetCombo) {
+            const int sel = static_cast<int>(SendMessageW(app->palettePresetCombo, CB_GETCURSEL, 0, 0));
+            app->palettePreset = std::clamp(sel, 0, 3);
+            if (app->palettePreset == 3 && app->customPalette.empty()) {
+              app->palettePreset = 0;
+              SendMessageW(app->palettePresetCombo, CB_SETCURSEL, 0, 0);
+              SetStatus(app, L"Load a LUT file first");
+            }
+            SaveUiState(app);
+            InvalidateWaterfallCache(app);
+            InvalidateRect(app->chartPanel, nullptr, TRUE);
+          }
+          return 0;
+        case kIdPaletteLoadLut: {
+          const auto p = ChooseOpenFile(hwnd, L"Load palette LUT",
+                                        L"Text files (*.txt;*.lut)\0*.txt;*.lut\0All files (*.*)\0*.*\0");
+          if (p.empty()) return 0;
+          std::vector<ColorStop> stops;
+          std::string err;
+          if (!LoadCustomPaletteLut(p, &stops, &err)) {
+            SetStatus(app, L"LUT load failed");
+            MessageBoxW(hwnd, ToWide(err).c_str(), L"Palette LUT", MB_OK | MB_ICONERROR);
+            return 0;
+          }
+          app->customPalette = std::move(stops);
+          app->customPalettePath = p;
+          app->palettePreset = 3;
+          if (app->palettePresetCombo) SendMessageW(app->palettePresetCombo, CB_SETCURSEL, 3, 0);
+          SaveUiState(app);
+          SetStatus(app, L"Custom LUT loaded");
+          InvalidateWaterfallCache(app);
+          InvalidateRect(app->chartPanel, nullptr, TRUE);
+          return 0;
+        }
         case kIdShadingCheck:
           app->shadingEnabled =
               (SendMessageW(app->shadingCheck, BM_GETCHECK, 0, 0) == BST_CHECKED);
