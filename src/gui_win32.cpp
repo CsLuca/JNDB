@@ -213,6 +213,12 @@ struct AppState {
   bool waterfallHoverActive = false;
   POINT waterfallHoverPoint = {0, 0};
   std::wstring waterfallHoverText;
+  bool waterfallReadoutLocked = false;
+  bool waterfallReadoutValid = false;
+  float waterfallReadoutFreqHz = 0.0f;
+  float waterfallReadoutTimeSec = 0.0f;
+  float waterfallReadoutDb = -120.0f;
+  float waterfallReadoutSnrDb = 0.0f;
   bool mouseLeaveArmed = false;
   bool suppressNextResetConfirm = false;
   int baseClientW = 0;
@@ -1866,6 +1872,39 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
   RECT yLab = {plot.left, plot.top - 2, plot.left + 140, plot.top + 16};
   DrawTextW(hdc, L"Frequency (kHz)", -1, &yLab, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
 
+  RECT rp = {rc.right - 250, rc.top + 34, rc.right - 12, rc.top + 168};
+  HBRUSH rbg = CreateSolidBrush(RGB(10, 18, 28));
+  FillRect(hdc, &rp, rbg);
+  DeleteObject(rbg);
+  HPEN rbp = CreatePen(PS_SOLID, 1, RGB(74, 104, 134));
+  auto oldRbp = reinterpret_cast<HPEN>(SelectObject(hdc, rbp));
+  MoveToEx(hdc, rp.left, rp.top, nullptr);
+  LineTo(hdc, rp.right - 1, rp.top);
+  LineTo(hdc, rp.right - 1, rp.bottom - 1);
+  LineTo(hdc, rp.left, rp.bottom - 1);
+  LineTo(hdc, rp.left, rp.top);
+  SelectObject(hdc, oldRbp);
+  DeleteObject(rbp);
+
+  SetTextColor(hdc, RGB(184, 212, 236));
+  RECT rh = {rp.left + 8, rp.top + 4, rp.right - 8, rp.top + 22};
+  DrawTextW(hdc, app->waterfallReadoutLocked ? L"RF Readout [LOCKED]" : L"RF Readout [LIVE]", -1,
+            &rh, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+  std::wstringstream rs;
+  if (app->waterfallReadoutValid) {
+    rs << L"f: " << std::fixed << std::setprecision(3) << (app->waterfallReadoutFreqHz / 1000.0f)
+       << L" kHz\n"
+       << L"t: " << std::fixed << std::setprecision(2) << app->waterfallReadoutTimeSec << L" s\n"
+       << L"dB: " << std::fixed << std::setprecision(1) << app->waterfallReadoutDb << L"\n"
+       << L"SNR~: " << std::fixed << std::setprecision(1) << app->waterfallReadoutSnrDb << L" dB\n"
+       << L"Toggle lock: L";
+  } else {
+    rs << L"f: --\nt: --\ndB: --\nSNR~: --\nToggle lock: L";
+  }
+  RECT rv = {rp.left + 10, rp.top + 26, rp.right - 8, rp.bottom - 8};
+  SetTextColor(hdc, RGB(224, 236, 248));
+  DrawTextW(hdc, rs.str().c_str(), -1, &rv, DT_LEFT | DT_TOP | DT_WORDBREAK);
+
   const float nyqTicks = app && app->previewWav.sampleRate > 0
                              ? 0.5f * static_cast<float>(app->previewWav.sampleRate)
                              : 4000.0f;
@@ -2038,7 +2077,7 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
     }
     RECT hk = {map.left, map.top - 16, map.right, map.top - 1};
     SetTextColor(hdc, RGB(178, 206, 228));
-    DrawTextW(hdc, L"Hotkeys: A show auto, B/C add-clear, D del, N/P nav, 1..9 jump, E/I exp-imp, Ctrl+R reset (Shift=skip prompt)",
+    DrawTextW(hdc, L"Hotkeys: A show auto, B/C add-clear, D del, L lock readout, N/P nav, 1..9 jump, E/I exp-imp, Ctrl+R reset (Shift=skip prompt)",
               -1, &hk,
               DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
   }
@@ -2389,6 +2428,10 @@ struct WaterfallReadout {
   bool ok = false;
   POINT pt = {0, 0};
   std::wstring text;
+  float freqHz = 0.0f;
+  float timeSec = 0.0f;
+  float db = -120.0f;
+  float snrDb = 0.0f;
 };
 
 void DrawTooltip(HDC hdc, const RECT& canvas, POINT anchor, const std::wstring& text) {
@@ -2497,6 +2540,10 @@ WaterfallReadout HitTestWaterfall(const AppState* app, const RECT& rc, POINT mou
   out.ok = true;
   out.pt = POINT{mouse.x, yPix};
   out.text = ss.str();
+  out.freqHz = fHz;
+  out.timeSec = tSec;
+  out.db = db;
+  out.snrDb = snrDb;
   return out;
 }
 
@@ -2694,6 +2741,8 @@ void RefreshWaterfallFromInput(AppState* app) {
   app->bookmarksSec.clear();
   app->bookmarkAuto.clear();
   app->bookmarkConfidence.clear();
+  app->waterfallReadoutLocked = false;
+  app->waterfallReadoutValid = false;
   InvalidateWaterfallCache(app);
   app->waterfallZoom = 1.0;
   app->waterfallPanPx = 0;
@@ -3017,6 +3066,12 @@ LRESULT CALLBACK ChartProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           }
           return 0;
         }
+        if (vk == 'L') {
+          app->waterfallReadoutLocked = !app->waterfallReadoutLocked;
+          SetStatus(app, app->waterfallReadoutLocked ? L"Readout locked [L]" : L"Readout live [L]");
+          InvalidateRect(hwnd, nullptr, TRUE);
+          return 0;
+        }
         if (vk == 'E') {
           SendMessageW(GetParent(hwnd), WM_COMMAND, MAKEWPARAM(kIdBookmarkExport, BN_CLICKED), 0);
           return 0;
@@ -3063,6 +3118,13 @@ LRESULT CALLBACK ChartProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             app->waterfallHoverActive = true;
             app->waterfallHoverPoint = wf.pt;
             app->waterfallHoverText = wf.text;
+            if (!app->waterfallReadoutLocked) {
+              app->waterfallReadoutValid = true;
+              app->waterfallReadoutFreqHz = wf.freqHz;
+              app->waterfallReadoutTimeSec = wf.timeSec;
+              app->waterfallReadoutDb = wf.db;
+              app->waterfallReadoutSnrDb = wf.snrDb;
+            }
             app->hoverActive = false;
           } else {
             app->waterfallHoverActive = false;
