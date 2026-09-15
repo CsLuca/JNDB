@@ -1341,9 +1341,11 @@ void CaptureBaseChildLayout(AppState* app) {
   if (!app || !app->hwnd) return;
   RECT rcClient = {};
   GetClientRect(app->hwnd, &rcClient);
-  app->baseClientW = std::max(1, static_cast<int>(rcClient.right - rcClient.left));
-  app->baseClientH = std::max(1, static_cast<int>(rcClient.bottom - rcClient.top));
+  int baseW = std::max(1, static_cast<int>(rcClient.right - rcClient.left));
+  int baseH = std::max(1, static_cast<int>(rcClient.bottom - rcClient.top));
   app->childLayouts.clear();
+  int maxRight = 0;
+  int maxBottom = 0;
 
   HWND child = GetWindow(app->hwnd, GW_CHILD);
   while (child) {
@@ -1354,8 +1356,12 @@ void CaptureBaseChildLayout(AppState* app) {
     ScreenToClient(app->hwnd, &tl);
     ScreenToClient(app->hwnd, &br);
     app->childLayouts.push_back(AppState::ChildLayout{child, RECT{tl.x, tl.y, br.x, br.y}});
+    maxRight = std::max(maxRight, static_cast<int>(br.x));
+    maxBottom = std::max(maxBottom, static_cast<int>(br.y));
     child = GetWindow(child, GW_HWNDNEXT);
   }
+  app->baseClientW = std::max(baseW, maxRight + 16);
+  app->baseClientH = std::max(baseH, maxBottom + 16);
 }
 
 void ApplyResponsiveLayout(AppState* app) {
