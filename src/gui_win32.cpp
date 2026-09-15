@@ -202,6 +202,9 @@ struct AppState {
   bool waterfallDragging = false;
   int waterfallDragStartX = 0;
   int waterfallPanStartPx = 0;
+  bool waterfallZoomBoxActive = false;
+  POINT waterfallZoomBoxStart = {0, 0};
+  POINT waterfallZoomBoxEnd = {0, 0};
   double chartZoom = 1.0;
   int chartPanPx = 0;
   bool dragging = false;
@@ -1238,6 +1241,40 @@ RECT GetWaterfallMapRect(const RECT& clientRc) {
   return map;
 }
 
+void ApplyWaterfallZoomBox(AppState* app, const RECT& plot, POINT p0, POINT p1) {
+  if (!app || app->waterfallW <= 0) {
+    return;
+  }
+  const int x0 = std::clamp(static_cast<int>(std::min(p0.x, p1.x)), static_cast<int>(plot.left),
+                            static_cast<int>(plot.right - 1));
+  const int x1 = std::clamp(static_cast<int>(std::max(p0.x, p1.x)), static_cast<int>(plot.left + 1),
+                            static_cast<int>(plot.right));
+  const int selPx = std::max(2, x1 - x0);
+  const int plotW = std::max<int>(1, static_cast<int>(plot.right - plot.left));
+  if (selPx < 18) {
+    return;
+  }
+
+  const double currentZoom = std::clamp(app->waterfallZoom, 1.0, 8.0);
+  const int visCur = std::max(60, static_cast<int>(std::round(static_cast<double>(std::max(1, app->waterfallW)) /
+                                                               currentZoom)));
+  const int panCur = std::clamp(app->waterfallPanPx, 0, std::max(0, app->waterfallW - visCur));
+  const double startN = static_cast<double>(x0 - plot.left) / static_cast<double>(plotW);
+  const double endN = static_cast<double>(x1 - plot.left) / static_cast<double>(plotW);
+  const int col0 = panCur + static_cast<int>(std::round(startN * visCur));
+  const int col1 = panCur + static_cast<int>(std::round(endN * visCur));
+  const int selCols = std::max(2, col1 - col0);
+
+  const double targetZoom = std::clamp(static_cast<double>(app->waterfallW) / static_cast<double>(selCols), 1.0,
+                                       8.0);
+  app->waterfallZoom = targetZoom;
+  const int visNew = std::max(60, static_cast<int>(std::round(static_cast<double>(std::max(1, app->waterfallW)) /
+                                                               targetZoom)));
+  const int centerCol = (col0 + col1) / 2;
+  const int maxPan = std::max(0, app->waterfallW - visNew);
+  app->waterfallPanPx = std::clamp(centerCol - visNew / 2, 0, maxPan);
+}
+
 UINT WaterfallTimerMs(const AppState* app) {
   if (!app) {
     return 33;
@@ -2077,7 +2114,7 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
     }
     RECT hk = {map.left, map.top - 16, map.right, map.top - 1};
     SetTextColor(hdc, RGB(178, 206, 228));
-    DrawTextW(hdc, L"Hotkeys: A show auto, B/C add-clear, D del, L lock readout, N/P nav, 1..9 jump, E/I exp-imp, Ctrl+R reset (Shift=skip prompt)",
+    DrawTextW(hdc, L"Hotkeys: A show auto, B/C add-clear, D del, L lock readout, N/P nav, 1..9 jump, E/I exp-imp, Shift+Drag zoom box, Ctrl+R reset (Shift=skip prompt)",
               -1, &hk,
               DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
   }
@@ -2300,6 +2337,45 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
     }
     SelectObject(hdc, oldT);
     DeleteObject(trk);
+  }
+
+  if (app->waterfallZoomBoxActive) {
+    RECT zb = {std::min(app->waterfallZoomBoxStart.x, app->waterfallZoomBoxEnd.x),
+               std::min(app->waterfallZoomBoxStart.y, app->waterfallZoomBoxEnd.y),
+               std::max(app->waterfallZoomBoxStart.x, app->waterfallZoomBoxEnd.x),
+               std::max(app->waterfallZoomBoxStart.y, app->waterfallZoomBoxEnd.y)};
+    zb.left = std::clamp(static_cast<int>(zb.left), static_cast<int>(plot.left),
+                         static_cast<int>(plot.right - 1));
+    zb.right = std::clamp(static_cast<int>(zb.right), static_cast<int>(plot.left + 1),
+                          static_cast<int>(plot.right));
+    zb.top = std::clamp(static_cast<int>(zb.top), static_cast<int>(plot.top),
+                        static_cast<int>(plot.bottom - 1));
+    zb.bottom = std::clamp(static_cast<int>(zb.bottom), static_cast<int>(plot.top + 1),
+                           static_cast<int>(plot.bottom));
+    HBRUSH zbb = CreateSolidBrush(RGB(38, 68, 94));
+    BLENDFUNCTION bf = {AC_SRC_OVER, 0, 70, 0};
+    HDC memdc = CreateCompatibleDC(hdc);
+    const int zbW = std::max(1, static_cast<int>(zb.right - zb.left));
+    const int zbH = std::max(1, static_cast<int>(zb.bottom - zb.top));
+    HBITMAP bmp = CreateCompatibleBitmap(hdc, zbW, zbH);
+    auto oldBmp = reinterpret_cast<HBITMAP>(SelectObject(memdc, bmp));
+    RECT fr = {0, 0, zbW, zbH};
+    FillRect(memdc, &fr, zbb);
+    AlphaBlend(hdc, zb.left, zb.top, fr.right, fr.bottom, memdc, 0, 0, fr.right, fr.bottom, bf);
+    SelectObject(memdc, oldBmp);
+    DeleteObject(bmp);
+    DeleteDC(memdc);
+    DeleteObject(zbb);
+
+    HPEN zpen = CreatePen(PS_DASH, 1, RGB(164, 212, 255));
+    auto oldZp = reinterpret_cast<HPEN>(SelectObject(hdc, zpen));
+    MoveToEx(hdc, zb.left, zb.top, nullptr);
+    LineTo(hdc, zb.right - 1, zb.top);
+    LineTo(hdc, zb.right - 1, zb.bottom - 1);
+    LineTo(hdc, zb.left, zb.bottom - 1);
+    LineTo(hdc, zb.left, zb.top);
+    SelectObject(hdc, oldZp);
+    DeleteObject(zpen);
   }
 }
 
@@ -2985,6 +3061,13 @@ LRESULT CALLBACK ChartProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           InvalidateRect(hwnd, nullptr, TRUE);
           return 0;
         }
+        if (PtInRect(&wfPlot, p) && (GetKeyState(VK_SHIFT) & 0x8000)) {
+          app->waterfallZoomBoxActive = true;
+          app->waterfallZoomBoxStart = p;
+          app->waterfallZoomBoxEnd = p;
+          SetCapture(hwnd);
+          return 0;
+        }
         if (PtInRect(&wfPlot, p) || PtInRect(&wfMap, p)) {
           app->waterfallDragging = true;
           app->waterfallDragStartX = p.x;
@@ -3095,7 +3178,12 @@ LRESULT CALLBACK ChartProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           app->mouseLeaveArmed = true;
         }
         const POINT p = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
-        if (app->waterfallDragging) {
+        if (app->waterfallZoomBoxActive) {
+          app->waterfallZoomBoxEnd = p;
+          app->hoverActive = false;
+          app->waterfallHoverActive = false;
+          InvalidateRect(hwnd, nullptr, TRUE);
+        } else if (app->waterfallDragging) {
           const int dx = app->waterfallDragStartX - p.x;
           const int vis = std::max(60, static_cast<int>(std::round(
                                        static_cast<double>(std::max(1, app->waterfallW)) /
@@ -3142,7 +3230,16 @@ LRESULT CALLBACK ChartProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       }
       return 0;
     case WM_LBUTTONUP:
-      if (app && (app->dragging || app->waterfallDragging)) {
+      if (app && app->waterfallZoomBoxActive) {
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        const RECT wfPlot = GetWaterfallPlotRect(rc);
+        ApplyWaterfallZoomBox(app, wfPlot, app->waterfallZoomBoxStart, app->waterfallZoomBoxEnd);
+        app->waterfallZoomBoxActive = false;
+        SaveUiState(app);
+        InvalidateRect(hwnd, nullptr, TRUE);
+        ReleaseCapture();
+      } else if (app && (app->dragging || app->waterfallDragging)) {
         app->dragging = false;
         app->waterfallDragging = false;
         ReleaseCapture();
