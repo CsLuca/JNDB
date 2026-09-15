@@ -124,6 +124,10 @@ constexpr int kIdHudPresetDxWeak = 1089;
 constexpr int kIdHudPresetQrmHeavy = 1090;
 constexpr int kIdHudPresetSplit = 1091;
 constexpr int kIdHudPresetCombo = 1092;
+constexpr int kIdTrustRankingCheck = 1093;
+constexpr int kIdExplainabilityCheck = 1094;
+constexpr int kIdDriftHistogramCheck = 1095;
+constexpr int kIdRegimeTimelineCheck = 1096;
 
 constexpr UINT kMsgProgress = WM_APP + 1;
 constexpr UINT kMsgDone = WM_APP + 2;
@@ -223,6 +227,10 @@ struct AppState {
   HWND trackSparkbarsCheck = nullptr;
   HWND autoClutterCheck = nullptr;
   HWND hudPresetCombo = nullptr;
+  HWND trustRankingCheck = nullptr;
+  HWND explainabilityCheck = nullptr;
+  HWND driftHistogramCheck = nullptr;
+  HWND regimeTimelineCheck = nullptr;
   HWND fftPreviewCombo = nullptr;
   HWND autoBookmarkCheck = nullptr;
   HWND autoBookmarkConfSlider = nullptr;
@@ -309,6 +317,10 @@ struct AppState {
   bool showTrackSparkbars = true;
   bool enableAutoClutterOpacity = true;
   int hudPresetMode = 0;  // 0 ID Fast, 1 DX Weak, 2 QRM Heavy, 3 Split
+  bool showTrustRankingPanel = true;
+  bool showExplainabilityTooltip = true;
+  bool showDriftHistogram = true;
+  bool showRegimeTimeline = true;
   bool autoFocusEnabled = true;
   float autoFocusStrength = 0.28f;
   float agcFloorOffsetDb = -3.0f;
@@ -987,6 +999,10 @@ void SaveUiState(AppState* app) {
   WritePrivateProfileStringW(L"view", L"track_sparkbars", app->showTrackSparkbars ? L"1" : L"0", s);
   WritePrivateProfileStringW(L"view", L"auto_clutter", app->enableAutoClutterOpacity ? L"1" : L"0", s);
   WritePrivateProfileStringW(L"view", L"hud_preset_mode", std::to_wstring(app->hudPresetMode).c_str(), s);
+  WritePrivateProfileStringW(L"view", L"trust_ranking", app->showTrustRankingPanel ? L"1" : L"0", s);
+  WritePrivateProfileStringW(L"view", L"explainability", app->showExplainabilityTooltip ? L"1" : L"0", s);
+  WritePrivateProfileStringW(L"view", L"drift_histogram", app->showDriftHistogram ? L"1" : L"0", s);
+  WritePrivateProfileStringW(L"view", L"regime_timeline", app->showRegimeTimeline ? L"1" : L"0", s);
   WritePrivateProfileStringW(L"view", L"frozen", app->waterfallFrozen ? L"1" : L"0", s);
   WritePrivateProfileStringW(L"view", L"freeze_col", std::to_wstring(app->waterfallFreezeCenterCol).c_str(), s);
   WritePrivateProfileStringW(L"view", L"zoom", std::to_wstring(app->waterfallZoom).c_str(), s);
@@ -1072,6 +1088,10 @@ void LoadUiState(AppState* app) {
   app->showTrackSparkbars = IniReadBool(app->uiStatePath, L"view", L"track_sparkbars", app->showTrackSparkbars);
   app->enableAutoClutterOpacity = IniReadBool(app->uiStatePath, L"view", L"auto_clutter", app->enableAutoClutterOpacity);
   app->hudPresetMode = std::clamp(IniReadInt(app->uiStatePath, L"view", L"hud_preset_mode", app->hudPresetMode), 0, 3);
+  app->showTrustRankingPanel = IniReadBool(app->uiStatePath, L"view", L"trust_ranking", app->showTrustRankingPanel);
+  app->showExplainabilityTooltip = IniReadBool(app->uiStatePath, L"view", L"explainability", app->showExplainabilityTooltip);
+  app->showDriftHistogram = IniReadBool(app->uiStatePath, L"view", L"drift_histogram", app->showDriftHistogram);
+  app->showRegimeTimeline = IniReadBool(app->uiStatePath, L"view", L"regime_timeline", app->showRegimeTimeline);
   app->waterfallFrozen = IniReadBool(app->uiStatePath, L"view", L"frozen", app->waterfallFrozen);
   app->waterfallFreezeCenterCol = IniReadInt(app->uiStatePath, L"view", L"freeze_col", app->waterfallFreezeCenterCol);
   app->waterfallZoom = std::clamp(static_cast<double>(IniReadFloat(app->uiStatePath, L"view", L"zoom", static_cast<float>(app->waterfallZoom))), 1.0, 8.0);
@@ -1223,6 +1243,22 @@ void LoadUiState(AppState* app) {
   }
   if (app->hudPresetCombo) {
     SendMessageW(app->hudPresetCombo, CB_SETCURSEL, app->hudPresetMode, 0);
+  }
+  if (app->trustRankingCheck) {
+    SendMessageW(app->trustRankingCheck, BM_SETCHECK,
+                 app->showTrustRankingPanel ? BST_CHECKED : BST_UNCHECKED, 0);
+  }
+  if (app->explainabilityCheck) {
+    SendMessageW(app->explainabilityCheck, BM_SETCHECK,
+                 app->showExplainabilityTooltip ? BST_CHECKED : BST_UNCHECKED, 0);
+  }
+  if (app->driftHistogramCheck) {
+    SendMessageW(app->driftHistogramCheck, BM_SETCHECK,
+                 app->showDriftHistogram ? BST_CHECKED : BST_UNCHECKED, 0);
+  }
+  if (app->regimeTimelineCheck) {
+    SendMessageW(app->regimeTimelineCheck, BM_SETCHECK,
+                 app->showRegimeTimeline ? BST_CHECKED : BST_UNCHECKED, 0);
   }
   UpdateWaterfallToggleButtons(app);
   UpdateFreezeButton(app);
@@ -1487,6 +1523,10 @@ void ResetUiSessionState(AppState* app) {
   app->showTrackSparkbars = true;
   app->enableAutoClutterOpacity = true;
   app->hudPresetMode = 0;
+  app->showTrustRankingPanel = true;
+  app->showExplainabilityTooltip = true;
+  app->showDriftHistogram = true;
+  app->showRegimeTimeline = true;
   app->waterfallZoom = 1.0;
   app->waterfallPanPx = 0;
   app->waterfallFrozen = false;
@@ -1552,6 +1592,10 @@ void ResetUiSessionState(AppState* app) {
   if (app->trackSparkbarsCheck) SendMessageW(app->trackSparkbarsCheck, BM_SETCHECK, BST_CHECKED, 0);
   if (app->autoClutterCheck) SendMessageW(app->autoClutterCheck, BM_SETCHECK, BST_CHECKED, 0);
   if (app->hudPresetCombo) SendMessageW(app->hudPresetCombo, CB_SETCURSEL, app->hudPresetMode, 0);
+  if (app->trustRankingCheck) SendMessageW(app->trustRankingCheck, BM_SETCHECK, BST_CHECKED, 0);
+  if (app->explainabilityCheck) SendMessageW(app->explainabilityCheck, BM_SETCHECK, BST_CHECKED, 0);
+  if (app->driftHistogramCheck) SendMessageW(app->driftHistogramCheck, BM_SETCHECK, BST_CHECKED, 0);
+  if (app->regimeTimelineCheck) SendMessageW(app->regimeTimelineCheck, BM_SETCHECK, BST_CHECKED, 0);
   UpdateWaterfallToggleButtons(app);
   UpdateFreezeButton(app);
   if (app->agcFloorSlider) SendMessageW(app->agcFloorSlider, TBM_SETPOS, TRUE, static_cast<LPARAM>(app->agcFloorOffsetDb));
@@ -3884,7 +3928,7 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
     }
 
     // Explainability tooltip (why this track).
-    if (app->selectedTrackId >= 0) {
+    if (app->showExplainabilityTooltip && app->selectedTrackId >= 0) {
       const ndb::DecodeResult* sr = nullptr;
       float best = -1.0f;
       for (const auto& r : app->overlayRows) {
@@ -4365,29 +4409,31 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
       SetTextColor(hdc, RGB(255, 196, 120));
       DrawTextW(hdc, bss.str().c_str(), -1, &br, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
     }
-    // Noise regime timeline (quiet/impulsive/birdie/sweep).
-    RECT nt = {map.left, map.top - 30, std::min(map.right, map.left + 360), map.top - 18};
-    HBRUSH nbg = CreateSolidBrush(RGB(8, 14, 22));
-    FillRect(hdc, &nt, nbg);
-    DeleteObject(nbg);
-    float rv[4] = {app->qrmWidebandScore * 0.5f,
-                   app->qrmImpulseScore,
-                   app->qrmBirdieScore,
-                   app->qrmSweepScore};
-    COLORREF rc[4] = {RGB(128, 186, 228), RGB(236, 170, 156), RGB(240, 206, 132), RGB(170, 232, 186)};
-    int x0 = nt.left + 4;
-    for (int i = 0; i < 4; ++i) {
-      const int w = static_cast<int>(std::round(std::clamp(rv[i], 0.0f, 1.0f) * 82.0f));
-      RECT b = {x0, nt.top + 2, x0 + w, nt.bottom - 2};
-      HBRUSH bb = CreateSolidBrush(rc[i]);
-      FillRect(hdc, &b, bb);
-      DeleteObject(bb);
-      x0 += 88;
+    if (app->showRegimeTimeline) {
+      // Noise regime timeline (quiet/impulsive/birdie/sweep).
+      RECT nt = {map.left, map.top - 30, std::min(map.right, map.left + 360), map.top - 18};
+      HBRUSH nbg = CreateSolidBrush(RGB(8, 14, 22));
+      FillRect(hdc, &nt, nbg);
+      DeleteObject(nbg);
+      float rv[4] = {app->qrmWidebandScore * 0.5f,
+                     app->qrmImpulseScore,
+                     app->qrmBirdieScore,
+                     app->qrmSweepScore};
+      COLORREF rc[4] = {RGB(128, 186, 228), RGB(236, 170, 156), RGB(240, 206, 132), RGB(170, 232, 186)};
+      int x0 = nt.left + 4;
+      for (int i = 0; i < 4; ++i) {
+        const int w = static_cast<int>(std::round(std::clamp(rv[i], 0.0f, 1.0f) * 82.0f));
+        RECT b = {x0, nt.top + 2, x0 + w, nt.bottom - 2};
+        HBRUSH bb = CreateSolidBrush(rc[i]);
+        FillRect(hdc, &b, bb);
+        DeleteObject(bb);
+        x0 += 88;
+      }
+      RECT nl = {nt.left + 4, nt.top - 12, nt.right, nt.top};
+      SetTextColor(hdc, RGB(170, 210, 232));
+      DrawTextW(hdc, L"Noise regime: quiet | impulsive | birdie | sweep", -1, &nl,
+                DT_LEFT | DT_SINGLELINE | DT_VCENTER);
     }
-    RECT nl = {nt.left + 4, nt.top - 12, nt.right, nt.top};
-    SetTextColor(hdc, RGB(170, 210, 232));
-    DrawTextW(hdc, L"Noise regime: quiet | impulsive | birdie | sweep", -1, &nl,
-              DT_LEFT | DT_SINGLELINE | DT_VCENTER);
     RECT hk = {map.left, map.top - 16, map.right, map.top - 1};
     SetTextColor(hdc, RGB(178, 206, 228));
     DrawTextW(hdc, L"Hotkeys: A show auto, B/C add-clear, D del, F freeze, G dotdash, X diff, H coh, J halo, K cadence, Y heat, U lanes, L lock readout, M manual notch, O ridge, V wide, F6/F7/F8 visual presets, Ctrl+F6..F9 HUD presets, Ctrl+Click set B cursor, N/P nav, 1..9 jump, E/I exp-imp, Shift+Drag zoom box, Ctrl+R reset (Shift=skip prompt)",
@@ -4920,7 +4966,7 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
 
     // Track trust ranking panel.
     RECT rk = {plot.left + 8, plot.top + 138, std::min(plot.left + 210, plot.right - 250), plot.top + 204};
-    if (rk.right - rk.left >= 140 && !top.empty()) {
+    if (app->showTrustRankingPanel && rk.right - rk.left >= 140 && !top.empty()) {
       HBRUSH rbg = CreateSolidBrush(RGB(8, 14, 22));
       FillRect(hdc, &rk, rbg);
       DeleteObject(rbg);
@@ -5436,7 +5482,7 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
 
         // Frequency drift histogram (Hz/s) for focus track.
         RECT dh = {pd.left, pd.bottom + 2, pd.right, pd.bottom + 34};
-        if (dh.bottom < plot.bottom - 4) {
+        if (app->showDriftHistogram && dh.bottom < plot.bottom - 4) {
           HBRUSH dbg = CreateSolidBrush(RGB(8, 14, 22));
           FillRect(hdc, &dh, dbg);
           DeleteObject(dbg);
@@ -7266,9 +7312,33 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       SendMessageW(app->hudPresetCombo, CB_ADDSTRING, 0, (LPARAM)L"QRM Heavy");
       SendMessageW(app->hudPresetCombo, CB_ADDSTRING, 0, (LPARAM)L"Split/Co-channel");
       SendMessageW(app->hudPresetCombo, CB_SETCURSEL, app->hudPresetMode, 0);
+      app->trustRankingCheck = CreateWindowW(
+          L"BUTTON", L"Trust",
+          WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, m + 1702, y + 100, 54, 22, hwnd,
+          (HMENU)kIdTrustRankingCheck, nullptr, nullptr);
+      SendMessageW(app->trustRankingCheck, BM_SETCHECK,
+                   app->showTrustRankingPanel ? BST_CHECKED : BST_UNCHECKED, 0);
+      app->explainabilityCheck = CreateWindowW(
+          L"BUTTON", L"Explain",
+          WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, m + 1758, y + 100, 66, 22, hwnd,
+          (HMENU)kIdExplainabilityCheck, nullptr, nullptr);
+      SendMessageW(app->explainabilityCheck, BM_SETCHECK,
+                   app->showExplainabilityTooltip ? BST_CHECKED : BST_UNCHECKED, 0);
+      app->driftHistogramCheck = CreateWindowW(
+          L"BUTTON", L"DriftH",
+          WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, m + 1826, y + 100, 64, 22, hwnd,
+          (HMENU)kIdDriftHistogramCheck, nullptr, nullptr);
+      SendMessageW(app->driftHistogramCheck, BM_SETCHECK,
+                   app->showDriftHistogram ? BST_CHECKED : BST_UNCHECKED, 0);
+      app->regimeTimelineCheck = CreateWindowW(
+          L"BUTTON", L"Regime",
+          WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, m + 1702, y + 122, 66, 22, hwnd,
+          (HMENU)kIdRegimeTimelineCheck, nullptr, nullptr);
+      SendMessageW(app->regimeTimelineCheck, BM_SETCHECK,
+                   app->showRegimeTimeline ? BST_CHECKED : BST_UNCHECKED, 0);
       UpdateWaterfallToggleButtons(app);
       UpdateFreezeButton(app);
-      y += 124;
+      y += 146;
 
       CreateWindowW(L"STATIC", L"Pan Avg Alpha", WS_CHILD | WS_VISIBLE, m + 1092, y + 6, 92, 22,
                     hwnd, nullptr, nullptr, nullptr);
@@ -7945,6 +8015,34 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
               (SendMessageW(app->autoClutterCheck, BM_GETCHECK, 0, 0) == BST_CHECKED);
           SaveUiState(app);
           SetStatus(app, app->enableAutoClutterOpacity ? L"Auto-clutter ON" : L"Auto-clutter OFF");
+          InvalidateRect(app->chartPanel, nullptr, TRUE);
+          return 0;
+        case kIdTrustRankingCheck:
+          app->showTrustRankingPanel =
+              (SendMessageW(app->trustRankingCheck, BM_GETCHECK, 0, 0) == BST_CHECKED);
+          SaveUiState(app);
+          SetStatus(app, app->showTrustRankingPanel ? L"Track trust panel ON" : L"Track trust panel OFF");
+          InvalidateRect(app->chartPanel, nullptr, TRUE);
+          return 0;
+        case kIdExplainabilityCheck:
+          app->showExplainabilityTooltip =
+              (SendMessageW(app->explainabilityCheck, BM_GETCHECK, 0, 0) == BST_CHECKED);
+          SaveUiState(app);
+          SetStatus(app, app->showExplainabilityTooltip ? L"Explainability ON" : L"Explainability OFF");
+          InvalidateRect(app->chartPanel, nullptr, TRUE);
+          return 0;
+        case kIdDriftHistogramCheck:
+          app->showDriftHistogram =
+              (SendMessageW(app->driftHistogramCheck, BM_GETCHECK, 0, 0) == BST_CHECKED);
+          SaveUiState(app);
+          SetStatus(app, app->showDriftHistogram ? L"Drift histogram ON" : L"Drift histogram OFF");
+          InvalidateRect(app->chartPanel, nullptr, TRUE);
+          return 0;
+        case kIdRegimeTimelineCheck:
+          app->showRegimeTimeline =
+              (SendMessageW(app->regimeTimelineCheck, BM_GETCHECK, 0, 0) == BST_CHECKED);
+          SaveUiState(app);
+          SetStatus(app, app->showRegimeTimeline ? L"Regime timeline ON" : L"Regime timeline OFF");
           InvalidateRect(app->chartPanel, nullptr, TRUE);
           return 0;
         case kIdWideViewButton:
