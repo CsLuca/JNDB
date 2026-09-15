@@ -226,6 +226,7 @@ struct AppState {
   int waterfallPersistenceMode = 1;  // 0 Fast, 1 Medium, 2 Long
   bool showWideView = true;
   bool showRidgeOverlay = true;
+  bool autoFocusEnabled = true;
   float agcFloorOffsetDb = -3.0f;
   float agcSpanDb = 22.0f;
   float agcGain = 1.35f;
@@ -271,6 +272,8 @@ struct AppState {
   float waterfallReadoutTimeSec = 0.0f;
   float waterfallReadoutDb = -120.0f;
   float waterfallReadoutSnrDb = 0.0f;
+  float waterfallReadoutNoiseFloorDb = -120.0f;
+  float waterfallReadoutDeltaFreqHz = 0.0f;
   bool mouseLeaveArmed = false;
   bool suppressNextResetConfirm = false;
   int baseClientW = 0;
@@ -1417,6 +1420,35 @@ void EnsureWaterfallPreview(AppState* app) {
     }
   }
 
+  // Per-column background removal: estimate and subtract local floor over time.
+  std::vector<float> colFloor(static_cast<std::size_t>(spec.frameCount), 0.0f);
+  for (int t = 0; t < spec.frameCount; ++t) {
+    std::vector<float> col;
+    col.reserve(static_cast<std::size_t>(std::max(1, spec.binCount - 1)));
+    for (int b = 1; b < spec.binCount; ++b) {
+      col.push_back(lv[static_cast<std::size_t>(t * spec.binCount + b)]);
+    }
+    const std::size_t qi = static_cast<std::size_t>(0.22f * static_cast<float>(std::max<std::size_t>(1, col.size() - 1)));
+    std::nth_element(col.begin(), col.begin() + static_cast<std::ptrdiff_t>(qi), col.end());
+    colFloor[static_cast<std::size_t>(t)] = col[qi];
+  }
+  for (int t = 1; t < spec.frameCount; ++t) {
+    colFloor[static_cast<std::size_t>(t)] =
+        0.88f * colFloor[static_cast<std::size_t>(t - 1)] +
+        0.12f * colFloor[static_cast<std::size_t>(t)];
+  }
+
+  std::vector<float> lvAdj = lv;
+  std::vector<float> dbAdjVals;
+  dbAdjVals.reserve(static_cast<std::size_t>(spec.frameCount * std::max(1, spec.binCount - 1)));
+  for (int t = 0; t < spec.frameCount; ++t) {
+    for (int b = 1; b < spec.binCount; ++b) {
+      const std::size_t idx = static_cast<std::size_t>(t * spec.binCount + b);
+      lvAdj[idx] = lv[idx] - colFloor[static_cast<std::size_t>(t)];
+      dbAdjVals.push_back(lvAdj[idx]);
+    }
+  }
+
   const int tailN = std::min(spec.frameCount, 12);
   for (int bi = 1; bi < spec.binCount; ++bi) {
     float inst = lv[static_cast<std::size_t>((spec.frameCount - 1) * spec.binCount + bi)];
@@ -1447,12 +1479,12 @@ void EnsureWaterfallPreview(AppState* app) {
     return vals[idx];
   };
 
-  float floorDb = percentile(dbVals, 0.20f) + app->agcFloorOffsetDb;
+  float floorDb = percentile(dbAdjVals, 0.20f) + app->agcFloorOffsetDb;
   float spanDb = std::clamp(app->agcSpanDb, 8.0f, 80.0f);
   if (app->agcAutoContrast) {
-    const float p10 = percentile(dbVals, 0.10f);
-    const float p85 = percentile(dbVals, 0.85f);
-    const float p995 = percentile(dbVals, 0.995f);
+    const float p10 = percentile(dbAdjVals, 0.10f);
+    const float p85 = percentile(dbAdjVals, 0.85f);
+    const float p995 = percentile(dbAdjVals, 0.995f);
     floorDb = 0.65f * floorDb + 0.35f * p10;
     const float autoSpan = std::clamp((p995 - p85) + 24.0f, 10.0f, 56.0f);
     spanDb = 0.55f * spanDb + 0.45f * autoSpan;
@@ -1464,9 +1496,19 @@ void EnsureWaterfallPreview(AppState* app) {
   std::vector<float> norm(static_cast<std::size_t>(spec.frameCount * spec.binCount), 0.0f);
   for (int t = 0; t < spec.frameCount; ++t) {
     for (int b = 1; b < spec.binCount; ++b) {
-      float n = (lv[static_cast<std::size_t>(t * spec.binCount + b)] - floorDb) /
+      float n = (lvAdj[static_cast<std::size_t>(t * spec.binCount + b)] - floorDb) /
                 std::max(1.0f, (ceilDb - floorDb));
-      n = std::clamp((n - 0.015f) * app->agcGain, 0.0f, 1.0f);
+      n = std::clamp(n, 0.0f, 1.0f);
+      // Dual-range split tone map: more detail in weak region, softer high compression.
+      const float split = 0.58f;
+      if (n < split) {
+        const float x = n / std::max(1e-6f, split);
+        n = split * std::pow(std::clamp(x, 0.0f, 1.0f), 0.78f);
+      } else {
+        const float x = (n - split) / std::max(1e-6f, (1.0f - split));
+        n = split + (1.0f - split) * std::pow(std::clamp(x, 0.0f, 1.0f), 1.28f);
+      }
+      n = std::clamp((n - 0.010f) * app->agcGain, 0.0f, 1.0f);
       n = std::pow(std::clamp(n, 0.0f, 1.0f), std::clamp(app->agcGamma, 0.40f, 1.60f));
       norm[static_cast<std::size_t>(t * spec.binCount + b)] = n;
     }
@@ -2515,6 +2557,92 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
     DrawTextW(hdc, L"Wide view", -1, &wt, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
   }
 
+  // Weak Signal Lens: local contrast/ridge boost around cursor or peak-lock.
+  {
+    bool hasAnchor = false;
+    int ax = 0;
+    int ay = 0;
+    if (app->waterfallHoverActive && PtInRect(&plot, app->waterfallHoverPoint)) {
+      ax = app->waterfallHoverPoint.x;
+      ay = app->waterfallHoverPoint.y;
+      hasAnchor = true;
+    } else if (app->peakLockEnabled && app->peakLockBin >= 0) {
+      const int lx = plot.left + ((plot.right - plot.left) * std::clamp(app->peakLockBin, 0, std::max(0, app->waterfallH - 1))) /
+                                   std::max(1, app->waterfallH - 1);
+      ax = lx;
+      ay = (plot.top + plot.bottom) / 2;
+      hasAnchor = true;
+    }
+    if (hasAnchor) {
+      const int lensW = 136;
+      const int lensH = 96;
+      RECT lens = {std::max(static_cast<int>(plot.left) + 8,
+                            std::min(static_cast<int>(plot.right) - lensW - 8, ax + 18)),
+                   std::max(static_cast<int>(plot.top) + 8,
+                            std::min(static_cast<int>(plot.bottom) - lensH - 8, ay - lensH / 2)),
+                   0,
+                   0};
+      lens.right = lens.left + lensW;
+      lens.bottom = lens.top + lensH;
+
+      const int sw = 78;
+      const int sh = 56;
+      const int srcCxRaw = srcX +
+                           (static_cast<int>(ax - static_cast<int>(plot.left)) * std::max(1, srcW - 1)) /
+                               std::max<int>(1, static_cast<int>(plot.right - plot.left - 1));
+      const int srcCyRaw =
+          (static_cast<int>(ay - static_cast<int>(plot.top)) * std::max(1, app->waterfallH - 1)) /
+          std::max<int>(1, static_cast<int>(plot.bottom - plot.top - 1));
+      const int srcCx = std::clamp(srcCxRaw, 0, app->waterfallW - 1);
+      const int srcCy = std::clamp(srcCyRaw, 0, app->waterfallH - 1);
+      const int sx0 = std::clamp(srcCx - sw / 2, 0, std::max(0, app->waterfallW - sw));
+      const int sy0 = std::clamp(srcCy - sh / 2, 0, std::max(0, app->waterfallH - sh));
+      std::vector<std::uint8_t> lensRgb(static_cast<std::size_t>(sw * sh * 3), 0);
+      for (int yy = 0; yy < sh; ++yy) {
+        for (int xx = 0; xx < sw; ++xx) {
+          const int sx = sx0 + xx;
+          const int sy = sy0 + yy;
+          const std::size_t sidx = static_cast<std::size_t>((sy * app->waterfallW + sx) * 3);
+          const std::size_t didx = static_cast<std::size_t>((yy * sw + xx) * 3);
+          float r = app->waterfallRgb[sidx + 2] / 255.0f;
+          float g = app->waterfallRgb[sidx + 1] / 255.0f;
+          float b = app->waterfallRgb[sidx + 0] / 255.0f;
+          const float yLum = 0.2126f * r + 0.7152f * g + 0.0722f * b;
+          float boost = std::pow(std::clamp(yLum, 0.0f, 1.0f), 0.72f);
+          boost = std::clamp((boost - 0.08f) * 1.25f, 0.0f, 1.0f);
+          if (!app->waterfallRidgeMask.empty() &&
+              app->waterfallRidgeMask[static_cast<std::size_t>(sy * app->waterfallW + sx)] != 0) {
+            boost = std::min(1.0f, boost + 0.22f);
+          }
+          lensRgb[didx + 2] = static_cast<std::uint8_t>(std::clamp(boost * 255.0f, 0.0f, 255.0f));
+          lensRgb[didx + 1] = static_cast<std::uint8_t>(std::clamp(boost * 235.0f, 0.0f, 255.0f));
+          lensRgb[didx + 0] = static_cast<std::uint8_t>(std::clamp(boost * 170.0f, 0.0f, 255.0f));
+        }
+      }
+      BITMAPINFO lbi = {};
+      lbi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+      lbi.bmiHeader.biWidth = sw;
+      lbi.bmiHeader.biHeight = -sh;
+      lbi.bmiHeader.biPlanes = 1;
+      lbi.bmiHeader.biBitCount = 24;
+      lbi.bmiHeader.biCompression = BI_RGB;
+      StretchDIBits(hdc, lens.left, lens.top, lens.right - lens.left, lens.bottom - lens.top,
+                    0, 0, sw, sh, lensRgb.data(), &lbi, DIB_RGB_COLORS, SRCCOPY);
+      HPEN lp = CreatePen(PS_SOLID, 1, RGB(132, 188, 242));
+      auto oldLp = reinterpret_cast<HPEN>(SelectObject(hdc, lp));
+      MoveToEx(hdc, lens.left, lens.top, nullptr);
+      LineTo(hdc, lens.right - 1, lens.top);
+      LineTo(hdc, lens.right - 1, lens.bottom - 1);
+      LineTo(hdc, lens.left, lens.bottom - 1);
+      LineTo(hdc, lens.left, lens.top);
+      SelectObject(hdc, oldLp);
+      DeleteObject(lp);
+      RECT lt = {lens.left + 4, lens.top + 2, lens.right - 4, lens.top + 16};
+      SetTextColor(hdc, RGB(218, 236, 252));
+      DrawTextW(hdc, L"Weak Signal Lens", -1, &lt, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+    }
+  }
+
   if (app && app->running) {
     const int p = std::clamp(static_cast<int>(std::round(app->decodeProgressVisualPct)), 0, 100);
     const int xSweep = plot.left + ((plot.right - plot.left) * p) / 100;
@@ -2609,10 +2737,13 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
        << L" kHz\n"
        << L"t: " << std::fixed << std::setprecision(2) << app->waterfallReadoutTimeSec << L" s\n"
        << L"dB: " << std::fixed << std::setprecision(1) << app->waterfallReadoutDb << L"\n"
-       << L"SNR~: " << std::fixed << std::setprecision(1) << app->waterfallReadoutSnrDb << L" dB\n"
+       << L"NF: " << std::fixed << std::setprecision(1) << app->waterfallReadoutNoiseFloorDb << L" dB\n"
+       << L"dB-NF: " << std::fixed << std::setprecision(1) << app->waterfallReadoutSnrDb << L" dB\n"
+       << L"df(lock): " << std::showpos << std::fixed << std::setprecision(1)
+       << app->waterfallReadoutDeltaFreqHz << L" Hz" << std::noshowpos << L"\n"
        << L"Toggle lock: L";
   } else {
-    rs << L"f: --\nt: --\ndB: --\nSNR~: --\nToggle lock: L";
+    rs << L"f: --\nt: --\ndB: --\nNF: --\ndB-NF: --\ndf(lock): --\nToggle lock: L";
   }
   RECT rv = {rp.left + 10, rp.top + 26, rp.right - 8, rp.bottom - 8};
   SetTextColor(hdc, RGB(224, 236, 248));
@@ -3023,9 +3154,6 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
     const float nyq = 0.5f * static_cast<float>(app->previewWav.sampleRate);
     const float fMin = 80.0f;
     const float fMax = std::min(2200.0f, nyq - 20.0f);
-    HPEN trk = CreatePen(PS_SOLID, 2, RGB(255, 221, 87));
-    auto oldT = reinterpret_cast<HPEN>(SelectObject(hdc, trk));
-    SetTextColor(hdc, RGB(255, 235, 130));
     SetBkMode(hdc, TRANSPARENT);
     for (const auto& r : app->overlayRows) {
       if (r.endSec < viewStart || r.startSec > viewEnd) {
@@ -3038,14 +3166,29 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
       const float x1n = std::clamp((r.endSec - viewStart) / std::max(0.1f, viewDur), 0.0f, 1.0f);
       const int x0 = plot.left + static_cast<int>(x0n * (plot.right - plot.left));
       const int x1 = plot.left + static_cast<int>(x1n * (plot.right - plot.left));
+      COLORREF cc = RGB(255, 190, 120);
+      std::wstring q = L"C";
+      int thick = 1;
+      if (r.confidence >= 0.85f) {
+        cc = RGB(130, 255, 170);
+        q = L"A";
+        thick = 3;
+      } else if (r.confidence >= 0.65f) {
+        cc = RGB(248, 226, 116);
+        q = L"B";
+        thick = 2;
+      }
+      HPEN trk = CreatePen(PS_SOLID, thick, cc);
+      auto oldT = reinterpret_cast<HPEN>(SelectObject(hdc, trk));
       MoveToEx(hdc, x0, y, nullptr);
       LineTo(hdc, std::max(x0 + 1, x1), y);
+      SelectObject(hdc, oldT);
+      DeleteObject(trk);
       RECT lbl = {x0 + 4, y - 14, std::min<int>(plot.right - 4, x0 + 120), y + 2};
-      const std::wstring tag = ToWide(!r.plausibleId.empty() ? r.plausibleId : r.text);
+      const std::wstring tag = ToWide(!r.plausibleId.empty() ? r.plausibleId : r.text) + L" [" + q + L"]";
+      SetTextColor(hdc, cc);
       DrawTextW(hdc, tag.c_str(), -1, &lbl, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
     }
-    SelectObject(hdc, oldT);
-    DeleteObject(trk);
   }
 
   if (app && app->manualNotchEnabled && !app->manualNotches.empty()) {
@@ -3260,6 +3403,8 @@ struct WaterfallReadout {
   float timeSec = 0.0f;
   float db = -120.0f;
   float snrDb = 0.0f;
+  float noiseFloorDb = -120.0f;
+  float deltaFreqHz = 0.0f;
 };
 
 void DrawTooltip(HDC hdc, const RECT& canvas, POINT anchor, const std::wstring& text) {
@@ -3356,14 +3501,29 @@ WaterfallReadout HitTestWaterfall(const AppState* app, const RECT& rc, POINT mou
   }
 
   float noiseDb = app->panMinDb;
+  if (!app->waterfallDbRender.empty()) {
+    std::vector<float> col;
+    col.reserve(static_cast<std::size_t>(app->waterfallH));
+    for (int yy = 0; yy < app->waterfallH; ++yy) {
+      col.push_back(app->waterfallDbRender[static_cast<std::size_t>(yy * app->waterfallW + xCol)]);
+    }
+    const std::size_t qi = static_cast<std::size_t>(0.22f *
+                                                    static_cast<float>(std::max<std::size_t>(1, col.size() - 1)));
+    std::nth_element(col.begin(), col.begin() + static_cast<std::ptrdiff_t>(qi), col.end());
+    noiseDb = col[qi];
+  }
   float snrDb = db - noiseDb;
+  const float deltaFHz = app->peakLockEnabled ? (fHz - app->peakLockHz) : 0.0f;
 
   std::wstringstream ss;
   ss << L"Waterfall Readout\n"
      << L"f: " << std::fixed << std::setprecision(3) << (fHz / 1000.0f) << L" kHz\n"
      << L"t: " << std::fixed << std::setprecision(2) << tSec << L" s\n"
      << L"dB: " << std::fixed << std::setprecision(1) << db << L"\n"
-     << L"SNR~: " << std::fixed << std::setprecision(1) << snrDb << L" dB";
+     << L"NF: " << std::fixed << std::setprecision(1) << noiseDb << L" dB\n"
+     << L"dB-NF: " << std::fixed << std::setprecision(1) << snrDb << L" dB\n"
+     << L"df(lock): " << std::showpos << std::fixed << std::setprecision(1)
+     << (deltaFHz / 1.0f) << L" Hz" << std::noshowpos;
 
   out.ok = true;
   out.pt = POINT{mouse.x, yPix};
@@ -3372,6 +3532,8 @@ WaterfallReadout HitTestWaterfall(const AppState* app, const RECT& rc, POINT mou
   out.timeSec = tSec;
   out.db = db;
   out.snrDb = snrDb;
+  out.noiseFloorDb = noiseDb;
+  out.deltaFreqHz = deltaFHz;
   return out;
 }
 
@@ -3803,6 +3965,37 @@ void OnDone(AppState* app, DecodeThreadResult* result) {
     } else {
       SetStatus(app, L"Completed");
     }
+
+    if (app->autoFocusEnabled && app->waterfallW > 0 && !app->overlayRows.empty() &&
+        app->previewWav.sampleRate > 0 && !app->previewWav.samples.empty()) {
+      const ndb::DecodeResult* best = nullptr;
+      float bestScore = -1e9f;
+      for (const auto& r : app->overlayRows) {
+        const float s = 0.65f * r.confidence + 0.35f * r.compositeScore;
+        if (s > bestScore) {
+          bestScore = s;
+          best = &r;
+        }
+      }
+      if (best) {
+        const float dur = static_cast<float>(app->previewWav.samples.size()) /
+                          static_cast<float>(std::max(1, app->previewWav.sampleRate));
+        const float tCenter = 0.5f * (best->startSec + best->endSec);
+        const int col = std::clamp(static_cast<int>(std::round((tCenter / std::max(0.1f, dur)) *
+                                                                std::max(1, app->waterfallW - 1))),
+                                   0, app->waterfallW - 1);
+        const double targetZoom = 2.4;
+        app->waterfallZoom = std::clamp(0.78 * app->waterfallZoom + 0.22 * targetZoom, 1.0, 8.0);
+        const int vis = std::max(60, static_cast<int>(std::round(
+                                     static_cast<double>(std::max(1, app->waterfallW)) /
+                                     std::max(1.0, app->waterfallZoom))));
+        const int targetPan = std::clamp(col - vis / 2, 0, std::max(0, app->waterfallW - vis));
+        app->waterfallPanPx = static_cast<int>(std::round(0.72 * static_cast<double>(app->waterfallPanPx) +
+                                                          0.28 * static_cast<double>(targetPan)));
+      }
+      SaveUiState(app);
+    }
+
     InvalidateRect(app->chartPanel, nullptr, TRUE);
     SetSummary(app, BuildSummary(*result));
     std::wstring msg = L"CSV saved:\n" + ToWide(result->outputPath);
@@ -4040,6 +4233,8 @@ LRESULT CALLBACK ChartProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
               app->waterfallReadoutTimeSec = wf.timeSec;
               app->waterfallReadoutDb = wf.db;
               app->waterfallReadoutSnrDb = wf.snrDb;
+              app->waterfallReadoutNoiseFloorDb = wf.noiseFloorDb;
+              app->waterfallReadoutDeltaFreqHz = wf.deltaFreqHz;
             }
             app->hoverActive = false;
           } else {
