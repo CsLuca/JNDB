@@ -3236,7 +3236,7 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
                 srcX, 0, srcW, app->waterfallH, wfBase.data(), &bmi, DIB_RGB_COLORS,
                 SRCCOPY);
 
-  // Session compare snapshots (A/B) with wipe slider.
+  // Session compare snapshots (A/B/C-live) with wipe slider.
   if (!app->snapshotA.empty() && !app->snapshotB.empty() && app->snapshotW == app->waterfallW &&
       app->snapshotH == app->waterfallH) {
     const int wipeX = plot.left + ((plot.right - plot.left) * std::clamp(app->snapshotWipePct, 0, 100)) / 100;
@@ -3255,7 +3255,49 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
     DeleteObject(wp);
     RECT wr = {plot.left + 6, plot.top + 2, plot.left + 220, plot.top + 18};
     SetTextColor(hdc, RGB(255, 238, 176));
-    DrawTextW(hdc, L"Compare A/B [F9/F10/F11]", -1, &wr, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+    DrawTextW(hdc, L"Compare A/B/C-live [F9/F10/F11]", -1, &wr, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+
+    RECT cr = {plot.left + 6, plot.top + 20, plot.left + 236, plot.top + 36};
+    HBRUSH cbg = CreateSolidBrush(RGB(10, 18, 28));
+    FillRect(hdc, &cr, cbg);
+    DeleteObject(cbg);
+    HPEN cp = CreatePen(PS_SOLID, 1, RGB(72, 102, 132));
+    auto oldCp = reinterpret_cast<HPEN>(SelectObject(hdc, cp));
+    MoveToEx(hdc, cr.left, cr.top, nullptr);
+    LineTo(hdc, cr.right - 1, cr.top);
+    LineTo(hdc, cr.right - 1, cr.bottom - 1);
+    LineTo(hdc, cr.left, cr.bottom - 1);
+    LineTo(hdc, cr.left, cr.top);
+    SelectObject(hdc, oldCp);
+    DeleteObject(cp);
+    auto lumAt = [&](const std::vector<std::uint8_t>& src, int sx, int sy) {
+      const std::size_t idx = static_cast<std::size_t>((sy * app->waterfallW + sx) * 3);
+      return 0.11f * src[idx + 0] + 0.59f * src[idx + 1] + 0.30f * src[idx + 2];
+    };
+    const int sx = std::clamp(srcX + std::max(0, std::min(srcW - 1, (srcW * std::clamp(app->snapshotWipePct, 0, 100)) / 100)), 0, app->waterfallW - 1);
+    const int sy = app->waterfallH / 2;
+    const float aLum = lumAt(app->snapshotA, sx, sy);
+    const float bLum = lumAt(app->snapshotB, sx, sy);
+    const float cLum = lumAt(wfBase, sx, sy);
+    auto bar = [&](int x, float v, COLORREF c) {
+      RECT br = {x, cr.top + 5, x + 58, cr.bottom - 5};
+      HBRUSH bb = CreateSolidBrush(RGB(20, 34, 50));
+      FillRect(hdc, &br, bb);
+      DeleteObject(bb);
+      RECT fv = br;
+      fv.right = br.left + static_cast<int>(std::round(std::clamp(v / 255.0f, 0.0f, 1.0f) * (br.right - br.left)));
+      HBRUSH fb = CreateSolidBrush(c);
+      FillRect(hdc, &fv, fb);
+      DeleteObject(fb);
+    };
+    bar(cr.left + 4, aLum, RGB(156, 208, 246));
+    bar(cr.left + 66, bLum, RGB(246, 196, 132));
+    bar(cr.left + 128, cLum, RGB(170, 238, 188));
+    RECT dr = {cr.left + 190, cr.top + 2, cr.right - 2, cr.bottom - 2};
+    std::wstringstream ds;
+    ds << L"dAB:" << std::fixed << std::setprecision(0) << (aLum - bLum) << L" dAC:" << (aLum - cLum);
+    SetTextColor(hdc, RGB(186, 216, 238));
+    DrawTextW(hdc, ds.str().c_str(), -1, &dr, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
   }
 
   // Coherence map overlay: highlights structures stable across time.
@@ -3576,6 +3618,48 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
   DrawTextW(hdc, L"Time ->", -1, &xLab, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
   RECT yLab = {plot.left, plot.top - 2, plot.left + 140, plot.top + 16};
   DrawTextW(hdc, L"Frequency (kHz)", -1, &yLab, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+
+  // Adaptive frequency ruler: non-linear local magnification around focus track.
+  if (!app->overlayRows.empty() && app->previewWav.sampleRate > 0) {
+    const float nyq = 0.5f * static_cast<float>(app->previewWav.sampleRate);
+    const float fMin = 80.0f;
+    const float fMax = std::min(2200.0f, nyq - 20.0f);
+    float focusF = -1.0f;
+    float focusS = -1.0f;
+    for (const auto& r : app->overlayRows) {
+      if (app->selectedTrackId >= 0 && r.trackId != app->selectedTrackId) {
+        continue;
+      }
+      const float s = 0.6f * std::clamp(r.confidence, 0.0f, 1.0f) + 0.4f * std::clamp(r.freqStabilityScore, 0.0f, 1.0f);
+      if (s > focusS) {
+        focusS = s;
+        focusF = r.freqHz;
+      }
+    }
+    if (focusF > 0.0f) {
+      const float ff = std::clamp(focusF, fMin, fMax);
+      auto mapFreqToYAdaptive = [&](float f) {
+        const float yn = 1.0f - (std::clamp(f, fMin, fMax) - fMin) / std::max(1.0f, fMax - fMin);
+        const float fyn = 1.0f - (ff - fMin) / std::max(1.0f, fMax - fMin);
+        const float d = yn - fyn;
+        const float warped = std::clamp(fyn + d * (0.55f + 0.45f * std::tanh(4.0f * std::fabs(d))), 0.0f, 1.0f);
+        return plot.top + static_cast<int>(warped * (plot.bottom - plot.top));
+      };
+      HPEN rp = CreatePen(PS_DOT, 1, RGB(120, 168, 206));
+      auto oldRp = reinterpret_cast<HPEN>(SelectObject(hdc, rp));
+      for (int i = 0; i <= 8; ++i) {
+        const float f = fMin + (fMax - fMin) * (static_cast<float>(i) / 8.0f);
+        const int y = mapFreqToYAdaptive(f);
+        MoveToEx(hdc, plot.left - 6, y, nullptr);
+        LineTo(hdc, plot.left + 2, y);
+      }
+      SelectObject(hdc, oldRp);
+      DeleteObject(rp);
+      RECT rr = {plot.left + 4, plot.top + 16, plot.left + 132, plot.top + 30};
+      SetTextColor(hdc, RGB(160, 206, 236));
+      DrawTextW(hdc, L"Adaptive ruler", -1, &rr, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+    }
+  }
 
   // Multi-band noise profile ribbon (low/mid/high + local around lock).
   if (app->showNoiseProfileRibbon && !app->waterfallDbRender.empty()) {
@@ -4371,6 +4455,26 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
         DeleteObject(hp);
       }
 
+      // False-positive risk halo from mismatch periodicity/continuity/plausibility.
+      const float plaus = std::clamp(r.plausibleIdScore, 0.0f, 1.0f);
+      const float mismatch = std::fabs(std::clamp(r.keyingPeriodicityScore, 0.0f, 1.0f) -
+                                       std::clamp(r.continuityScore, 0.0f, 1.0f));
+      const float fpRisk = std::clamp(0.45f * mismatch + 0.35f * (1.0f - plaus) +
+                                      0.20f * (1.0f - std::clamp(r.confidence, 0.0f, 1.0f)),
+                                      0.0f, 1.0f);
+      if (fpRisk > 0.42f) {
+        const int rpx = std::max(1, static_cast<int>(std::round(2.0f + 5.0f * fpRisk)));
+        HPEN fp = CreatePen(PS_DOT, 1, RGB(255, static_cast<int>(200 - 80 * fpRisk),
+                                            static_cast<int>(120 - 70 * fpRisk)));
+        auto oldFp = reinterpret_cast<HPEN>(SelectObject(hdc, fp));
+        MoveToEx(hdc, x0, y - rpx, nullptr);
+        LineTo(hdc, std::max(x0 + 1, x1), y - rpx);
+        MoveToEx(hdc, x0, y + rpx, nullptr);
+        LineTo(hdc, std::max(x0 + 1, x1), y + rpx);
+        SelectObject(hdc, oldFp);
+        DeleteObject(fp);
+      }
+
       HPEN trk = CreatePen(PS_SOLID, thick, cc);
       auto oldT = reinterpret_cast<HPEN>(SelectObject(hdc, trk));
       MoveToEx(hdc, x0, y, nullptr);
@@ -4426,6 +4530,22 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
                   std::max(static_cast<int>(plot.left) + 2, x0 - 2), y + 7};
       SetTextColor(hdc, gcol);
       DrawTextW(hdc, gch, -1, &grc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+      // Event timeline flags.
+      auto drawFlag = [&](int x, COLORREF c) {
+        HPEN ep = CreatePen(PS_SOLID, 1, c);
+        auto oldEp = reinterpret_cast<HPEN>(SelectObject(hdc, ep));
+        MoveToEx(hdc, x, plot.top + 1, nullptr);
+        LineTo(hdc, x, plot.top + 10);
+        SelectObject(hdc, oldEp);
+        DeleteObject(ep);
+      };
+      if (gch[0] == L'A') drawFlag(x0, RGB(148, 216, 255));
+      if (gch[0] == L'F') drawFlag(x0, RGB(255, 216, 146));
+      if (gch[0] == L'X') drawFlag(x1, RGB(255, 164, 160));
+      if (r.trackId == app->selectedTrackId && std::clamp(r.freqStabilityScore, 0.0f, 1.0f) > 0.78f) {
+        drawFlag((x0 + x1) / 2, RGB(172, 244, 188));  // relock
+      }
 
       const int lblX = x0 + 4;
       const int lblY = y - 14;
@@ -4818,6 +4938,47 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
       drawLadder(0, dotP, RGB(134, 218, 248), L"D");
       drawLadder(1, dashP, RGB(114, 190, 236), L"-");
       drawLadder(2, gapP, RGB(164, 186, 204), L"G");
+
+      // Morse skeleton overlay (clean on/off keying guide).
+      RECT sk = {cs.left, cs.top - 22, cs.right, cs.top - 8};
+      HBRUSH sbg = CreateSolidBrush(RGB(8, 14, 22));
+      FillRect(hdc, &sk, sbg);
+      DeleteObject(sbg);
+      const int cell = std::max(2, (static_cast<int>(sk.right - sk.left) - 6) / 36);
+      int sx = sk.left + 4;
+      bool on = true;
+      for (int i = 0; i < 20 && sx < sk.right - 4; ++i) {
+        const int w = on ? cell : cell * 2;
+        RECT sg = {sx, static_cast<int>(sk.top) + (on ? 2 : 4),
+                   std::min(static_cast<int>(sk.right) - 4, sx + w), static_cast<int>(sk.bottom) - 2};
+        HBRUSH sbr = CreateSolidBrush(on ? RGB(152, 236, 252) : RGB(70, 108, 134));
+        FillRect(hdc, &sg, sbr);
+        DeleteObject(sbr);
+        sx += w + std::max(1, cell / 2);
+        on = !on;
+      }
+      RECT st = {sk.left + 2, sk.top - 12, sk.right - 2, sk.top};
+      SetTextColor(hdc, RGB(172, 220, 242));
+      DrawTextW(hdc, L"Morse skeleton", -1, &st, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+
+      // Confidence volumetric stack (conf/stab/key layers).
+      RECT vs = {ld.right + 4, ld.top, std::min(plot.right - 8, ld.right + 56), ld.bottom};
+      if (vs.right - vs.left >= 36) {
+        HBRUSH vbg = CreateSolidBrush(RGB(8, 14, 22));
+        FillRect(hdc, &vs, vbg);
+        DeleteObject(vbg);
+        auto layer = [&](float v, COLORREF c, int inset) {
+          RECT lr = {vs.left + inset, vs.top + inset, vs.right - inset, vs.bottom - inset};
+          const int h = std::max(1, static_cast<int>(std::round(std::clamp(v, 0.0f, 1.0f) * (lr.bottom - lr.top))));
+          RECT fr = {lr.left, lr.bottom - h, lr.right, lr.bottom};
+          HBRUSH lb = CreateSolidBrush(c);
+          FillRect(hdc, &fr, lb);
+          DeleteObject(lb);
+        };
+        layer(std::clamp(focus->confidence, 0.0f, 1.0f), RGB(110, 198, 238), 2);
+        layer(std::clamp(focus->freqStabilityScore, 0.0f, 1.0f), RGB(136, 230, 180), 5);
+        layer(std::clamp(focus->keyingPeriodicityScore, 0.0f, 1.0f), RGB(236, 212, 132), 8);
+      }
 
       // Polar drift scope: time->angle, drift->radius.
       RECT pd = {std::min(plot.right - 216, cs.right + 100), cs.top - 12,
