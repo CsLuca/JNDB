@@ -93,6 +93,10 @@ constexpr int kIdWideViewCheck = 1058;
 constexpr int kIdRidgeOverlayCheck = 1059;
 constexpr int kIdWideViewButton = 1060;
 constexpr int kIdRidgeOverlayButton = 1061;
+constexpr int kIdLensStrengthSlider = 1062;
+constexpr int kIdBgRemovalSlider = 1063;
+constexpr int kIdSplitPointSlider = 1064;
+constexpr int kIdAutoFocusStrengthSlider = 1065;
 
 constexpr UINT kMsgProgress = WM_APP + 1;
 constexpr UINT kMsgDone = WM_APP + 2;
@@ -160,6 +164,10 @@ struct AppState {
   HWND waterfallPersistCombo = nullptr;
   HWND panAvgAlphaSlider = nullptr;
   HWND panPeakDecaySlider = nullptr;
+  HWND lensStrengthSlider = nullptr;
+  HWND bgRemovalSlider = nullptr;
+  HWND splitPointSlider = nullptr;
+  HWND autoFocusStrengthSlider = nullptr;
   HWND agcFloorSlider = nullptr;
   HWND agcSpanSlider = nullptr;
   HWND agcGainSlider = nullptr;
@@ -207,6 +215,9 @@ struct AppState {
   std::vector<float> panPeakDb;
   float panAvgAlpha = 0.08f;
   float panPeakDecay = 0.12f;
+  float lensStrength = 1.0f;
+  float bgRemovalStrength = 1.0f;
+  float splitTonePoint = 0.58f;
   float panMinDb = -120.0f;
   float panMaxDb = -20.0f;
   int panLastCol = -1;
@@ -227,6 +238,7 @@ struct AppState {
   bool showWideView = true;
   bool showRidgeOverlay = true;
   bool autoFocusEnabled = true;
+  float autoFocusStrength = 0.28f;
   float agcFloorOffsetDb = -3.0f;
   float agcSpanDb = 22.0f;
   float agcGain = 1.35f;
@@ -857,6 +869,10 @@ void SaveUiState(AppState* app) {
   saveFloat(L"agc", L"gamma", app->agcGamma);
   saveFloat(L"pan", L"avg_alpha", app->panAvgAlpha);
   saveFloat(L"pan", L"peak_decay", app->panPeakDecay);
+  saveFloat(L"visual", L"lens_strength", app->lensStrength);
+  saveFloat(L"visual", L"bg_remove", app->bgRemovalStrength);
+  saveFloat(L"visual", L"split_point", app->splitTonePoint);
+  saveFloat(L"visual", L"autofocus_strength", app->autoFocusStrength);
 
   const int maxNotchStore = 48;
   const int nCount = std::min(static_cast<int>(app->manualNotches.size()), maxNotchStore);
@@ -916,6 +932,10 @@ void LoadUiState(AppState* app) {
   app->agcGamma = std::clamp(IniReadFloat(app->uiStatePath, L"agc", L"gamma", app->agcGamma), 0.40f, 1.60f);
   app->panAvgAlpha = std::clamp(IniReadFloat(app->uiStatePath, L"pan", L"avg_alpha", app->panAvgAlpha), 0.01f, 0.40f);
   app->panPeakDecay = std::clamp(IniReadFloat(app->uiStatePath, L"pan", L"peak_decay", app->panPeakDecay), 0.01f, 1.20f);
+  app->lensStrength = std::clamp(IniReadFloat(app->uiStatePath, L"visual", L"lens_strength", app->lensStrength), 0.50f, 2.00f);
+  app->bgRemovalStrength = std::clamp(IniReadFloat(app->uiStatePath, L"visual", L"bg_remove", app->bgRemovalStrength), 0.00f, 1.60f);
+  app->splitTonePoint = std::clamp(IniReadFloat(app->uiStatePath, L"visual", L"split_point", app->splitTonePoint), 0.35f, 0.80f);
+  app->autoFocusStrength = std::clamp(IniReadFloat(app->uiStatePath, L"visual", L"autofocus_strength", app->autoFocusStrength), 0.0f, 1.0f);
 
   app->manualNotches.clear();
   const int notchCount = std::clamp(IniReadInt(app->uiStatePath, L"manual_notch", L"count", 0), 0, 48);
@@ -1012,6 +1032,22 @@ void LoadUiState(AppState* app) {
   if (app->panPeakDecaySlider) {
     SendMessageW(app->panPeakDecaySlider, TBM_SETPOS, TRUE,
                  static_cast<LPARAM>(std::round(app->panPeakDecay * 100.0f)));
+  }
+  if (app->lensStrengthSlider) {
+    SendMessageW(app->lensStrengthSlider, TBM_SETPOS, TRUE,
+                 static_cast<LPARAM>(std::round(app->lensStrength * 100.0f)));
+  }
+  if (app->bgRemovalSlider) {
+    SendMessageW(app->bgRemovalSlider, TBM_SETPOS, TRUE,
+                 static_cast<LPARAM>(std::round(app->bgRemovalStrength * 100.0f)));
+  }
+  if (app->splitPointSlider) {
+    SendMessageW(app->splitPointSlider, TBM_SETPOS, TRUE,
+                 static_cast<LPARAM>(std::round(app->splitTonePoint * 100.0f)));
+  }
+  if (app->autoFocusStrengthSlider) {
+    SendMessageW(app->autoFocusStrengthSlider, TBM_SETPOS, TRUE,
+                 static_cast<LPARAM>(std::round(app->autoFocusStrength * 100.0f)));
   }
   if (app->agcAutoCheck) {
     SendMessageW(app->agcAutoCheck, BM_SETCHECK,
@@ -1116,6 +1152,9 @@ void ResetUiSessionState(AppState* app) {
   app->agcSpanDb = 22.0f;
   app->agcGain = 1.35f;
   app->agcGamma = 0.72f;
+  app->lensStrength = 1.0f;
+  app->bgRemovalStrength = 1.0f;
+  app->splitTonePoint = 0.58f;
   app->panAvgAlpha = 0.08f;
   app->panPeakDecay = 0.12f;
   app->agcAutoContrast = true;
@@ -1131,6 +1170,7 @@ void ResetUiSessionState(AppState* app) {
   app->autoBookmarkMidThreshold = 0.65f;
   app->autoBookmarkHighThreshold = 0.85f;
   app->showAutoBookmarks = true;
+  app->autoFocusStrength = 0.28f;
 
   if (app->waterfallViewCombo) SendMessageW(app->waterfallViewCombo, CB_SETCURSEL, app->waterfallViewMode, 0);
   if (app->yawSlider) SendMessageW(app->yawSlider, TBM_SETPOS, TRUE, app->yawDeg);
@@ -1149,6 +1189,10 @@ void ResetUiSessionState(AppState* app) {
   if (app->agcGammaSlider) SendMessageW(app->agcGammaSlider, TBM_SETPOS, TRUE, static_cast<LPARAM>(std::round(app->agcGamma * 100.0f)));
   if (app->panAvgAlphaSlider) SendMessageW(app->panAvgAlphaSlider, TBM_SETPOS, TRUE, static_cast<LPARAM>(std::round(app->panAvgAlpha * 100.0f)));
   if (app->panPeakDecaySlider) SendMessageW(app->panPeakDecaySlider, TBM_SETPOS, TRUE, static_cast<LPARAM>(std::round(app->panPeakDecay * 100.0f)));
+  if (app->lensStrengthSlider) SendMessageW(app->lensStrengthSlider, TBM_SETPOS, TRUE, static_cast<LPARAM>(std::round(app->lensStrength * 100.0f)));
+  if (app->bgRemovalSlider) SendMessageW(app->bgRemovalSlider, TBM_SETPOS, TRUE, static_cast<LPARAM>(std::round(app->bgRemovalStrength * 100.0f)));
+  if (app->splitPointSlider) SendMessageW(app->splitPointSlider, TBM_SETPOS, TRUE, static_cast<LPARAM>(std::round(app->splitTonePoint * 100.0f)));
+  if (app->autoFocusStrengthSlider) SendMessageW(app->autoFocusStrengthSlider, TBM_SETPOS, TRUE, static_cast<LPARAM>(std::round(app->autoFocusStrength * 100.0f)));
   if (app->agcAutoCheck) SendMessageW(app->agcAutoCheck, BM_SETCHECK, BST_CHECKED, 0);
   if (app->peakLockButton) SetWindowTextW(app->peakLockButton, L"Peak Lock: OFF");
   if (app->manualNotchCheck) SendMessageW(app->manualNotchCheck, BM_SETCHECK, BST_CHECKED, 0);
@@ -1444,7 +1488,7 @@ void EnsureWaterfallPreview(AppState* app) {
   for (int t = 0; t < spec.frameCount; ++t) {
     for (int b = 1; b < spec.binCount; ++b) {
       const std::size_t idx = static_cast<std::size_t>(t * spec.binCount + b);
-      lvAdj[idx] = lv[idx] - colFloor[static_cast<std::size_t>(t)];
+      lvAdj[idx] = lv[idx] - app->bgRemovalStrength * colFloor[static_cast<std::size_t>(t)];
       dbAdjVals.push_back(lvAdj[idx]);
     }
   }
@@ -1500,7 +1544,7 @@ void EnsureWaterfallPreview(AppState* app) {
                 std::max(1.0f, (ceilDb - floorDb));
       n = std::clamp(n, 0.0f, 1.0f);
       // Dual-range split tone map: more detail in weak region, softer high compression.
-      const float split = 0.58f;
+      const float split = std::clamp(app->splitTonePoint, 0.35f, 0.80f);
       if (n < split) {
         const float x = n / std::max(1e-6f, split);
         n = split * std::pow(std::clamp(x, 0.0f, 1.0f), 0.78f);
@@ -2609,7 +2653,8 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
           float b = app->waterfallRgb[sidx + 0] / 255.0f;
           const float yLum = 0.2126f * r + 0.7152f * g + 0.0722f * b;
           float boost = std::pow(std::clamp(yLum, 0.0f, 1.0f), 0.72f);
-          boost = std::clamp((boost - 0.08f) * 1.25f, 0.0f, 1.0f);
+          const float lensK = std::clamp(app->lensStrength, 0.50f, 2.00f);
+          boost = std::clamp((boost - 0.08f) * (1.05f + 0.40f * lensK), 0.0f, 1.0f);
           if (!app->waterfallRidgeMask.empty() &&
               app->waterfallRidgeMask[static_cast<std::size_t>(sy * app->waterfallW + sx)] != 0) {
             boost = std::min(1.0f, boost + 0.22f);
@@ -3985,13 +4030,16 @@ void OnDone(AppState* app, DecodeThreadResult* result) {
                                                                 std::max(1, app->waterfallW - 1))),
                                    0, app->waterfallW - 1);
         const double targetZoom = 2.4;
-        app->waterfallZoom = std::clamp(0.78 * app->waterfallZoom + 0.22 * targetZoom, 1.0, 8.0);
+        const double af = std::clamp(static_cast<double>(app->autoFocusStrength), 0.0, 1.0);
+        const double zEase = 0.10 + 0.35 * af;
+        app->waterfallZoom = std::clamp((1.0 - zEase) * app->waterfallZoom + zEase * targetZoom, 1.0, 8.0);
         const int vis = std::max(60, static_cast<int>(std::round(
                                      static_cast<double>(std::max(1, app->waterfallW)) /
                                      std::max(1.0, app->waterfallZoom))));
         const int targetPan = std::clamp(col - vis / 2, 0, std::max(0, app->waterfallW - vis));
-        app->waterfallPanPx = static_cast<int>(std::round(0.72 * static_cast<double>(app->waterfallPanPx) +
-                                                          0.28 * static_cast<double>(targetPan)));
+        const double pEase = 0.12 + 0.38 * af;
+        app->waterfallPanPx = static_cast<int>(std::round((1.0 - pEase) * static_cast<double>(app->waterfallPanPx) +
+                                                          pEase * static_cast<double>(targetPan)));
       }
       SaveUiState(app);
     }
@@ -4544,6 +4592,49 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                    static_cast<LPARAM>(std::round(app->panPeakDecay * 100.0f)));
       y += 36;
 
+      CreateWindowW(L"STATIC", L"Lens", WS_CHILD | WS_VISIBLE, m + 1092, y + 6, 36, 22,
+                    hwnd, nullptr, nullptr, nullptr);
+      app->lensStrengthSlider = CreateWindowW(TRACKBAR_CLASSW, L"",
+                                              WS_CHILD | WS_VISIBLE | TBS_AUTOTICKS, m + 1128, y,
+                                              110, 28, hwnd, (HMENU)kIdLensStrengthSlider, nullptr,
+                                              nullptr);
+      SendMessageW(app->lensStrengthSlider, TBM_SETRANGEMIN, FALSE, 50);
+      SendMessageW(app->lensStrengthSlider, TBM_SETRANGEMAX, FALSE, 200);
+      SendMessageW(app->lensStrengthSlider, TBM_SETPOS, TRUE,
+                   static_cast<LPARAM>(std::round(app->lensStrength * 100.0f)));
+      CreateWindowW(L"STATIC", L"BG", WS_CHILD | WS_VISIBLE, m + 1244, y + 6, 24, 22, hwnd,
+                    nullptr, nullptr, nullptr);
+      app->bgRemovalSlider = CreateWindowW(TRACKBAR_CLASSW, L"",
+                                           WS_CHILD | WS_VISIBLE | TBS_AUTOTICKS, m + 1270, y,
+                                           110, 28, hwnd, (HMENU)kIdBgRemovalSlider, nullptr,
+                                           nullptr);
+      SendMessageW(app->bgRemovalSlider, TBM_SETRANGEMIN, FALSE, 0);
+      SendMessageW(app->bgRemovalSlider, TBM_SETRANGEMAX, FALSE, 160);
+      SendMessageW(app->bgRemovalSlider, TBM_SETPOS, TRUE,
+                   static_cast<LPARAM>(std::round(app->bgRemovalStrength * 100.0f)));
+      CreateWindowW(L"STATIC", L"Split", WS_CHILD | WS_VISIBLE, m + 1386, y + 6, 36, 22,
+                    hwnd, nullptr, nullptr, nullptr);
+      app->splitPointSlider = CreateWindowW(TRACKBAR_CLASSW, L"",
+                                            WS_CHILD | WS_VISIBLE | TBS_AUTOTICKS, m + 1424, y,
+                                            96, 28, hwnd, (HMENU)kIdSplitPointSlider, nullptr,
+                                            nullptr);
+      SendMessageW(app->splitPointSlider, TBM_SETRANGEMIN, FALSE, 35);
+      SendMessageW(app->splitPointSlider, TBM_SETRANGEMAX, FALSE, 80);
+      SendMessageW(app->splitPointSlider, TBM_SETPOS, TRUE,
+                   static_cast<LPARAM>(std::round(app->splitTonePoint * 100.0f)));
+      CreateWindowW(L"STATIC", L"AutoF", WS_CHILD | WS_VISIBLE, m + 1526, y + 6, 40, 22,
+                    hwnd, nullptr, nullptr, nullptr);
+      app->autoFocusStrengthSlider = CreateWindowW(TRACKBAR_CLASSW, L"",
+                                                   WS_CHILD | WS_VISIBLE | TBS_AUTOTICKS,
+                                                   m + 1568, y, 88, 28, hwnd,
+                                                   (HMENU)kIdAutoFocusStrengthSlider, nullptr,
+                                                   nullptr);
+      SendMessageW(app->autoFocusStrengthSlider, TBM_SETRANGEMIN, FALSE, 0);
+      SendMessageW(app->autoFocusStrengthSlider, TBM_SETRANGEMAX, FALSE, 100);
+      SendMessageW(app->autoFocusStrengthSlider, TBM_SETPOS, TRUE,
+                   static_cast<LPARAM>(std::round(app->autoFocusStrength * 100.0f)));
+      y += 34;
+
       CreateWindowW(L"STATIC", L"AGC Floor", WS_CHILD | WS_VISIBLE, m, y + 6, 64, 22, hwnd,
                     nullptr, nullptr, nullptr);
       app->agcFloorSlider = CreateWindowW(TRACKBAR_CLASSW, L"",
@@ -4726,6 +4817,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                                app->ridgeOverlayCheck, app->wideViewButton,
                                app->ridgeOverlayButton,
                                app->panAvgAlphaSlider, app->panPeakDecaySlider,
+                               app->lensStrengthSlider, app->bgRemovalSlider,
+                               app->splitPointSlider, app->autoFocusStrengthSlider,
                                app->agcFloorSlider, app->agcSpanSlider, app->agcGainSlider,
                                app->agcGammaSlider, app->agcAutoCheck,
                                app->peakLockButton, app->manualNotchCheck, app->autoBookmarkCheck,
@@ -5278,6 +5371,49 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           SaveUiState(app);
           std::wstringstream ss;
           ss << L"Pan Peak Decay: " << std::fixed << std::setprecision(2) << app->panPeakDecay;
+          SetStatus(app, ss.str());
+          InvalidateRect(app->chartPanel, nullptr, TRUE);
+          return 0;
+        }
+        if (src == app->lensStrengthSlider) {
+          const int v = static_cast<int>(SendMessageW(app->lensStrengthSlider, TBM_GETPOS, 0, 0));
+          app->lensStrength = static_cast<float>(v) / 100.0f;
+          SaveUiState(app);
+          std::wstringstream ss;
+          ss << L"Lens strength: " << std::fixed << std::setprecision(2) << app->lensStrength;
+          SetStatus(app, ss.str());
+          InvalidateRect(app->chartPanel, nullptr, TRUE);
+          return 0;
+        }
+        if (src == app->bgRemovalSlider) {
+          const int v = static_cast<int>(SendMessageW(app->bgRemovalSlider, TBM_GETPOS, 0, 0));
+          app->bgRemovalStrength = static_cast<float>(v) / 100.0f;
+          SaveUiState(app);
+          std::wstringstream ss;
+          ss << L"BG removal: " << std::fixed << std::setprecision(2) << app->bgRemovalStrength;
+          SetStatus(app, ss.str());
+          InvalidateWaterfallCache(app);
+          InvalidateRect(app->chartPanel, nullptr, TRUE);
+          return 0;
+        }
+        if (src == app->splitPointSlider) {
+          const int v = static_cast<int>(SendMessageW(app->splitPointSlider, TBM_GETPOS, 0, 0));
+          app->splitTonePoint = static_cast<float>(v) / 100.0f;
+          SaveUiState(app);
+          std::wstringstream ss;
+          ss << L"Split point: " << std::fixed << std::setprecision(2) << app->splitTonePoint;
+          SetStatus(app, ss.str());
+          InvalidateWaterfallCache(app);
+          InvalidateRect(app->chartPanel, nullptr, TRUE);
+          return 0;
+        }
+        if (src == app->autoFocusStrengthSlider) {
+          const int v = static_cast<int>(SendMessageW(app->autoFocusStrengthSlider, TBM_GETPOS, 0, 0));
+          app->autoFocusStrength = static_cast<float>(v) / 100.0f;
+          SaveUiState(app);
+          std::wstringstream ss;
+          ss << L"Auto-focus strength: " << std::fixed << std::setprecision(2)
+             << app->autoFocusStrength;
           SetStatus(app, ss.str());
           InvalidateRect(app->chartPanel, nullptr, TRUE);
           return 0;
