@@ -100,6 +100,9 @@ constexpr int kIdAutoFocusStrengthSlider = 1065;
 constexpr int kIdVisualPresetDxWeak = 1066;
 constexpr int kIdVisualPresetBalanced = 1067;
 constexpr int kIdVisualPresetClean = 1068;
+constexpr int kIdFreezeButton = 1069;
+constexpr int kIdQrmPresetNo = 1070;
+constexpr int kIdQrmPresetHeavy = 1071;
 
 constexpr UINT kMsgProgress = WM_APP + 1;
 constexpr UINT kMsgDone = WM_APP + 2;
@@ -182,6 +185,7 @@ struct AppState {
   HWND ridgeOverlayCheck = nullptr;
   HWND wideViewButton = nullptr;
   HWND ridgeOverlayButton = nullptr;
+  HWND freezeButton = nullptr;
   HWND autoBookmarkCheck = nullptr;
   HWND autoBookmarkConfSlider = nullptr;
   HWND autoBookmarkMidSlider = nullptr;
@@ -221,6 +225,8 @@ struct AppState {
   float lensStrength = 1.0f;
   float bgRemovalStrength = 1.0f;
   float splitTonePoint = 0.58f;
+  float qrmBirdieSuppression = 1.0f;
+  float qrmRidgeAggressiveness = 1.0f;
   float panMinDb = -120.0f;
   float panMaxDb = -20.0f;
   int panLastCol = -1;
@@ -306,6 +312,8 @@ struct AppState {
 void InvalidateWaterfallCache(AppState* app);
 void SortAndMergeManualNotches(AppState* app);
 void ClampManualNotchesToRange(AppState* app);
+void SaveUiState(AppState* app);
+void ComputeWaterfallSourceWindow(const AppState* app, int* srcX, int* srcW);
 
 void ApplyPresetToConfig(const std::string& mode, ndb::DecoderConfig* cfg) {
   if (!cfg) {
@@ -813,6 +821,30 @@ void UpdateWaterfallToggleButtons(AppState* app) {
   }
 }
 
+void UpdateFreezeButton(AppState* app) {
+  if (!app || !app->freezeButton) {
+    return;
+  }
+  SetWindowTextW(app->freezeButton, app->waterfallFrozen ? L"FREEZE ON" : L"FREEZE OFF");
+}
+
+void ToggleWaterfallFreeze(AppState* app) {
+  if (!app) {
+    return;
+  }
+  app->waterfallFrozen = !app->waterfallFrozen;
+  if (app->waterfallFrozen) {
+    int sx = 0;
+    int sw = app->waterfallW;
+    ComputeWaterfallSourceWindow(app, &sx, &sw);
+    app->waterfallFreezeCenterCol = sx + sw / 2;
+  }
+  UpdateFreezeButton(app);
+  SaveUiState(app);
+  SetStatus(app, app->waterfallFrozen ? L"Waterfall freeze ON [F]" : L"Waterfall freeze OFF [F]");
+  InvalidateRect(app->chartPanel, nullptr, TRUE);
+}
+
 float IniReadFloat(const std::wstring& path, const wchar_t* section, const wchar_t* key, float defVal) {
   wchar_t buf[64] = {};
   GetPrivateProfileStringW(section, key, L"", buf, 64, path.c_str());
@@ -881,6 +913,8 @@ void SaveUiState(AppState* app) {
   saveFloat(L"visual", L"bg_remove", app->bgRemovalStrength);
   saveFloat(L"visual", L"split_point", app->splitTonePoint);
   saveFloat(L"visual", L"autofocus_strength", app->autoFocusStrength);
+  saveFloat(L"visual", L"qrm_birdie", app->qrmBirdieSuppression);
+  saveFloat(L"visual", L"qrm_ridge", app->qrmRidgeAggressiveness);
 
   const int maxNotchStore = 48;
   const int nCount = std::min(static_cast<int>(app->manualNotches.size()), maxNotchStore);
@@ -946,6 +980,8 @@ void LoadUiState(AppState* app) {
   app->bgRemovalStrength = std::clamp(IniReadFloat(app->uiStatePath, L"visual", L"bg_remove", app->bgRemovalStrength), 0.00f, 1.60f);
   app->splitTonePoint = std::clamp(IniReadFloat(app->uiStatePath, L"visual", L"split_point", app->splitTonePoint), 0.35f, 0.80f);
   app->autoFocusStrength = std::clamp(IniReadFloat(app->uiStatePath, L"visual", L"autofocus_strength", app->autoFocusStrength), 0.0f, 1.0f);
+  app->qrmBirdieSuppression = std::clamp(IniReadFloat(app->uiStatePath, L"visual", L"qrm_birdie", app->qrmBirdieSuppression), 0.5f, 2.0f);
+  app->qrmRidgeAggressiveness = std::clamp(IniReadFloat(app->uiStatePath, L"visual", L"qrm_ridge", app->qrmRidgeAggressiveness), 0.5f, 2.0f);
 
   app->manualNotches.clear();
   const int notchCount = std::clamp(IniReadInt(app->uiStatePath, L"manual_notch", L"count", 0), 0, 48);
@@ -1007,6 +1043,7 @@ void LoadUiState(AppState* app) {
                  app->showRidgeOverlay ? BST_CHECKED : BST_UNCHECKED, 0);
   }
   UpdateWaterfallToggleButtons(app);
+  UpdateFreezeButton(app);
   if (app->shadingCheck) {
     SendMessageW(app->shadingCheck, BM_SETCHECK,
                  app->shadingEnabled ? BST_CHECKED : BST_UNCHECKED, 0);
@@ -1204,6 +1241,8 @@ void ResetUiSessionState(AppState* app) {
   app->lensStrength = 1.0f;
   app->bgRemovalStrength = 1.0f;
   app->splitTonePoint = 0.58f;
+  app->qrmBirdieSuppression = 1.0f;
+  app->qrmRidgeAggressiveness = 1.0f;
   app->panAvgAlpha = 0.08f;
   app->panPeakDecay = 0.12f;
   app->agcAutoContrast = true;
@@ -1233,6 +1272,7 @@ void ResetUiSessionState(AppState* app) {
   if (app->wideViewCheck) SendMessageW(app->wideViewCheck, BM_SETCHECK, BST_CHECKED, 0);
   if (app->ridgeOverlayCheck) SendMessageW(app->ridgeOverlayCheck, BM_SETCHECK, BST_CHECKED, 0);
   UpdateWaterfallToggleButtons(app);
+  UpdateFreezeButton(app);
   if (app->agcFloorSlider) SendMessageW(app->agcFloorSlider, TBM_SETPOS, TRUE, static_cast<LPARAM>(app->agcFloorOffsetDb));
   if (app->agcSpanSlider) SendMessageW(app->agcSpanSlider, TBM_SETPOS, TRUE, static_cast<LPARAM>(app->agcSpanDb));
   if (app->agcGainSlider) SendMessageW(app->agcGainSlider, TBM_SETPOS, TRUE, static_cast<LPARAM>(std::round(app->agcGain * 100.0f)));
@@ -1725,6 +1765,8 @@ void EnsureWaterfallPreview(AppState* app) {
   // Birdie suppressor + two-pass ridge candidates.
   std::vector<std::uint8_t> ridgeCoarse(static_cast<std::size_t>(app->waterfallW * app->waterfallH), 0);
   std::vector<int> ridgeHitsByRow(static_cast<std::size_t>(app->waterfallH), 0);
+  const float qBirdie = std::clamp(app->qrmBirdieSuppression, 0.5f, 2.0f);
+  const float qRidge = std::clamp(app->qrmRidgeAggressiveness, 0.5f, 2.0f);
   for (int t = 2; t + 2 < app->waterfallW; ++t) {
     for (int y = 2; y + 2 < app->waterfallH; ++y) {
       const int b = app->waterfallH - y;
@@ -1735,7 +1777,9 @@ void EnsureWaterfallPreview(AppState* app) {
       const float fU = norm[static_cast<std::size_t>(t * spec.binCount + (b + 1))];
       const float gradT = std::fabs(tR - tL);
       const float gradF = std::fabs(fU - fD);
-      if (c > 0.24f && gradF > 1.15f * gradT) {
+      const float ridgeMin = 0.24f - 0.05f * (qRidge - 1.0f);
+      const float gradRatio = 1.15f - 0.20f * (qRidge - 1.0f);
+      if (c > ridgeMin && gradF > gradRatio * gradT) {
         ridgeCoarse[static_cast<std::size_t>(y * app->waterfallW + t)] = 1;
         ridgeHitsByRow[static_cast<std::size_t>(y)] += 1;
       }
@@ -1744,11 +1788,13 @@ void EnsureWaterfallPreview(AppState* app) {
   for (int y = 0; y < app->waterfallH; ++y) {
     const float occ = static_cast<float>(ridgeHitsByRow[static_cast<std::size_t>(y)]) /
                       std::max(1.0f, static_cast<float>(app->waterfallW));
-    if (occ > 0.78f) {
+    const float birdieOccThr = std::clamp(0.82f - 0.12f * (qBirdie - 1.0f), 0.60f, 0.90f);
+    if (occ > birdieOccThr) {
       for (int t = 0; t < app->waterfallW; ++t) {
         const int b = app->waterfallH - y;
         const std::size_t idx = static_cast<std::size_t>(t * spec.binCount + b);
-        norm[idx] = std::clamp(norm[idx] * 0.74f, 0.0f, 1.0f);
+        const float atten = std::clamp(0.86f - 0.16f * qBirdie, 0.45f, 0.82f);
+        norm[idx] = std::clamp(norm[idx] * atten, 0.0f, 1.0f);
         ridgeCoarse[static_cast<std::size_t>(y * app->waterfallW + t)] = 0;
       }
     }
@@ -4309,16 +4355,7 @@ LRESULT CALLBACK ChartProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           return 0;
         }
         if (vk == 'F') {
-          app->waterfallFrozen = !app->waterfallFrozen;
-          if (app->waterfallFrozen) {
-            int sx = 0;
-            int sw = app->waterfallW;
-            ComputeWaterfallSourceWindow(app, &sx, &sw);
-            app->waterfallFreezeCenterCol = sx + sw / 2;
-          }
-          SaveUiState(app);
-          SetStatus(app, app->waterfallFrozen ? L"Waterfall freeze ON [F]" : L"Waterfall freeze OFF [F]");
-          InvalidateRect(hwnd, nullptr, TRUE);
+          ToggleWaterfallFreeze(app);
           return 0;
         }
         if (vk == VK_DELETE && app->activeManualNotch >= 0) {
@@ -4787,9 +4824,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                                               WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                                               m + 1508, y, 86, 30, hwnd,
                                               (HMENU)kIdRidgeOverlayButton, nullptr, nullptr);
+      app->freezeButton = CreateWindowW(L"BUTTON", L"FREEZE OFF",
+                                        WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                        m + 1598, y, 96, 30, hwnd,
+                                        (HMENU)kIdFreezeButton, nullptr, nullptr);
       CreateWindowW(L"BUTTON", L"3D DX Weak Preset", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                    m + 1598, y, 156, 30, hwnd, (HMENU)kIdWaterfallDxPreset, nullptr, nullptr);
+                    m + 1698, y, 110, 30, hwnd, (HMENU)kIdWaterfallDxPreset, nullptr, nullptr);
       UpdateWaterfallToggleButtons(app);
+      UpdateFreezeButton(app);
       y += 38;
 
       CreateWindowW(L"STATIC", L"Pan Avg Alpha", WS_CHILD | WS_VISIBLE, m + 1092, y + 6, 92, 22,
@@ -4856,12 +4898,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       SendMessageW(app->autoFocusStrengthSlider, TBM_SETPOS, TRUE,
                    static_cast<LPARAM>(std::round(app->autoFocusStrength * 100.0f)));
       CreateWindowW(L"BUTTON", L"DX Weak", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                    m + 1570, y, 74, 28, hwnd, (HMENU)kIdVisualPresetDxWeak, nullptr, nullptr);
+                    m + 1464, y, 68, 28, hwnd, (HMENU)kIdVisualPresetDxWeak, nullptr, nullptr);
       CreateWindowW(L"BUTTON", L"Balanced", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                    m + 1648, y, 78, 28, hwnd, (HMENU)kIdVisualPresetBalanced, nullptr,
+                    m + 1536, y, 72, 28, hwnd, (HMENU)kIdVisualPresetBalanced, nullptr,
                     nullptr);
       CreateWindowW(L"BUTTON", L"Clean", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                    m + 1730, y, 62, 28, hwnd, (HMENU)kIdVisualPresetClean, nullptr, nullptr);
+                    m + 1612, y, 56, 28, hwnd, (HMENU)kIdVisualPresetClean, nullptr, nullptr);
+      CreateWindowW(L"BUTTON", L"No-QRM", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                    m + 1672, y, 64, 28, hwnd, (HMENU)kIdQrmPresetNo, nullptr, nullptr);
+      CreateWindowW(L"BUTTON", L"Heavy", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                    m + 1740, y, 60, 28, hwnd, (HMENU)kIdQrmPresetHeavy, nullptr, nullptr);
       y += 34;
 
       CreateWindowW(L"STATIC", L"AGC Floor", WS_CHILD | WS_VISIBLE, m, y + 6, 64, 22, hwnd,
@@ -5044,7 +5090,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                                app->colormapCombo, app->waterfallFpsCombo,
                                app->waterfallPersistCombo, app->wideViewCheck,
                                app->ridgeOverlayCheck, app->wideViewButton,
-                               app->ridgeOverlayButton,
+                               app->ridgeOverlayButton, app->freezeButton,
                                app->panAvgAlphaSlider, app->panPeakDecaySlider,
                                app->lensStrengthSlider, app->bgRemovalSlider,
                                app->splitPointSlider, app->autoFocusStrengthSlider,
@@ -5437,6 +5483,25 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           return 0;
         case kIdVisualPresetClean:
           ApplyVisualTuningPreset(app, 0.76f, 0.45f, 0.64f, 0.16f, L"Clean");
+          return 0;
+        case kIdQrmPresetNo:
+          app->qrmBirdieSuppression = 0.72f;
+          app->qrmRidgeAggressiveness = 0.82f;
+          SaveUiState(app);
+          InvalidateWaterfallCache(app);
+          SetStatus(app, L"QRM preset: No-QRM");
+          InvalidateRect(app->chartPanel, nullptr, TRUE);
+          return 0;
+        case kIdQrmPresetHeavy:
+          app->qrmBirdieSuppression = 1.42f;
+          app->qrmRidgeAggressiveness = 1.35f;
+          SaveUiState(app);
+          InvalidateWaterfallCache(app);
+          SetStatus(app, L"QRM preset: Heavy-QRM");
+          InvalidateRect(app->chartPanel, nullptr, TRUE);
+          return 0;
+        case kIdFreezeButton:
+          ToggleWaterfallFreeze(app);
           return 0;
         case kIdPeakLockButton:
           app->peakLockEnabled = !app->peakLockEnabled;
