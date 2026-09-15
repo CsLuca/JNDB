@@ -270,6 +270,8 @@ struct AppState {
   bool waterfallZoomBoxActive = false;
   POINT waterfallZoomBoxStart = {0, 0};
   POINT waterfallZoomBoxEnd = {0, 0};
+  bool waterfallFrozen = false;
+  int waterfallFreezeCenterCol = -1;
   double chartZoom = 1.0;
   int chartPanPx = 0;
   bool dragging = false;
@@ -289,6 +291,7 @@ struct AppState {
   float waterfallReadoutSnrDb = 0.0f;
   float waterfallReadoutNoiseFloorDb = -120.0f;
   float waterfallReadoutDeltaFreqHz = 0.0f;
+  std::vector<float> readoutSnrTrend;
   bool mouseLeaveArmed = false;
   bool suppressNextResetConfirm = false;
   int baseClientW = 0;
@@ -854,6 +857,8 @@ void SaveUiState(AppState* app) {
   WritePrivateProfileStringW(L"view", L"persist_mode", std::to_wstring(app->waterfallPersistenceMode).c_str(), s);
   WritePrivateProfileStringW(L"view", L"show_wide", app->showWideView ? L"1" : L"0", s);
   WritePrivateProfileStringW(L"view", L"show_ridge", app->showRidgeOverlay ? L"1" : L"0", s);
+  WritePrivateProfileStringW(L"view", L"frozen", app->waterfallFrozen ? L"1" : L"0", s);
+  WritePrivateProfileStringW(L"view", L"freeze_col", std::to_wstring(app->waterfallFreezeCenterCol).c_str(), s);
   WritePrivateProfileStringW(L"view", L"zoom", std::to_wstring(app->waterfallZoom).c_str(), s);
   WritePrivateProfileStringW(L"view", L"pan", std::to_wstring(app->waterfallPanPx).c_str(), s);
   WritePrivateProfileStringW(L"view", L"shading", app->shadingEnabled ? L"1" : L"0", s);
@@ -918,6 +923,8 @@ void LoadUiState(AppState* app) {
   app->waterfallPersistenceMode = std::clamp(IniReadInt(app->uiStatePath, L"view", L"persist_mode", app->waterfallPersistenceMode), 0, 2);
   app->showWideView = IniReadBool(app->uiStatePath, L"view", L"show_wide", app->showWideView);
   app->showRidgeOverlay = IniReadBool(app->uiStatePath, L"view", L"show_ridge", app->showRidgeOverlay);
+  app->waterfallFrozen = IniReadBool(app->uiStatePath, L"view", L"frozen", app->waterfallFrozen);
+  app->waterfallFreezeCenterCol = IniReadInt(app->uiStatePath, L"view", L"freeze_col", app->waterfallFreezeCenterCol);
   app->waterfallZoom = std::clamp(static_cast<double>(IniReadFloat(app->uiStatePath, L"view", L"zoom", static_cast<float>(app->waterfallZoom))), 1.0, 8.0);
   app->waterfallPanPx = std::max(0, IniReadInt(app->uiStatePath, L"view", L"pan", app->waterfallPanPx));
   app->shadingEnabled = IniReadBool(app->uiStatePath, L"view", L"shading", app->shadingEnabled);
@@ -1186,6 +1193,8 @@ void ResetUiSessionState(AppState* app) {
   app->showRidgeOverlay = true;
   app->waterfallZoom = 1.0;
   app->waterfallPanPx = 0;
+  app->waterfallFrozen = false;
+  app->waterfallFreezeCenterCol = -1;
   app->chartZoom = 1.0;
   app->chartPanPx = 0;
   app->agcFloorOffsetDb = -3.0f;
@@ -1211,6 +1220,7 @@ void ResetUiSessionState(AppState* app) {
   app->autoBookmarkHighThreshold = 0.85f;
   app->showAutoBookmarks = true;
   app->autoFocusStrength = 0.28f;
+  app->readoutSnrTrend.clear();
 
   if (app->waterfallViewCombo) SendMessageW(app->waterfallViewCombo, CB_SETCURSEL, app->waterfallViewMode, 0);
   if (app->yawSlider) SendMessageW(app->yawSlider, TBM_SETPOS, TRUE, app->yawDeg);
@@ -1712,6 +1722,38 @@ void EnsureWaterfallPreview(AppState* app) {
   }
   norm.swap(local);
 
+  // Birdie suppressor + two-pass ridge candidates.
+  std::vector<std::uint8_t> ridgeCoarse(static_cast<std::size_t>(app->waterfallW * app->waterfallH), 0);
+  std::vector<int> ridgeHitsByRow(static_cast<std::size_t>(app->waterfallH), 0);
+  for (int t = 2; t + 2 < app->waterfallW; ++t) {
+    for (int y = 2; y + 2 < app->waterfallH; ++y) {
+      const int b = app->waterfallH - y;
+      const float c = norm[static_cast<std::size_t>(t * spec.binCount + b)];
+      const float tL = norm[static_cast<std::size_t>((t - 1) * spec.binCount + b)];
+      const float tR = norm[static_cast<std::size_t>((t + 1) * spec.binCount + b)];
+      const float fD = norm[static_cast<std::size_t>(t * spec.binCount + (b - 1))];
+      const float fU = norm[static_cast<std::size_t>(t * spec.binCount + (b + 1))];
+      const float gradT = std::fabs(tR - tL);
+      const float gradF = std::fabs(fU - fD);
+      if (c > 0.24f && gradF > 1.15f * gradT) {
+        ridgeCoarse[static_cast<std::size_t>(y * app->waterfallW + t)] = 1;
+        ridgeHitsByRow[static_cast<std::size_t>(y)] += 1;
+      }
+    }
+  }
+  for (int y = 0; y < app->waterfallH; ++y) {
+    const float occ = static_cast<float>(ridgeHitsByRow[static_cast<std::size_t>(y)]) /
+                      std::max(1.0f, static_cast<float>(app->waterfallW));
+    if (occ > 0.78f) {
+      for (int t = 0; t < app->waterfallW; ++t) {
+        const int b = app->waterfallH - y;
+        const std::size_t idx = static_cast<std::size_t>(t * spec.binCount + b);
+        norm[idx] = std::clamp(norm[idx] * 0.74f, 0.0f, 1.0f);
+        ridgeCoarse[static_cast<std::size_t>(y * app->waterfallW + t)] = 0;
+      }
+    }
+  }
+
   const auto palette = PaletteStopsByPreset(app);
 
   for (int t = 0; t < app->waterfallW; ++t) {
@@ -1720,20 +1762,40 @@ void EnsureWaterfallPreview(AppState* app) {
       const float v = lv[static_cast<std::size_t>(t * spec.binCount + b)];
       float n = norm[static_cast<std::size_t>(t * spec.binCount + b)];
 
+      // Manual band-focus windows: subtle gain around operator-selected bands.
+      if (app->manualNotchEnabled && !app->manualNotches.empty() && app->previewWav.sampleRate > 0) {
+        const float nyq = 0.5f * static_cast<float>(app->previewWav.sampleRate);
+        const float fMin = 80.0f;
+        const float fMax = std::min(2200.0f, nyq - 20.0f);
+        const float fHz = fMax - (static_cast<float>(y) / std::max(1.0f, static_cast<float>(app->waterfallH - 1))) *
+                                     (fMax - fMin);
+        float focus = 0.0f;
+        const int lim = std::min<int>(3, static_cast<int>(app->manualNotches.size()));
+        for (int fi = 0; fi < lim; ++fi) {
+          const auto& nb = app->manualNotches[static_cast<std::size_t>(fi)];
+          const float span = std::max(18.0f, nb.widthHz * 2.2f);
+          const float d = std::fabs(fHz - nb.freqHz);
+          const float w = std::clamp(1.0f - d / span, 0.0f, 1.0f);
+          focus = std::max(focus, w);
+        }
+        if (focus > 0.0f) {
+          n = std::clamp(n * (1.0f + 0.12f * focus), 0.0f, 1.0f);
+        }
+      }
+
       std::uint8_t ridge = 0;
-      if (t > 1 && t + 2 < app->waterfallW && b > 2 && b + 2 < spec.binCount) {
-        const float tL = norm[static_cast<std::size_t>((t - 1) * spec.binCount + b)];
-        const float tR = norm[static_cast<std::size_t>((t + 1) * spec.binCount + b)];
-        const float fD = norm[static_cast<std::size_t>(t * spec.binCount + (b - 1))];
-        const float fU = norm[static_cast<std::size_t>(t * spec.binCount + (b + 1))];
-        const float gradT = std::fabs(tR - tL);
-        const float gradF = std::fabs(fU - fD);
-        const float curvF = std::fabs((fU + fD) - 2.0f * n);
-        const float persist = 0.5f *
-                              (norm[static_cast<std::size_t>((t - 2) * spec.binCount + b)] +
-                               norm[static_cast<std::size_t>((t + 2) * spec.binCount + b)]);
-        if (n > 0.26f && gradF > 1.20f * gradT && curvF > 0.030f && persist > 0.20f) {
-          ridge = 255;
+      if (t > 2 && t + 2 < app->waterfallW && y > 0 && y + 1 < app->waterfallH) {
+        const std::size_t m0 = static_cast<std::size_t>(y * app->waterfallW + t);
+        if (ridgeCoarse[m0] != 0) {
+          const int temporal = static_cast<int>(ridgeCoarse[static_cast<std::size_t>(y * app->waterfallW + (t - 1))]) +
+                               static_cast<int>(ridgeCoarse[static_cast<std::size_t>(y * app->waterfallW + (t + 1))]) +
+                               static_cast<int>(ridgeCoarse[static_cast<std::size_t>(y * app->waterfallW + (t - 2))]) +
+                               static_cast<int>(ridgeCoarse[static_cast<std::size_t>(y * app->waterfallW + (t + 2))]);
+          const int lateral = static_cast<int>(ridgeCoarse[static_cast<std::size_t>((y - 1) * app->waterfallW + t)]) +
+                              static_cast<int>(ridgeCoarse[static_cast<std::size_t>((y + 1) * app->waterfallW + t)]);
+          if (temporal >= 2 && lateral <= 1) {
+            ridge = 255;
+          }
         }
       }
 
@@ -1942,6 +2004,18 @@ void ComputeWaterfallSourceWindow(const AppState* app, int* srcX, int* srcW) {
   if (!app || app->waterfallW <= 0) {
     *srcX = 0;
     *srcW = 0;
+    return;
+  }
+  if (app->waterfallFrozen) {
+    const double zoom = std::clamp(app->waterfallZoom, 1.0, 8.0);
+    *srcW = std::max(60, std::min(app->waterfallW,
+                                  static_cast<int>(std::round(static_cast<double>(app->waterfallW) / zoom))));
+    int center = app->waterfallFreezeCenterCol;
+    if (center < 0) {
+      center = app->waterfallW / 2;
+    }
+    const int maxPan = std::max(0, app->waterfallW - *srcW);
+    *srcX = std::clamp(center - *srcW / 2, 0, maxPan);
     return;
   }
   if (app->running) {
@@ -2755,6 +2829,22 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
     ps << L"Scan " << p << L"%";
     SetTextColor(hdc, RGB(220, 235, 250));
     DrawTextW(hdc, ps.str().c_str(), -1, &pbox, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+  } else if (app && app->waterfallFrozen) {
+    RECT pbox = {plot.right - 130, plot.top + 8, plot.right - 10, plot.top + 30};
+    HBRUSH bb = CreateSolidBrush(RGB(28, 30, 18));
+    FillRect(hdc, &pbox, bb);
+    DeleteObject(bb);
+    HPEN bp = CreatePen(PS_SOLID, 1, RGB(158, 142, 72));
+    auto oldBp = reinterpret_cast<HPEN>(SelectObject(hdc, bp));
+    MoveToEx(hdc, pbox.left, pbox.top, nullptr);
+    LineTo(hdc, pbox.right - 1, pbox.top);
+    LineTo(hdc, pbox.right - 1, pbox.bottom - 1);
+    LineTo(hdc, pbox.left, pbox.bottom - 1);
+    LineTo(hdc, pbox.left, pbox.top);
+    SelectObject(hdc, oldBp);
+    DeleteObject(bp);
+    SetTextColor(hdc, RGB(250, 236, 172));
+    DrawTextW(hdc, L"FROZEN", -1, &pbox, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
   }
 
   HBRUSH glaze = CreateSolidBrush(RGB(255, 255, 255));
@@ -2833,6 +2923,31 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
   RECT rv = {rp.left + 10, rp.top + 26, rp.right - 8, rp.bottom - 8};
   SetTextColor(hdc, RGB(224, 236, 248));
   DrawTextW(hdc, rs.str().c_str(), -1, &rv, DT_LEFT | DT_TOP | DT_WORDBREAK);
+
+  if (app && app->readoutSnrTrend.size() >= 3) {
+    RECT sr = {rp.left + 8, rp.bottom + 2, rp.right - 8, rp.bottom + 22};
+    HPEN sp = CreatePen(PS_SOLID, 1, RGB(132, 226, 178));
+    auto oldSp = reinterpret_cast<HPEN>(SelectObject(hdc, sp));
+    float minS = *std::min_element(app->readoutSnrTrend.begin(), app->readoutSnrTrend.end());
+    float maxS = *std::max_element(app->readoutSnrTrend.begin(), app->readoutSnrTrend.end());
+    if (maxS - minS < 0.5f) {
+      maxS = minS + 0.5f;
+    }
+    for (std::size_t i = 0; i < app->readoutSnrTrend.size(); ++i) {
+      const float tn = static_cast<float>(i) /
+                       static_cast<float>(std::max<std::size_t>(1, app->readoutSnrTrend.size() - 1));
+      const int x = sr.left + static_cast<int>(tn * (sr.right - sr.left));
+      const float yn = (app->readoutSnrTrend[i] - minS) / (maxS - minS);
+      const int y = sr.bottom - static_cast<int>(yn * (sr.bottom - sr.top));
+      if (i == 0) {
+        MoveToEx(hdc, x, y, nullptr);
+      } else {
+        LineTo(hdc, x, y);
+      }
+    }
+    SelectObject(hdc, oldSp);
+    DeleteObject(sp);
+  }
 
   RECT ps = {rp.left, rp.bottom + 8, rp.right, rp.bottom + 52};
   HBRUSH pbg = CreateSolidBrush(RGB(10, 18, 28));
@@ -3039,7 +3154,7 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
     }
     RECT hk = {map.left, map.top - 16, map.right, map.top - 1};
     SetTextColor(hdc, RGB(178, 206, 228));
-    DrawTextW(hdc, L"Hotkeys: A show auto, B/C add-clear, D del, L lock readout, M manual notch, O ridge, V wide, F6/F7/F8 visual presets, N/P nav, 1..9 jump, E/I exp-imp, Shift+Drag zoom box, Ctrl+R reset (Shift=skip prompt)",
+    DrawTextW(hdc, L"Hotkeys: A show auto, B/C add-clear, D del, F freeze, L lock readout, M manual notch, O ridge, V wide, F6/F7/F8 visual presets, N/P nav, 1..9 jump, E/I exp-imp, Shift+Drag zoom box, Ctrl+R reset (Shift=skip prompt)",
               -1, &hk,
               DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
   }
@@ -3240,6 +3355,8 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
     const float fMin = 80.0f;
     const float fMax = std::min(2200.0f, nyq - 20.0f);
     SetBkMode(hdc, TRANSPARENT);
+    int lastLblX = -9999;
+    int lastLblY = -9999;
     for (const auto& r : app->overlayRows) {
       if (r.endSec < viewStart || r.startSec > viewEnd) {
         continue;
@@ -3269,10 +3386,18 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
       LineTo(hdc, std::max(x0 + 1, x1), y);
       SelectObject(hdc, oldT);
       DeleteObject(trk);
-      RECT lbl = {x0 + 4, y - 14, std::min<int>(plot.right - 4, x0 + 120), y + 2};
-      const std::wstring tag = ToWide(!r.plausibleId.empty() ? r.plausibleId : r.text) + L" [" + q + L"]";
-      SetTextColor(hdc, cc);
-      DrawTextW(hdc, tag.c_str(), -1, &lbl, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+      const int lblX = x0 + 4;
+      const int lblY = y - 14;
+      const bool nearOther = (std::abs(lblX - lastLblX) < 64 && std::abs(lblY - lastLblY) < 16);
+      const bool showLbl = (r.confidence >= 0.72f) || !nearOther;
+      if (showLbl) {
+        RECT lbl = {lblX, lblY, std::min<int>(plot.right - 4, x0 + 120), y + 2};
+        const std::wstring tag = ToWide(!r.plausibleId.empty() ? r.plausibleId : r.text) + L" [" + q + L"]";
+        SetTextColor(hdc, cc);
+        DrawTextW(hdc, tag.c_str(), -1, &lbl, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+        lastLblX = lblX;
+        lastLblY = lblY;
+      }
     }
   }
 
@@ -3816,6 +3941,7 @@ void RefreshWaterfallFromInput(AppState* app) {
   app->bookmarksSec.clear();
   app->bookmarkAuto.clear();
   app->bookmarkConfidence.clear();
+  app->readoutSnrTrend.clear();
   app->waterfallReadoutLocked = false;
   app->waterfallReadoutValid = false;
   InvalidateWaterfallCache(app);
@@ -4107,6 +4233,18 @@ LRESULT CALLBACK ChartProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         GetClientRect(hwnd, &rc);
         const RECT wfPlot = GetWaterfallPlotRect(rc);
         const RECT wfMap = GetWaterfallMapRect(rc);
+        if (app->waterfallFrozen && PtInRect(&wfMap, p) && app->waterfallW > 0) {
+          const float xn = static_cast<float>(p.x - wfMap.left) /
+                           std::max<int>(1, static_cast<int>(wfMap.right - wfMap.left - 1));
+          app->waterfallFreezeCenterCol =
+              std::clamp(static_cast<int>(std::round(xn * std::max(1, app->waterfallW - 1))),
+                         0, app->waterfallW - 1);
+          app->waterfallDragging = true;
+          app->waterfallDragStartX = p.x;
+          SetCapture(hwnd);
+          InvalidateRect(hwnd, nullptr, TRUE);
+          return 0;
+        }
         if (app->manualNotchEnabled && PtInRect(&wfPlot, p) && (GetKeyState(VK_MENU) & 0x8000)) {
           const int hit = HitTestManualNotch(app, wfPlot, p);
           if (hit >= 0) {
@@ -4168,6 +4306,19 @@ LRESULT CALLBACK ChartProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         if (vk == VK_F8) {
           ApplyVisualTuningPreset(app, 0.76f, 0.45f, 0.64f, 0.16f, L"Clean");
+          return 0;
+        }
+        if (vk == 'F') {
+          app->waterfallFrozen = !app->waterfallFrozen;
+          if (app->waterfallFrozen) {
+            int sx = 0;
+            int sw = app->waterfallW;
+            ComputeWaterfallSourceWindow(app, &sx, &sw);
+            app->waterfallFreezeCenterCol = sx + sw / 2;
+          }
+          SaveUiState(app);
+          SetStatus(app, app->waterfallFrozen ? L"Waterfall freeze ON [F]" : L"Waterfall freeze OFF [F]");
+          InvalidateRect(hwnd, nullptr, TRUE);
           return 0;
         }
         if (vk == VK_DELETE && app->activeManualNotch >= 0) {
@@ -4307,12 +4458,25 @@ LRESULT CALLBACK ChartProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           app->waterfallHoverActive = false;
           InvalidateRect(hwnd, nullptr, TRUE);
         } else if (app->waterfallDragging) {
-          const int dx = app->waterfallDragStartX - p.x;
-          const int vis = std::max(60, static_cast<int>(std::round(
-                                       static_cast<double>(std::max(1, app->waterfallW)) /
-                                       std::max(1.0, app->waterfallZoom))));
-          const int maxPan = std::max(0, app->waterfallW - vis);
-          app->waterfallPanPx = std::clamp(app->waterfallPanStartPx + dx, 0, maxPan);
+          if (app->waterfallFrozen) {
+            RECT rc2;
+            GetClientRect(hwnd, &rc2);
+            const RECT wfMap = GetWaterfallMapRect(rc2);
+            if (PtInRect(&wfMap, p) && app->waterfallW > 0) {
+              const float xn = static_cast<float>(p.x - wfMap.left) /
+                               std::max<int>(1, static_cast<int>(wfMap.right - wfMap.left - 1));
+              app->waterfallFreezeCenterCol =
+                  std::clamp(static_cast<int>(std::round(xn * std::max(1, app->waterfallW - 1))),
+                             0, app->waterfallW - 1);
+            }
+          } else {
+            const int dx = app->waterfallDragStartX - p.x;
+            const int vis = std::max(60, static_cast<int>(std::round(
+                                         static_cast<double>(std::max(1, app->waterfallW)) /
+                                         std::max(1.0, app->waterfallZoom))));
+            const int maxPan = std::max(0, app->waterfallW - vis);
+            app->waterfallPanPx = std::clamp(app->waterfallPanStartPx + dx, 0, maxPan);
+          }
           app->hoverActive = false;
           app->waterfallHoverActive = false;
           InvalidateRect(hwnd, nullptr, TRUE);
@@ -4335,6 +4499,12 @@ LRESULT CALLBACK ChartProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
               app->waterfallReadoutSnrDb = wf.snrDb;
               app->waterfallReadoutNoiseFloorDb = wf.noiseFloorDb;
               app->waterfallReadoutDeltaFreqHz = wf.deltaFreqHz;
+              app->readoutSnrTrend.push_back(wf.snrDb);
+              if (app->readoutSnrTrend.size() > 96) {
+                app->readoutSnrTrend.erase(app->readoutSnrTrend.begin(),
+                                           app->readoutSnrTrend.begin() +
+                                               static_cast<std::ptrdiff_t>(app->readoutSnrTrend.size() - 96));
+              }
             }
             app->hoverActive = false;
           } else {
