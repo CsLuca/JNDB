@@ -84,6 +84,10 @@ constexpr int kIdPalettePresetCombo = 1049;
 constexpr int kIdPaletteLoadLut = 1050;
 constexpr int kIdPanAvgAlphaSlider = 1051;
 constexpr int kIdPanPeakDecaySlider = 1052;
+constexpr int kIdManualNotchCheck = 1053;
+constexpr int kIdManualNotchClear = 1054;
+constexpr int kIdManualNotchExport = 1055;
+constexpr int kIdManualNotchImport = 1056;
 
 constexpr UINT kMsgProgress = WM_APP + 1;
 constexpr UINT kMsgDone = WM_APP + 2;
@@ -126,6 +130,11 @@ struct ColorStop {
   int b = 0;
 };
 
+struct NotchBand {
+  float freqHz = 0.0f;
+  float widthHz = 24.0f;
+};
+
 struct AppState {
   HWND hwnd = nullptr;
   HWND inputEdit = nullptr;
@@ -151,6 +160,7 @@ struct AppState {
   HWND agcGammaSlider = nullptr;
   HWND agcAutoCheck = nullptr;
   HWND peakLockButton = nullptr;
+  HWND manualNotchCheck = nullptr;
   HWND autoBookmarkCheck = nullptr;
   HWND autoBookmarkConfSlider = nullptr;
   HWND autoBookmarkMidSlider = nullptr;
@@ -209,6 +219,10 @@ struct AppState {
   bool peakLockEnabled = false;
   int peakLockBin = -1;
   float peakLockHz = 0.0f;
+  bool manualNotchEnabled = true;
+  std::vector<NotchBand> manualNotches;
+  int activeManualNotch = -1;
+  bool manualNotchDragging = false;
   std::vector<float> bookmarksSec;
   std::vector<std::uint8_t> bookmarkAuto;
   std::vector<float> bookmarkConfidence;
@@ -254,6 +268,8 @@ struct AppState {
 };
 
 void InvalidateWaterfallCache(AppState* app);
+void SortAndMergeManualNotches(AppState* app);
+void ClampManualNotchesToRange(AppState* app);
 
 void ApplyPresetToConfig(const std::string& mode, ndb::DecoderConfig* cfg) {
   if (!cfg) {
@@ -666,6 +682,80 @@ bool ReadBookmarksCsv(const std::string& path, std::vector<float>* bookmarksSec,
   return true;
 }
 
+bool WriteManualNotchesCsv(const std::string& path, const std::vector<NotchBand>& notches,
+                           std::string* error) {
+  std::ofstream out(path);
+  if (!out) {
+    if (error) {
+      *error = "Cannot write manual notch CSV: " + path;
+    }
+    return false;
+  }
+  out << "freq_hz,width_hz\n";
+  for (const auto& n : notches) {
+    out << std::fixed << std::setprecision(3) << n.freqHz << ',' << std::setprecision(3)
+        << n.widthHz << '\n';
+  }
+  return true;
+}
+
+bool ReadManualNotchesCsv(const std::string& path, std::vector<NotchBand>* outNotches,
+                          std::string* error) {
+  if (!outNotches) {
+    if (error) {
+      *error = "Internal error: manual notch target is null";
+    }
+    return false;
+  }
+  std::ifstream in(path);
+  if (!in) {
+    if (error) {
+      *error = "Cannot open manual notch CSV: " + path;
+    }
+    return false;
+  }
+  std::string line;
+  std::vector<NotchBand> parsed;
+  bool headerSkipped = false;
+  while (std::getline(in, line)) {
+    if (line.empty()) {
+      continue;
+    }
+    if (!headerSkipped) {
+      headerSkipped = true;
+      if (line.find("freq") != std::string::npos) {
+        continue;
+      }
+    }
+    std::replace(line.begin(), line.end(), ',', ' ');
+    std::istringstream iss(line);
+    float f = 0.0f;
+    float w = 24.0f;
+    if (!(iss >> f)) {
+      continue;
+    }
+    if (!(iss >> w)) {
+      w = 24.0f;
+    }
+    if (!std::isfinite(f) || f <= 0.0f) {
+      continue;
+    }
+    NotchBand n;
+    n.freqHz = f;
+    n.widthHz = std::clamp(w, 6.0f, 200.0f);
+    parsed.push_back(n);
+  }
+  std::sort(parsed.begin(), parsed.end(),
+            [](const NotchBand& a, const NotchBand& b) { return a.freqHz < b.freqHz; });
+  parsed.erase(std::unique(parsed.begin(), parsed.end(),
+                           [](const NotchBand& a, const NotchBand& b) {
+                             return std::fabs(a.freqHz - b.freqHz) < 1.0f;
+                           }),
+               parsed.end());
+  *outNotches = std::move(parsed);
+  return true;
+}
+
 void SetStatus(AppState* app, const std::wstring& s) {
   SetText(app->statusText, s);
 }
@@ -721,6 +811,7 @@ void SaveUiState(AppState* app) {
   WritePrivateProfileStringW(L"view", L"colormap3d", std::to_wstring(app->colormap3d).c_str(), s);
   WritePrivateProfileStringW(L"view", L"palette_preset", std::to_wstring(app->palettePreset).c_str(), s);
   WritePrivateProfileStringW(L"view", L"peak_lock", app->peakLockEnabled ? L"1" : L"0", s);
+  WritePrivateProfileStringW(L"view", L"manual_notch", app->manualNotchEnabled ? L"1" : L"0", s);
 
   WritePrivateProfileStringW(L"charts", L"zoom", std::to_wstring(app->chartZoom).c_str(), s);
   WritePrivateProfileStringW(L"charts", L"pan", std::to_wstring(app->chartPanPx).c_str(), s);
@@ -730,6 +821,25 @@ void SaveUiState(AppState* app) {
   saveFloat(L"agc", L"span", app->agcSpanDb);
   saveFloat(L"agc", L"gain", app->agcGain);
   saveFloat(L"agc", L"gamma", app->agcGamma);
+  saveFloat(L"pan", L"avg_alpha", app->panAvgAlpha);
+  saveFloat(L"pan", L"peak_decay", app->panPeakDecay);
+
+  const int maxNotchStore = 48;
+  const int nCount = std::min(static_cast<int>(app->manualNotches.size()), maxNotchStore);
+  WritePrivateProfileStringW(L"manual_notch", L"count", std::to_wstring(nCount).c_str(), s);
+  for (int i = 0; i < maxNotchStore; ++i) {
+    wchar_t kf[24] = {};
+    wchar_t kw[24] = {};
+    swprintf(kf, 24, L"f_%02d", i);
+    swprintf(kw, 24, L"w_%02d", i);
+    if (i < nCount) {
+      saveFloat(L"manual_notch", kf, app->manualNotches[static_cast<std::size_t>(i)].freqHz);
+      saveFloat(L"manual_notch", kw, app->manualNotches[static_cast<std::size_t>(i)].widthHz);
+    } else {
+      WritePrivateProfileStringW(L"manual_notch", kf, nullptr, s);
+      WritePrivateProfileStringW(L"manual_notch", kw, nullptr, s);
+    }
+  }
 }
 
 void LoadUiState(AppState* app) {
@@ -758,6 +868,7 @@ void LoadUiState(AppState* app) {
   app->colormap3d = std::clamp(IniReadInt(app->uiStatePath, L"view", L"colormap3d", app->colormap3d), 0, 2);
   app->palettePreset = std::clamp(IniReadInt(app->uiStatePath, L"view", L"palette_preset", app->palettePreset), 0, 3);
   app->peakLockEnabled = IniReadBool(app->uiStatePath, L"view", L"peak_lock", app->peakLockEnabled);
+  app->manualNotchEnabled = IniReadBool(app->uiStatePath, L"view", L"manual_notch", app->manualNotchEnabled);
   app->chartZoom = std::clamp(static_cast<double>(IniReadFloat(app->uiStatePath, L"charts", L"zoom", static_cast<float>(app->chartZoom))), 1.0, 8.0);
   app->chartPanPx = IniReadInt(app->uiStatePath, L"charts", L"pan", app->chartPanPx);
 
@@ -766,6 +877,26 @@ void LoadUiState(AppState* app) {
   app->agcSpanDb = std::clamp(IniReadFloat(app->uiStatePath, L"agc", L"span", app->agcSpanDb), 8.0f, 80.0f);
   app->agcGain = std::clamp(IniReadFloat(app->uiStatePath, L"agc", L"gain", app->agcGain), 0.50f, 2.50f);
   app->agcGamma = std::clamp(IniReadFloat(app->uiStatePath, L"agc", L"gamma", app->agcGamma), 0.40f, 1.60f);
+  app->panAvgAlpha = std::clamp(IniReadFloat(app->uiStatePath, L"pan", L"avg_alpha", app->panAvgAlpha), 0.01f, 0.40f);
+  app->panPeakDecay = std::clamp(IniReadFloat(app->uiStatePath, L"pan", L"peak_decay", app->panPeakDecay), 0.01f, 1.20f);
+
+  app->manualNotches.clear();
+  const int notchCount = std::clamp(IniReadInt(app->uiStatePath, L"manual_notch", L"count", 0), 0, 48);
+  for (int i = 0; i < notchCount; ++i) {
+    wchar_t kf[24] = {};
+    wchar_t kw[24] = {};
+    swprintf(kf, 24, L"f_%02d", i);
+    swprintf(kw, 24, L"w_%02d", i);
+    NotchBand n;
+    n.freqHz = IniReadFloat(app->uiStatePath, L"manual_notch", kf, 0.0f);
+    n.widthHz = IniReadFloat(app->uiStatePath, L"manual_notch", kw, 24.0f);
+    if (n.freqHz > 0.0f) {
+      app->manualNotches.push_back(n);
+    }
+  }
+  ClampManualNotchesToRange(app);
+  SortAndMergeManualNotches(app);
+  app->activeManualNotch = app->manualNotches.empty() ? -1 : 0;
 
   if (app->autoBookmarkCheck) {
     SendMessageW(app->autoBookmarkCheck, BM_SETCHECK,
@@ -808,6 +939,10 @@ void LoadUiState(AppState* app) {
   if (app->peakLockButton) {
     SetWindowTextW(app->peakLockButton, app->peakLockEnabled ? L"Peak Lock: ON" : L"Peak Lock: OFF");
   }
+  if (app->manualNotchCheck) {
+    SendMessageW(app->manualNotchCheck, BM_SETCHECK,
+                 app->manualNotchEnabled ? BST_CHECKED : BST_UNCHECKED, 0);
+  }
   if (app->agcFloorSlider) {
     SendMessageW(app->agcFloorSlider, TBM_SETPOS, TRUE, static_cast<LPARAM>(app->agcFloorOffsetDb));
   }
@@ -821,6 +956,14 @@ void LoadUiState(AppState* app) {
   if (app->agcGammaSlider) {
     SendMessageW(app->agcGammaSlider, TBM_SETPOS, TRUE,
                  static_cast<LPARAM>(std::round(app->agcGamma * 100.0f)));
+  }
+  if (app->panAvgAlphaSlider) {
+    SendMessageW(app->panAvgAlphaSlider, TBM_SETPOS, TRUE,
+                 static_cast<LPARAM>(std::round(app->panAvgAlpha * 100.0f)));
+  }
+  if (app->panPeakDecaySlider) {
+    SendMessageW(app->panPeakDecaySlider, TBM_SETPOS, TRUE,
+                 static_cast<LPARAM>(std::round(app->panPeakDecay * 100.0f)));
   }
   if (app->agcAutoCheck) {
     SendMessageW(app->agcAutoCheck, BM_SETCHECK,
@@ -922,10 +1065,16 @@ void ResetUiSessionState(AppState* app) {
   app->agcSpanDb = 22.0f;
   app->agcGain = 1.35f;
   app->agcGamma = 0.72f;
+  app->panAvgAlpha = 0.08f;
+  app->panPeakDecay = 0.12f;
   app->agcAutoContrast = true;
   app->peakLockEnabled = false;
   app->peakLockBin = -1;
   app->peakLockHz = 0.0f;
+  app->manualNotchEnabled = true;
+  app->manualNotches.clear();
+  app->activeManualNotch = -1;
+  app->manualNotchDragging = false;
   app->autoBookmarkEnabled = true;
   app->autoBookmarkMinConfidence = 0.65f;
   app->autoBookmarkMidThreshold = 0.65f;
@@ -943,8 +1092,11 @@ void ResetUiSessionState(AppState* app) {
   if (app->agcSpanSlider) SendMessageW(app->agcSpanSlider, TBM_SETPOS, TRUE, static_cast<LPARAM>(app->agcSpanDb));
   if (app->agcGainSlider) SendMessageW(app->agcGainSlider, TBM_SETPOS, TRUE, static_cast<LPARAM>(std::round(app->agcGain * 100.0f)));
   if (app->agcGammaSlider) SendMessageW(app->agcGammaSlider, TBM_SETPOS, TRUE, static_cast<LPARAM>(std::round(app->agcGamma * 100.0f)));
+  if (app->panAvgAlphaSlider) SendMessageW(app->panAvgAlphaSlider, TBM_SETPOS, TRUE, static_cast<LPARAM>(std::round(app->panAvgAlpha * 100.0f)));
+  if (app->panPeakDecaySlider) SendMessageW(app->panPeakDecaySlider, TBM_SETPOS, TRUE, static_cast<LPARAM>(std::round(app->panPeakDecay * 100.0f)));
   if (app->agcAutoCheck) SendMessageW(app->agcAutoCheck, BM_SETCHECK, BST_CHECKED, 0);
   if (app->peakLockButton) SetWindowTextW(app->peakLockButton, L"Peak Lock: OFF");
+  if (app->manualNotchCheck) SendMessageW(app->manualNotchCheck, BM_SETCHECK, BST_CHECKED, 0);
   if (app->autoBookmarkCheck) SendMessageW(app->autoBookmarkCheck, BM_SETCHECK, BST_CHECKED, 0);
   if (app->autoBookmarkConfSlider) SendMessageW(app->autoBookmarkConfSlider, TBM_SETPOS, TRUE, 65);
   if (app->autoBookmarkMidSlider) SendMessageW(app->autoBookmarkMidSlider, TBM_SETPOS, TRUE, 65);
@@ -1336,6 +1488,133 @@ RECT GetWaterfallMapRect(const RECT& clientRc) {
   RECT plot = {wfRc.left + 14, panRc.bottom + 8, wfRc.right - 14, wfRc.bottom - 34};
   RECT map = {plot.left, plot.bottom - 12, plot.right, plot.bottom - 2};
   return map;
+}
+
+float WaterfallFreqRangeMinHz(const AppState* app) {
+  if (!app || app->previewWav.sampleRate <= 0) {
+    return 80.0f;
+  }
+  return 80.0f;
+}
+
+float WaterfallFreqRangeMaxHz(const AppState* app) {
+  if (!app || app->previewWav.sampleRate <= 0) {
+    return 2200.0f;
+  }
+  const float nyq = 0.5f * static_cast<float>(app->previewWav.sampleRate);
+  return std::min(2200.0f, nyq - 20.0f);
+}
+
+float YToFreqHz(const AppState* app, const RECT& plot, int y) {
+  const float fMin = WaterfallFreqRangeMinHz(app);
+  const float fMax = WaterfallFreqRangeMaxHz(app);
+  const float yn = static_cast<float>(std::clamp(y, static_cast<int>(plot.top), static_cast<int>(plot.bottom - 1)) -
+                                       plot.top) /
+                   std::max<int>(1, static_cast<int>(plot.bottom - plot.top));
+  return fMax - yn * (fMax - fMin);
+}
+
+int FreqToY(const AppState* app, const RECT& plot, float freqHz) {
+  const float fMin = WaterfallFreqRangeMinHz(app);
+  const float fMax = WaterfallFreqRangeMaxHz(app);
+  if (fMax <= fMin) {
+    return plot.bottom;
+  }
+  const float yn = 1.0f - (std::clamp(freqHz, fMin, fMax) - fMin) / (fMax - fMin);
+  return plot.top + static_cast<int>(std::round(yn * (plot.bottom - plot.top)));
+}
+
+int HitTestManualNotch(const AppState* app, const RECT& plot, POINT p) {
+  if (!app || app->manualNotches.empty() || !PtInRect(&plot, p)) {
+    return -1;
+  }
+  int best = -1;
+  int bestDy = 99999;
+  for (std::size_t i = 0; i < app->manualNotches.size(); ++i) {
+    const int y = FreqToY(app, plot, app->manualNotches[i].freqHz);
+    const int dy = std::abs(p.y - y);
+    if (dy < bestDy) {
+      bestDy = dy;
+      best = static_cast<int>(i);
+    }
+  }
+  return (bestDy <= 9) ? best : -1;
+}
+
+void SortAndMergeManualNotches(AppState* app) {
+  if (!app) return;
+  std::sort(app->manualNotches.begin(), app->manualNotches.end(),
+            [](const NotchBand& a, const NotchBand& b) { return a.freqHz < b.freqHz; });
+  std::vector<NotchBand> merged;
+  merged.reserve(app->manualNotches.size());
+  for (const auto& n : app->manualNotches) {
+    if (!merged.empty() && std::fabs(merged.back().freqHz - n.freqHz) < 1.0f) {
+      merged.back().widthHz = std::max(merged.back().widthHz, n.widthHz);
+    } else {
+      merged.push_back(n);
+    }
+  }
+  app->manualNotches.swap(merged);
+}
+
+void ClampManualNotchesToRange(AppState* app) {
+  if (!app) {
+    return;
+  }
+  const float fMin = WaterfallFreqRangeMinHz(app);
+  const float fMax = WaterfallFreqRangeMaxHz(app);
+  for (auto& n : app->manualNotches) {
+    n.freqHz = std::clamp(n.freqHz, fMin, fMax);
+    n.widthHz = std::clamp(n.widthHz, 6.0f, 200.0f);
+  }
+}
+
+void AddManualNotchAtFreq(AppState* app, float freqHz) {
+  if (!app) {
+    return;
+  }
+  const float fMin = WaterfallFreqRangeMinHz(app);
+  const float fMax = WaterfallFreqRangeMaxHz(app);
+  const float f = std::clamp(freqHz, fMin, fMax);
+  for (std::size_t i = 0; i < app->manualNotches.size(); ++i) {
+    if (std::fabs(app->manualNotches[i].freqHz - f) < 4.0f) {
+      app->activeManualNotch = static_cast<int>(i);
+      return;
+    }
+  }
+  NotchBand n;
+  n.freqHz = f;
+  n.widthHz = 24.0f;
+  app->manualNotches.push_back(n);
+  SortAndMergeManualNotches(app);
+  for (std::size_t i = 0; i < app->manualNotches.size(); ++i) {
+    if (std::fabs(app->manualNotches[i].freqHz - f) < 1.0f) {
+      app->activeManualNotch = static_cast<int>(i);
+      break;
+    }
+  }
+}
+
+void RemoveManualNotchByIndex(AppState* app, int idx) {
+  if (!app || idx < 0 || idx >= static_cast<int>(app->manualNotches.size())) {
+    return;
+  }
+  app->manualNotches.erase(app->manualNotches.begin() + idx);
+  if (app->manualNotches.empty()) {
+    app->activeManualNotch = -1;
+  } else {
+    app->activeManualNotch = std::clamp(idx, 0, static_cast<int>(app->manualNotches.size()) - 1);
+  }
+}
+
+void UpdateActiveManualNotchFromPoint(AppState* app, const RECT& plot, POINT p) {
+  if (!app || app->activeManualNotch < 0 || app->activeManualNotch >= static_cast<int>(app->manualNotches.size())) {
+    return;
+  }
+  const float f = YToFreqHz(app, plot, p.y);
+  app->manualNotches[static_cast<std::size_t>(app->activeManualNotch)].freqHz = f;
+  SortAndMergeManualNotches(app);
+  ClampManualNotchesToRange(app);
 }
 
 void ApplyWaterfallZoomBox(AppState* app, const RECT& plot, POINT p0, POINT p1) {
@@ -1801,6 +2080,32 @@ void DrawPanadapter(HDC hdc, const RECT& rc, AppState* app) {
       DeleteObject(bb);
     }
 
+    if (app->manualNotchEnabled && !app->manualNotches.empty()) {
+      HPEN mpen = CreatePen(PS_SOLID, 1, RGB(255, 142, 106));
+      HPEN mpenSel = CreatePen(PS_SOLID, 2, RGB(255, 196, 136));
+      auto oldMp = reinterpret_cast<HPEN>(SelectObject(hdc, mpen));
+      for (std::size_t i = 0; i < app->manualNotches.size(); ++i) {
+        const auto& n = app->manualNotches[i];
+        const int bi = std::clamp(static_cast<int>((n.freqHz / std::max(1.0f, nyq)) * app->waterfallH),
+                                  0, std::max(0, app->waterfallH - 1));
+        const int x = xForBin(bi);
+        const int halfPx = std::max(1, static_cast<int>(std::round((n.widthHz / std::max(1.0f, nyq)) *
+                                                                    (plot.right - plot.left) * 0.5f)));
+        RECT mb = {x - halfPx, plot.top + 1, x + halfPx, plot.bottom - 1};
+        HBRUSH mf = CreateSolidBrush((static_cast<int>(i) == app->activeManualNotch)
+                                         ? RGB(68, 42, 30)
+                                         : RGB(46, 30, 24));
+        FillRect(hdc, &mb, mf);
+        DeleteObject(mf);
+        SelectObject(hdc, (static_cast<int>(i) == app->activeManualNotch) ? mpenSel : mpen);
+        MoveToEx(hdc, x, plot.top + 1, nullptr);
+        LineTo(hdc, x, plot.bottom - 1);
+      }
+      SelectObject(hdc, oldMp);
+      DeleteObject(mpen);
+      DeleteObject(mpenSel);
+    }
+
     // Peak markers from instant spectrum (HDSDR-like RF markers)
     struct Peak {
       int bin = 0;
@@ -2246,7 +2551,7 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
     }
     RECT hk = {map.left, map.top - 16, map.right, map.top - 1};
     SetTextColor(hdc, RGB(178, 206, 228));
-    DrawTextW(hdc, L"Hotkeys: A show auto, B/C add-clear, D del, L lock readout, N/P nav, 1..9 jump, E/I exp-imp, Shift+Drag zoom box, Ctrl+R reset (Shift=skip prompt)",
+    DrawTextW(hdc, L"Hotkeys: A show auto, B/C add-clear, D del, L lock readout, M manual notch, N/P nav, 1..9 jump, E/I exp-imp, Shift+Drag zoom box, Ctrl+R reset (Shift=skip prompt)",
               -1, &hk,
               DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
   }
@@ -2469,6 +2774,49 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
     }
     SelectObject(hdc, oldT);
     DeleteObject(trk);
+  }
+
+  if (app && app->manualNotchEnabled && !app->manualNotches.empty()) {
+    HPEN np = CreatePen(PS_SOLID, 1, RGB(230, 118, 86));
+    HPEN npSel = CreatePen(PS_SOLID, 2, RGB(255, 176, 120));
+    auto oldN = reinterpret_cast<HPEN>(SelectObject(hdc, np));
+    SetBkMode(hdc, TRANSPARENT);
+    for (std::size_t i = 0; i < app->manualNotches.size(); ++i) {
+      const auto& n = app->manualNotches[i];
+      const int y = FreqToY(app, plot, n.freqHz);
+      const float fMin = WaterfallFreqRangeMinHz(app);
+      const float fMax = WaterfallFreqRangeMaxHz(app);
+      const float widthFrac = n.widthHz / std::max(1.0f, (fMax - fMin));
+      const int halfH = std::max(1, static_cast<int>(std::round(widthFrac * (plot.bottom - plot.top) * 0.5f)));
+      RECT nb = {plot.left + 1, y - halfH, plot.right - 1, y + halfH};
+      HBRUSH fill = CreateSolidBrush((static_cast<int>(i) == app->activeManualNotch)
+                                         ? RGB(82, 42, 30)
+                                         : RGB(54, 28, 22));
+      FillRect(hdc, &nb, fill);
+      DeleteObject(fill);
+
+      SelectObject(hdc, (static_cast<int>(i) == app->activeManualNotch) ? npSel : np);
+      MoveToEx(hdc, plot.left + 1, y, nullptr);
+      LineTo(hdc, plot.right - 1, y);
+
+      if (i < 9) {
+        wchar_t idbuf[6] = {};
+        swprintf(idbuf, 6, L"N%u", static_cast<unsigned>(i + 1));
+        RECT lr = {plot.left + 6, y - 10, plot.left + 42, y + 10};
+        SetTextColor(hdc, RGB(255, 212, 172));
+        DrawTextW(hdc, idbuf, -1, &lr, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+      }
+    }
+    SelectObject(hdc, oldN);
+    DeleteObject(np);
+    DeleteObject(npSel);
+
+    RECT nr = {plot.left + 8, plot.top + 2, plot.left + 420, plot.top + 18};
+    std::wstringstream ns;
+    ns << L"Manual Notch ON: " << app->manualNotches.size()
+       << L"  (Alt+Click add/select, Alt+Drag move, Shift+Wheel width, Del remove)";
+    SetTextColor(hdc, RGB(248, 188, 148));
+    DrawTextW(hdc, ns.str().c_str(), -1, &nr, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
   }
 
   if (app->waterfallZoomBoxActive) {
@@ -2965,6 +3313,9 @@ void RefreshWaterfallFromInput(AppState* app) {
   std::string err;
   if (ndb::ReadWavMono16(ToUtf8(inW), &wav, &err)) {
     app->previewWav = std::move(wav);
+    ClampManualNotchesToRange(app);
+    SortAndMergeManualNotches(app);
+    app->activeManualNotch = app->manualNotches.empty() ? -1 : std::clamp(app->activeManualNotch, 0, static_cast<int>(app->manualNotches.size()) - 1);
   }
   InvalidateRect(app->chartPanel, nullptr, TRUE);
 }
@@ -3188,6 +3539,19 @@ LRESULT CALLBACK ChartProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         GetClientRect(hwnd, &rc);
         const RECT wfPlot = GetWaterfallPlotRect(rc);
         const RECT wfMap = GetWaterfallMapRect(rc);
+        if (app->manualNotchEnabled && PtInRect(&wfPlot, p) && (GetKeyState(VK_MENU) & 0x8000)) {
+          const int hit = HitTestManualNotch(app, wfPlot, p);
+          if (hit >= 0) {
+            app->activeManualNotch = hit;
+          } else {
+            AddManualNotchAtFreq(app, YToFreqHz(app, wfPlot, p.y));
+          }
+          app->manualNotchDragging = true;
+          SetCapture(hwnd);
+          SaveUiState(app);
+          InvalidateRect(hwnd, nullptr, TRUE);
+          return 0;
+        }
         if (JumpToBookmarkFromMapClick(app, wfMap, p)) {
           SetStatus(app, L"Jumped to bookmark");
           InvalidateRect(hwnd, nullptr, TRUE);
@@ -3226,6 +3590,20 @@ LRESULT CALLBACK ChartProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_KEYDOWN:
       if (app) {
         const UINT vk = static_cast<UINT>(wParam);
+        if (vk == VK_DELETE && app->activeManualNotch >= 0) {
+          RemoveManualNotchByIndex(app, app->activeManualNotch);
+          SaveUiState(app);
+          SetStatus(app, L"Manual notch removed [Del]");
+          InvalidateRect(hwnd, nullptr, TRUE);
+          return 0;
+        }
+        if (vk == 'M') {
+          app->manualNotchEnabled = !app->manualNotchEnabled;
+          SaveUiState(app);
+          SetStatus(app, app->manualNotchEnabled ? L"Manual notch ON [M]" : L"Manual notch OFF [M]");
+          InvalidateRect(hwnd, nullptr, TRUE);
+          return 0;
+        }
         if (vk == 'B') {
           const std::size_t before = app->bookmarksSec.size();
           AddBookmarkAtCurrent(app);
@@ -3310,6 +3688,14 @@ LRESULT CALLBACK ChartProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           app->mouseLeaveArmed = true;
         }
         const POINT p = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        const RECT wfPlot = GetWaterfallPlotRect(rc);
+        if (app->manualNotchDragging) {
+          UpdateActiveManualNotchFromPoint(app, wfPlot, p);
+          InvalidateRect(hwnd, nullptr, TRUE);
+          return 0;
+        }
         if (app->waterfallZoomBoxActive) {
           app->waterfallZoomBoxEnd = p;
           app->hoverActive = false;
@@ -3331,8 +3717,6 @@ LRESULT CALLBACK ChartProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           app->waterfallHoverActive = false;
           InvalidateRect(hwnd, nullptr, TRUE);
         } else {
-          RECT rc;
-          GetClientRect(hwnd, &rc);
           auto wf = HitTestWaterfall(app, rc, p);
           if (wf.ok) {
             app->waterfallHoverActive = true;
@@ -3362,7 +3746,12 @@ LRESULT CALLBACK ChartProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       }
       return 0;
     case WM_LBUTTONUP:
-      if (app && app->waterfallZoomBoxActive) {
+      if (app && app->manualNotchDragging) {
+        app->manualNotchDragging = false;
+        SaveUiState(app);
+        ReleaseCapture();
+        InvalidateRect(hwnd, nullptr, TRUE);
+      } else if (app && app->waterfallZoomBoxActive) {
         RECT rc;
         GetClientRect(hwnd, &rc);
         const RECT wfPlot = GetWaterfallPlotRect(rc);
@@ -3383,6 +3772,17 @@ LRESULT CALLBACK ChartProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         const POINT p = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
         RECT rc;
         GetClientRect(hwnd, &rc);
+        const RECT wfPlot = GetWaterfallPlotRect(rc);
+        if (app->manualNotchEnabled && PtInRect(&wfPlot, p)) {
+          const int hit = HitTestManualNotch(app, wfPlot, p);
+          if (hit >= 0) {
+            RemoveManualNotchByIndex(app, hit);
+            SaveUiState(app);
+            SetStatus(app, L"Manual notch removed");
+            InvalidateRect(hwnd, nullptr, TRUE);
+            return 0;
+          }
+        }
         const RECT wfMap = GetWaterfallMapRect(rc);
         if (RemoveBookmarkFromMapClick(app, wfMap, p)) {
           SetStatus(app, L"Bookmark removed");
@@ -3657,6 +4057,21 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                                           WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                                           m + 1010, y, 140, 30, hwnd,
                                           (HMENU)kIdPeakLockButton, nullptr, nullptr);
+      app->manualNotchCheck = CreateWindowW(L"BUTTON", L"Manual Notch",
+                                            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                                            m + 1010, y + 32, 140, 24, hwnd,
+                                            (HMENU)kIdManualNotchCheck, nullptr, nullptr);
+      SendMessageW(app->manualNotchCheck, BM_SETCHECK,
+                   app->manualNotchEnabled ? BST_CHECKED : BST_UNCHECKED, 0);
+      CreateWindowW(L"BUTTON", L"Clear Notch", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                    m + 1160, y + 32, 100, 24, hwnd, (HMENU)kIdManualNotchClear, nullptr,
+                    nullptr);
+      CreateWindowW(L"BUTTON", L"Export N", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                    m + 1264, y + 32, 92, 24, hwnd, (HMENU)kIdManualNotchExport, nullptr,
+                    nullptr);
+      CreateWindowW(L"BUTTON", L"Import N", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                    m + 1360, y + 32, 92, 24, hwnd, (HMENU)kIdManualNotchImport, nullptr,
+                    nullptr);
       app->autoBookmarkCheck = CreateWindowW(L"BUTTON", L"Auto Marks",
                                              WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
                                              m + 1160, y + 4, 100, 24, hwnd,
@@ -3774,7 +4189,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                                app->panAvgAlphaSlider, app->panPeakDecaySlider,
                                app->agcFloorSlider, app->agcSpanSlider, app->agcGainSlider,
                                app->agcGammaSlider, app->agcAutoCheck,
-                               app->peakLockButton, app->autoBookmarkCheck,
+                               app->peakLockButton, app->manualNotchCheck, app->autoBookmarkCheck,
                                app->autoBookmarkConfSlider, app->autoBookmarkMidSlider,
                                app->autoBookmarkHighSlider, app->resetUiButton,
                                app->priorEdit, app->priorCheck};
@@ -4034,6 +4449,58 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           InvalidateWaterfallCache(app);
           InvalidateRect(app->chartPanel, nullptr, TRUE);
           return 0;
+        case kIdManualNotchCheck:
+          app->manualNotchEnabled =
+              (SendMessageW(app->manualNotchCheck, BM_GETCHECK, 0, 0) == BST_CHECKED);
+          SaveUiState(app);
+          InvalidateRect(app->chartPanel, nullptr, TRUE);
+          return 0;
+        case kIdManualNotchClear:
+          app->manualNotches.clear();
+          app->activeManualNotch = -1;
+          SaveUiState(app);
+          SetStatus(app, L"Manual notches cleared");
+          InvalidateRect(app->chartPanel, nullptr, TRUE);
+          return 0;
+        case kIdManualNotchExport: {
+          const auto p = ChooseSaveFile(hwnd, L"Export manual notch CSV",
+                                        L"CSV files (*.csv)\0*.csv\0All files (*.*)\0*.*\0",
+                                        L"csv");
+          if (p.empty()) {
+            return 0;
+          }
+          std::string err;
+          if (!WriteManualNotchesCsv(ToUtf8(p), app->manualNotches, &err)) {
+            SetStatus(app, L"Manual notch export failed");
+            MessageBoxW(hwnd, ToWide(err).c_str(), L"Manual Notch", MB_OK | MB_ICONERROR);
+            return 0;
+          }
+          SetStatus(app, L"Manual notches exported");
+          return 0;
+        }
+        case kIdManualNotchImport: {
+          const auto p = ChooseOpenFile(hwnd, L"Import manual notch CSV",
+                                        L"CSV files (*.csv)\0*.csv\0All files (*.*)\0*.*\0");
+          if (p.empty()) {
+            return 0;
+          }
+          std::string err;
+          std::vector<NotchBand> loaded;
+          if (!ReadManualNotchesCsv(ToUtf8(p), &loaded, &err)) {
+            SetStatus(app, L"Manual notch import failed");
+            MessageBoxW(hwnd, ToWide(err).c_str(), L"Manual Notch", MB_OK | MB_ICONERROR);
+            return 0;
+          }
+          app->manualNotches = std::move(loaded);
+          ClampManualNotchesToRange(app);
+          app->activeManualNotch = app->manualNotches.empty() ? -1 : 0;
+          SaveUiState(app);
+          std::wstringstream ss;
+          ss << L"Manual notches imported: " << app->manualNotches.size();
+          SetStatus(app, ss.str());
+          InvalidateRect(app->chartPanel, nullptr, TRUE);
+          return 0;
+        }
         case kIdAutoBookmarkCheck:
           app->autoBookmarkEnabled =
               (SendMessageW(app->autoBookmarkCheck, BM_GETCHECK, 0, 0) == BST_CHECKED);
@@ -4210,6 +4677,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (src == app->panAvgAlphaSlider) {
           const int v = static_cast<int>(SendMessageW(app->panAvgAlphaSlider, TBM_GETPOS, 0, 0));
           app->panAvgAlpha = static_cast<float>(v) / 100.0f;
+          SaveUiState(app);
           std::wstringstream ss;
           ss << L"Pan Avg Alpha: " << std::fixed << std::setprecision(2) << app->panAvgAlpha;
           SetStatus(app, ss.str());
@@ -4219,6 +4687,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (src == app->panPeakDecaySlider) {
           const int v = static_cast<int>(SendMessageW(app->panPeakDecaySlider, TBM_GETPOS, 0, 0));
           app->panPeakDecay = static_cast<float>(v) / 100.0f;
+          SaveUiState(app);
           std::wstringstream ss;
           ss << L"Pan Peak Decay: " << std::fixed << std::setprecision(2) << app->panPeakDecay;
           SetStatus(app, ss.str());
@@ -4322,6 +4791,19 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           GetClientRect(app->chartPanel, &rcPanel);
           RECT wfPlot = GetWaterfallPlotRect(rcPanel);
           if (PtInRect(&wfPlot, pPanel)) {
+            if (app->manualNotchEnabled && (GetKeyState(VK_SHIFT) & 0x8000) &&
+                app->activeManualNotch >= 0 &&
+                app->activeManualNotch < static_cast<int>(app->manualNotches.size())) {
+              NotchBand& n = app->manualNotches[static_cast<std::size_t>(app->activeManualNotch)];
+              n.widthHz = std::clamp(n.widthHz + ((z > 0) ? 2.0f : -2.0f), 6.0f, 200.0f);
+              SaveUiState(app);
+              std::wstringstream ss;
+              ss << L"Notch width: " << std::fixed << std::setprecision(1) << n.widthHz
+                 << L" Hz";
+              SetStatus(app, ss.str());
+              InvalidateRect(app->chartPanel, nullptr, TRUE);
+              return 0;
+            }
             app->waterfallZoom = std::clamp(app->waterfallZoom * factor, 1.0, 8.0);
             const int vis = std::max(60, static_cast<int>(std::round(
                                          static_cast<double>(std::max(1, app->waterfallW)) /
