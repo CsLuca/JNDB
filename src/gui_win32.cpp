@@ -1438,17 +1438,14 @@ void ApplyResponsiveLayout(AppState* app) {
   for (const auto& c : app->childLayouts) {
     if (!IsWindow(c.hwnd)) continue;
     if (c.hwnd == app->chartPanel) continue;
+    if (c.hwnd == app->summaryText) continue;
     const int x = static_cast<int>(std::round(c.rc.left * sx));
     const int y = static_cast<int>(std::round(c.rc.top * sy));
     const int w = std::max(24, static_cast<int>(std::round((c.rc.right - c.rc.left) * sx)));
     const int h = std::max(20, static_cast<int>(std::round((c.rc.bottom - c.rc.top) * sy)));
 
-    // Compact wrap zone for top control clusters to keep all buttons visible.
-    if (c.rc.top < 920) {
-      topControls.push_back(CompactItem{c.hwnd, c.rc, w, h});
-    } else {
-      MoveWindow(c.hwnd, x, y, w, h, TRUE);
-    }
+    // Compact wrap for all controls except large chart/log panes.
+    topControls.push_back(CompactItem{c.hwnd, c.rc, w, h});
   }
 
   std::sort(topControls.begin(), topControls.end(), [](const CompactItem& a, const CompactItem& b) {
@@ -1483,11 +1480,20 @@ void ApplyResponsiveLayout(AppState* app) {
     topBottom = std::max(topBottom, curY + h);
   }
 
+  int summaryY = ch - 8;
+  if (app->summaryText && IsWindow(app->summaryText)) {
+    const int summaryX = 8;
+    const int summaryW = std::max(260, cw - 16);
+    const int summaryH = std::clamp(ch / 5, 96, 170);
+    summaryY = std::max(topBottom + 12, ch - summaryH - 8);
+    MoveWindow(app->summaryText, summaryX, summaryY, summaryW, summaryH, TRUE);
+  }
+
   if (app->chartPanel && IsWindow(app->chartPanel)) {
     const int panelX = 8;
-    const int panelY = std::clamp(topBottom + 8, 80, std::max(80, ch - 220));
+    const int panelY = std::clamp(topBottom + 8, 80, std::max(80, summaryY - 200));
     const int panelW = std::max(260, cw - 16);
-    const int panelH = std::max(180, ch - panelY - 8);
+    const int panelH = std::max(170, summaryY - panelY - 8);
     MoveWindow(app->chartPanel, panelX, panelY, panelW, panelH, TRUE);
     SetWindowPos(app->chartPanel, HWND_BOTTOM, 0, 0, 0, 0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
