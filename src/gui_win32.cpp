@@ -2062,7 +2062,7 @@ void EnsureWaterfallPreview(AppState* app) {
   auto at = [&](int tt, int bb) -> float {
     return norm[static_cast<std::size_t>(tt * spec.binCount + bb)];
   };
-  for (int t = 1; t + 1 < spec.frameCount; ++t) {
+  for (int t = 2; t + 2 < spec.frameCount; ++t) {
     for (int b = 2; b + 2 < spec.binCount; ++b) {
       const std::size_t i = static_cast<std::size_t>(t * spec.binCount + b);
       const float c = norm[i];
