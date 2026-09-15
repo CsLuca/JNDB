@@ -221,6 +221,7 @@ struct AppState {
   std::vector<std::uint8_t> waterfallDiffRgb;
   std::vector<std::uint8_t> waterfallRidgeMask;
   std::vector<std::uint8_t> waterfallRidgeStrength;
+  std::vector<std::uint8_t> waterfallCoherenceMask;
   std::vector<float> waterfallDbRender;
   int waterfallW = 0;
   int waterfallH = 0;
@@ -1607,6 +1608,7 @@ void EnsureWaterfallPreview(AppState* app) {
   app->waterfallRgb.assign(static_cast<std::size_t>(app->waterfallW * app->waterfallH * 3), 0);
   app->waterfallRidgeMask.assign(static_cast<std::size_t>(app->waterfallW * app->waterfallH), 0);
   app->waterfallRidgeStrength.assign(static_cast<std::size_t>(app->waterfallW * app->waterfallH), 0);
+  app->waterfallCoherenceMask.assign(static_cast<std::size_t>(app->waterfallW * app->waterfallH), 0);
   app->waterfallDbRender.assign(static_cast<std::size_t>(app->waterfallW * app->waterfallH), -120.0f);
   app->panInstantDb.assign(static_cast<std::size_t>(app->waterfallH), -120.0f);
   app->panAvgDb.assign(static_cast<std::size_t>(app->waterfallH), -120.0f);
@@ -1697,11 +1699,35 @@ void EnsureWaterfallPreview(AppState* app) {
   app->panMinDb = floorDb;
   app->panMaxDb = ceilDb;
 
+  // Adaptive dynamic-range lock per band (low/mid/high) to avoid one noisy
+  // region dominating all visibility.
+  std::vector<float> bandVals[3];
+  for (int t = 0; t < spec.frameCount; ++t) {
+    for (int b = 1; b < spec.binCount; ++b) {
+      const int bi = ((b - 1) * 3) / std::max(1, spec.binCount - 1);
+      bandVals[std::clamp(bi, 0, 2)].push_back(lvAdj[static_cast<std::size_t>(t * spec.binCount + b)]);
+    }
+  }
+  float bandFloor[3] = {floorDb, floorDb, floorDb};
+  float bandSpan[3] = {spanDb, spanDb, spanDb};
+  for (int i = 0; i < 3; ++i) {
+    if (bandVals[i].size() >= 16) {
+      const float b10 = percentile(bandVals[i], 0.10f);
+      const float b90 = percentile(bandVals[i], 0.90f);
+      const float b995 = percentile(bandVals[i], 0.995f);
+      bandFloor[i] = 0.65f * floorDb + 0.35f * b10;
+      bandSpan[i] = std::clamp(0.60f * spanDb + 0.40f * ((b995 - b90) + 20.0f), 8.0f, 70.0f);
+    }
+  }
+
   std::vector<float> norm(static_cast<std::size_t>(spec.frameCount * spec.binCount), 0.0f);
   for (int t = 0; t < spec.frameCount; ++t) {
     for (int b = 1; b < spec.binCount; ++b) {
-      float n = (lvAdj[static_cast<std::size_t>(t * spec.binCount + b)] - floorDb) /
-                std::max(1.0f, (ceilDb - floorDb));
+      const int bi = ((b - 1) * 3) / std::max(1, spec.binCount - 1);
+      const float bf = bandFloor[std::clamp(bi, 0, 2)];
+      const float bs = bandSpan[std::clamp(bi, 0, 2)];
+      float n = (lvAdj[static_cast<std::size_t>(t * spec.binCount + b)] - bf) /
+                std::max(1.0f, bs);
       n = std::clamp(n, 0.0f, 1.0f);
       // Dual-range split tone map: more detail in weak region, softer high compression.
       const float split = std::clamp(app->splitTonePoint, 0.35f, 0.80f);
@@ -1867,6 +1893,27 @@ void EnsureWaterfallPreview(AppState* app) {
         norm[idx] = std::clamp(norm[idx] * atten, 0.0f, 1.0f);
         ridgeCoarse[static_cast<std::size_t>(y * app->waterfallW + t)] = 0;
       }
+    }
+  }
+
+  // Coherence map: emphasizes structures coherent over time.
+  for (int y = 2; y + 2 < app->waterfallH; ++y) {
+    for (int t = 2; t + 2 < app->waterfallW; ++t) {
+      const int b = app->waterfallH - y;
+      const float c = norm[static_cast<std::size_t>(t * spec.binCount + b)];
+      const float t0 = norm[static_cast<std::size_t>((t - 2) * spec.binCount + b)];
+      const float t1 = norm[static_cast<std::size_t>((t - 1) * spec.binCount + b)];
+      const float t2 = norm[static_cast<std::size_t>((t + 1) * spec.binCount + b)];
+      const float t3 = norm[static_cast<std::size_t>((t + 2) * spec.binCount + b)];
+      const float mf = norm[static_cast<std::size_t>(t * spec.binCount + (b - 1))];
+      const float pf = norm[static_cast<std::size_t>(t * spec.binCount + (b + 1))];
+      const float temporalVar = std::fabs(c - t0) + std::fabs(c - t1) +
+                                std::fabs(c - t2) + std::fabs(c - t3);
+      const float freqContrast = std::fabs(pf - mf);
+      const float coh = std::clamp((1.0f - 0.7f * temporalVar) * (0.25f + 1.8f * freqContrast),
+                                   0.0f, 1.0f);
+      app->waterfallCoherenceMask[static_cast<std::size_t>(y * app->waterfallW + t)] =
+          static_cast<std::uint8_t>(std::round(255.0f * coh));
     }
   }
 
@@ -2874,6 +2921,30 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
     DrawTextW(hdc, L"Compare A/B [F9/F10/F11]", -1, &wr, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
   }
 
+  // Coherence map overlay: highlights structures stable across time.
+  if (!app->waterfallCoherenceMask.empty()) {
+    for (int x = plot.left; x < plot.right; x += 2) {
+      const float xn = static_cast<float>(x - plot.left) /
+                       std::max<int>(1, static_cast<int>(plot.right - plot.left - 1));
+      const int sx = std::clamp(srcX + static_cast<int>(xn * std::max(1, srcW - 1)), 0,
+                                app->waterfallW - 1);
+      for (int y = plot.top; y < plot.bottom; y += 2) {
+        const float yn = static_cast<float>(y - plot.top) /
+                         std::max<int>(1, static_cast<int>(plot.bottom - plot.top - 1));
+        const int sy = std::clamp(static_cast<int>(yn * std::max(1, app->waterfallH - 1)), 0,
+                                  app->waterfallH - 1);
+        const std::uint8_t cm = app->waterfallCoherenceMask[static_cast<std::size_t>(sy * app->waterfallW + sx)];
+        if (cm < 138) {
+          continue;
+        }
+        const int k = static_cast<int>(cm);
+        const COLORREF c = RGB(std::clamp(42 + k / 5, 0, 255), std::clamp(96 + k / 3, 0, 255),
+                               std::clamp(116 + k / 3, 0, 255));
+        SetPixelV(hdc, x, y, c);
+      }
+    }
+  }
+
   // Ridge overlay: highlight thin CW-like tonal lines.
   if (app->showRidgeOverlay && !app->waterfallRidgeMask.empty()) {
     for (int x = plot.left; x < plot.right; x += 2) {
@@ -3483,65 +3554,136 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
               DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
   }
 
-  // RF Zoom lane around peak-lock (local magnifier like SDR narrow view)
-  if (app->peakLockEnabled && app->peakLockBin >= 0 && srcW > 4 && !app->waterfallRgb.empty()) {
-    RECT zr = {plot.right - 190, plot.top + 26, plot.right - 10, plot.bottom - 24};
-    HBRUSH zbg = CreateSolidBrush(RGB(6, 12, 20));
-    FillRect(hdc, &zr, zbg);
-    DeleteObject(zbg);
-    HPEN zb = CreatePen(PS_SOLID, 1, RGB(72, 106, 140));
-    auto oldZ = reinterpret_cast<HPEN>(SelectObject(hdc, zb));
-    MoveToEx(hdc, zr.left, zr.top, nullptr);
-    LineTo(hdc, zr.right - 1, zr.top);
-    LineTo(hdc, zr.right - 1, zr.bottom - 1);
-    LineTo(hdc, zr.left, zr.bottom - 1);
-    LineTo(hdc, zr.left, zr.top);
-    SelectObject(hdc, oldZ);
-    DeleteObject(zb);
-
-    const int spanBins = std::max(18, std::min(44, app->waterfallH / 12));
-    const int row0 = std::max(0, app->peakLockBin - spanBins);
-    const int row1 = std::min(app->waterfallH - 1, app->peakLockBin + spanBins);
-    const int srcH = std::max(1, row1 - row0 + 1);
-    const int srcCols = std::max(1, srcW);
-    std::vector<std::uint8_t> lane(static_cast<std::size_t>(srcCols * srcH * 3), 0);
-    for (int yy = 0; yy < srcH; ++yy) {
-      const int row = row0 + yy;
-      for (int xx = 0; xx < srcCols; ++xx) {
-        const int col = std::clamp(srcX + xx, 0, app->waterfallW - 1);
-        const std::size_t sidx = static_cast<std::size_t>((row * app->waterfallW + col) * 3);
-        const std::size_t didx = static_cast<std::size_t>((yy * srcCols + xx) * 3);
-        lane[didx + 0] = app->waterfallRgb[sidx + 0];
-        lane[didx + 1] = app->waterfallRgb[sidx + 1];
-        lane[didx + 2] = app->waterfallRgb[sidx + 2];
+  // Track-centric multi zoom lanes (peak lock + top 2 candidate tracks).
+  if (srcW > 4 && !app->waterfallRgb.empty()) {
+    std::vector<std::pair<int, std::wstring>> laneCenters;
+    if (app->peakLockEnabled && app->peakLockBin >= 0) {
+      std::wstringstream ls;
+      ls << L"LOCK " << std::fixed << std::setprecision(3) << (app->peakLockHz / 1000.0f) << L" kHz";
+      laneCenters.push_back({std::clamp(app->peakLockBin, 0, std::max(0, app->waterfallH - 1)), ls.str()});
+    }
+    if (!app->overlayRows.empty() && app->previewWav.sampleRate > 0) {
+      const float nyq = 0.5f * static_cast<float>(app->previewWav.sampleRate);
+      const float fMin = 80.0f;
+      const float fMax = std::min(2200.0f, nyq - 20.0f);
+      struct TrackLane {
+        int id = -1;
+        float score = -1.0f;
+        float freq = 0.0f;
+      };
+      std::vector<TrackLane> best;
+      for (const auto& r : app->overlayRows) {
+        if (r.endSec < viewStart || r.startSec > viewEnd) {
+          continue;
+        }
+        const float s = 0.60f * std::clamp(r.confidence, 0.0f, 1.0f) +
+                        0.40f * std::clamp(r.freqStabilityScore, 0.0f, 1.0f);
+        bool done = false;
+        for (auto& b : best) {
+          if (b.id == r.trackId) {
+            if (s > b.score) {
+              b.score = s;
+              b.freq = r.freqHz;
+            }
+            done = true;
+            break;
+          }
+        }
+        if (!done) {
+          best.push_back({r.trackId, s, r.freqHz});
+        }
+      }
+      std::sort(best.begin(), best.end(), [](const TrackLane& a, const TrackLane& b) {
+        return a.score > b.score;
+      });
+      for (const auto& b : best) {
+        if (laneCenters.size() >= 3) {
+          break;
+        }
+        const float f = std::clamp(b.freq, fMin, fMax);
+        const float yn = 1.0f - (f - fMin) / std::max(1.0f, (fMax - fMin));
+        const int bin = std::clamp(static_cast<int>(std::round(yn * std::max(1, app->waterfallH - 1))), 0,
+                                   std::max(0, app->waterfallH - 1));
+        bool dup = false;
+        for (const auto& lc : laneCenters) {
+          if (std::abs(lc.first - bin) < 6) {
+            dup = true;
+            break;
+          }
+        }
+        if (!dup) {
+          std::wstringstream ls;
+          ls << L"T" << b.id << L" " << std::fixed << std::setprecision(3) << (f / 1000.0f) << L" kHz";
+          laneCenters.push_back({bin, ls.str()});
+        }
       }
     }
 
-    BITMAPINFO lbi = {};
-    lbi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    lbi.bmiHeader.biWidth = srcCols;
-    lbi.bmiHeader.biHeight = -srcH;
-    lbi.bmiHeader.biPlanes = 1;
-    lbi.bmiHeader.biBitCount = 24;
-    lbi.bmiHeader.biCompression = BI_RGB;
-    StretchDIBits(hdc, zr.left + 6, zr.top + 16, zr.right - zr.left - 12, zr.bottom - zr.top - 24,
-                  0, 0, srcCols, srcH, lane.data(), &lbi, DIB_RGB_COLORS, SRCCOPY);
+    const int laneCount = static_cast<int>(laneCenters.size());
+    for (int li = 0; li < laneCount; ++li) {
+      RECT zr = {plot.right - 190,
+                 plot.top + 26 + li * 88,
+                 plot.right - 10,
+                 std::min(plot.bottom - 24, plot.top + 26 + li * 88 + 84)};
+      if (zr.bottom - zr.top < 42) {
+        break;
+      }
+      HBRUSH zbg = CreateSolidBrush(RGB(6, 12, 20));
+      FillRect(hdc, &zr, zbg);
+      DeleteObject(zbg);
+      HPEN zb = CreatePen(PS_SOLID, 1, RGB(72, 106, 140));
+      auto oldZ = reinterpret_cast<HPEN>(SelectObject(hdc, zb));
+      MoveToEx(hdc, zr.left, zr.top, nullptr);
+      LineTo(hdc, zr.right - 1, zr.top);
+      LineTo(hdc, zr.right - 1, zr.bottom - 1);
+      LineTo(hdc, zr.left, zr.bottom - 1);
+      LineTo(hdc, zr.left, zr.top);
+      SelectObject(hdc, oldZ);
+      DeleteObject(zb);
 
-    const int cy = zr.top + 16 + ((zr.bottom - zr.top - 24) * (app->peakLockBin - row0)) /
-                                std::max(1, srcH - 1);
-    HPEN lk = CreatePen(PS_SOLID, 2, RGB(170, 255, 186));
-    auto oldL = reinterpret_cast<HPEN>(SelectObject(hdc, lk));
-    MoveToEx(hdc, zr.left + 6, cy, nullptr);
-    LineTo(hdc, zr.right - 6, cy);
-    SelectObject(hdc, oldL);
-    DeleteObject(lk);
+      const int centerBin = laneCenters[static_cast<std::size_t>(li)].first;
+      const int spanBins = std::max(14, std::min(36, app->waterfallH / 14));
+      const int row0 = std::max(0, centerBin - spanBins);
+      const int row1 = std::min(app->waterfallH - 1, centerBin + spanBins);
+      const int srcH = std::max(1, row1 - row0 + 1);
+      const int srcCols = std::max(1, srcW);
+      std::vector<std::uint8_t> lane(static_cast<std::size_t>(srcCols * srcH * 3), 0);
+      for (int yy = 0; yy < srcH; ++yy) {
+        const int row = row0 + yy;
+        for (int xx = 0; xx < srcCols; ++xx) {
+          const int col = std::clamp(srcX + xx, 0, app->waterfallW - 1);
+          const std::size_t sidx = static_cast<std::size_t>((row * app->waterfallW + col) * 3);
+          const std::size_t didx = static_cast<std::size_t>((yy * srcCols + xx) * 3);
+          lane[didx + 0] = app->waterfallRgb[sidx + 0];
+          lane[didx + 1] = app->waterfallRgb[sidx + 1];
+          lane[didx + 2] = app->waterfallRgb[sidx + 2];
+        }
+      }
 
-    RECT zt = {zr.left + 8, zr.top + 2, zr.right - 8, zr.top + 16};
-    std::wstringstream zs;
-    zs << L"RF Zoom " << std::fixed << std::setprecision(3) << (app->peakLockHz / 1000.0f)
-       << L" kHz";
-    SetTextColor(hdc, RGB(170, 230, 198));
-    DrawTextW(hdc, zs.str().c_str(), -1, &zt, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+      BITMAPINFO lbi = {};
+      lbi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+      lbi.bmiHeader.biWidth = srcCols;
+      lbi.bmiHeader.biHeight = -srcH;
+      lbi.bmiHeader.biPlanes = 1;
+      lbi.bmiHeader.biBitCount = 24;
+      lbi.bmiHeader.biCompression = BI_RGB;
+      StretchDIBits(hdc, zr.left + 6, zr.top + 14, zr.right - zr.left - 12, zr.bottom - zr.top - 20,
+                    0, 0, srcCols, srcH, lane.data(), &lbi, DIB_RGB_COLORS, SRCCOPY);
+
+      const int cy = zr.top + 14 + ((zr.bottom - zr.top - 20) * (centerBin - row0)) /
+                                  std::max(1, srcH - 1);
+      HPEN lk = CreatePen(PS_SOLID, 2, li == 0 ? RGB(170, 255, 186) : RGB(168, 214, 255));
+      auto oldL = reinterpret_cast<HPEN>(SelectObject(hdc, lk));
+      MoveToEx(hdc, zr.left + 6, cy, nullptr);
+      LineTo(hdc, zr.right - 6, cy);
+      SelectObject(hdc, oldL);
+      DeleteObject(lk);
+
+      RECT zt = {zr.left + 8, zr.top + 1, zr.right - 8, zr.top + 14};
+      SetTextColor(hdc, li == 0 ? RGB(170, 230, 198) : RGB(172, 216, 244));
+      DrawTextW(hdc, laneCenters[static_cast<std::size_t>(li)].second.c_str(), -1, &zt,
+                DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+    }
   }
 
   if (app && app->waterfallHoverActive && PtInRect(&plot, app->waterfallHoverPoint)) {
@@ -3733,6 +3875,23 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
         cc = RGB(GetRValue(cc) / 2, GetGValue(cc) / 2, GetBValue(cc) / 2);
         thick = 1;
       }
+
+      // Uncertainty halo: wider/softer when track stability-confidence is lower.
+      const float stab = std::clamp(r.freqStabilityScore, 0.0f, 1.0f);
+      const float conf = std::clamp(r.confidence, 0.0f, 1.0f);
+      const float uncertainty = std::clamp(1.0f - (0.60f * stab + 0.40f * conf), 0.0f, 1.0f);
+      const int halo = std::max(0, static_cast<int>(std::round(5.0f * uncertainty)));
+      if (halo > 0) {
+        HPEN hp = CreatePen(PS_SOLID, 1, RGB(96, 140, 178));
+        auto oldHp = reinterpret_cast<HPEN>(SelectObject(hdc, hp));
+        MoveToEx(hdc, x0, y - halo, nullptr);
+        LineTo(hdc, std::max(x0 + 1, x1), y - halo);
+        MoveToEx(hdc, x0, y + halo, nullptr);
+        LineTo(hdc, std::max(x0 + 1, x1), y + halo);
+        SelectObject(hdc, oldHp);
+        DeleteObject(hp);
+      }
+
       HPEN trk = CreatePen(PS_SOLID, thick, cc);
       auto oldT = reinterpret_cast<HPEN>(SelectObject(hdc, trk));
       MoveToEx(hdc, x0, y, nullptr);
@@ -3837,6 +3996,137 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
     RECT dr = {plot.right - 180, yLock - 14, plot.right - 6, yLock + 2};
     SetTextColor(hdc, RGB(186, 236, 252));
     DrawTextW(hdc, L"Dot/Dash Assist", -1, &dr, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
+  }
+
+  // CW cadence strip for selected/best track in view.
+  if (app && !app->overlayRows.empty()) {
+    const ndb::DecodeResult* focus = nullptr;
+    float bestScore = -1.0f;
+    for (const auto& r : app->overlayRows) {
+      if (r.endSec < viewStart || r.startSec > viewEnd) {
+        continue;
+      }
+      if (app->selectedTrackId >= 0 && r.trackId != app->selectedTrackId) {
+        continue;
+      }
+      const float s = 0.65f * std::clamp(r.confidence, 0.0f, 1.0f) +
+                      0.35f * std::clamp(r.keyingPeriodicityScore, 0.0f, 1.0f);
+      if (s > bestScore) {
+        bestScore = s;
+        focus = &r;
+      }
+    }
+    if (!focus) {
+      for (const auto& r : app->overlayRows) {
+        if (r.endSec < viewStart || r.startSec > viewEnd) {
+          continue;
+        }
+        const float s = 0.60f * std::clamp(r.confidence, 0.0f, 1.0f) +
+                        0.40f * std::clamp(r.keyingPeriodicityScore, 0.0f, 1.0f);
+        if (s > bestScore) {
+          bestScore = s;
+          focus = &r;
+        }
+      }
+    }
+    if (focus) {
+      RECT cs = {plot.left + 8, plot.bottom - 22, std::min(plot.right - 200, plot.left + 360), plot.bottom - 6};
+      HBRUSH cbg = CreateSolidBrush(RGB(8, 14, 22));
+      FillRect(hdc, &cs, cbg);
+      DeleteObject(cbg);
+      HPEN cb = CreatePen(PS_SOLID, 1, RGB(64, 96, 128));
+      auto oldCb = reinterpret_cast<HPEN>(SelectObject(hdc, cb));
+      MoveToEx(hdc, cs.left, cs.top, nullptr);
+      LineTo(hdc, cs.right - 1, cs.top);
+      LineTo(hdc, cs.right - 1, cs.bottom - 1);
+      LineTo(hdc, cs.left, cs.bottom - 1);
+      LineTo(hdc, cs.left, cs.top);
+      SelectObject(hdc, oldCb);
+      DeleteObject(cb);
+
+      const float dur = std::max(0.03f, focus->endSec - focus->startSec);
+      const int segW = std::max(2, static_cast<int>((plot.right - plot.left) / 120));
+      const float k = std::clamp(focus->keyingPeriodicityScore, 0.0f, 1.0f);
+      int x = cs.left + 4;
+      bool dot = true;
+      while (x < cs.right - 4) {
+        const int w = dot ? segW : segW * 3;
+        RECT sg = {x, static_cast<int>(cs.top) + 4 + (dot ? 2 : 0),
+                   std::min(static_cast<int>(cs.right) - 4, x + w), static_cast<int>(cs.bottom) - 4};
+        HBRUSH sb = CreateSolidBrush(dot ? RGB(152, 230, 255) : RGB(116, 190, 238));
+        FillRect(hdc, &sg, sb);
+        DeleteObject(sb);
+        x += w + std::max(1, segW / 2);
+        if (dur > 0.18f && k > 0.45f) {
+          dot = !dot;
+        }
+      }
+      RECT ct = {cs.left + 6, cs.top - 14, cs.right, cs.top};
+      std::wstringstream css;
+      css << L"Cadence T" << focus->trackId << L"  key=" << std::fixed << std::setprecision(2)
+          << std::clamp(focus->keyingPeriodicityScore, 0.0f, 1.0f);
+      SetTextColor(hdc, RGB(168, 220, 244));
+      DrawTextW(hdc, css.str().c_str(), -1, &ct, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+    }
+  }
+
+  // Micro heatmap "where to look next".
+  if (app && !app->overlayRows.empty()) {
+    RECT hm = {plot.right - 110, plot.bottom - 84, plot.right - 10, plot.bottom - 8};
+    HBRUSH hbg = CreateSolidBrush(RGB(8, 14, 20));
+    FillRect(hdc, &hm, hbg);
+    DeleteObject(hbg);
+    HPEN hp = CreatePen(PS_SOLID, 1, RGB(66, 98, 126));
+    auto oldHp = reinterpret_cast<HPEN>(SelectObject(hdc, hp));
+    MoveToEx(hdc, hm.left, hm.top, nullptr);
+    LineTo(hdc, hm.right - 1, hm.top);
+    LineTo(hdc, hm.right - 1, hm.bottom - 1);
+    LineTo(hdc, hm.left, hm.bottom - 1);
+    LineTo(hdc, hm.left, hm.top);
+    SelectObject(hdc, oldHp);
+    DeleteObject(hp);
+
+    constexpr int gx = 10;
+    constexpr int gy = 6;
+    float grid[gx * gy] = {};
+    for (const auto& r : app->overlayRows) {
+      if (r.endSec < viewStart || r.startSec > viewEnd) {
+        continue;
+      }
+      const float xc = std::clamp((0.5f * (r.startSec + r.endSec) - viewStart) / std::max(0.1f, viewDur), 0.0f, 1.0f);
+      const float yc = std::clamp((r.freqHz - WaterfallFreqRangeMinHz(app)) /
+                                      std::max(1.0f, WaterfallFreqRangeMaxHz(app) - WaterfallFreqRangeMinHz(app)),
+                                  0.0f, 1.0f);
+      const int ix = std::clamp(static_cast<int>(xc * (gx - 1)), 0, gx - 1);
+      const int iy = std::clamp(static_cast<int>((1.0f - yc) * (gy - 1)), 0, gy - 1);
+      const float w = 0.55f * std::clamp(r.confidence, 0.0f, 1.0f) +
+                      0.45f * std::clamp(r.freqStabilityScore, 0.0f, 1.0f);
+      grid[iy * gx + ix] += w;
+      if (ix + 1 < gx) grid[iy * gx + (ix + 1)] += 0.35f * w;
+      if (ix > 0) grid[iy * gx + (ix - 1)] += 0.35f * w;
+    }
+    float gMax = 0.0f;
+    for (float v : grid) {
+      gMax = std::max(gMax, v);
+    }
+    const int cw = std::max(4, (static_cast<int>(hm.right) - static_cast<int>(hm.left) - 8) / gx);
+    const int ch = std::max(4, (static_cast<int>(hm.bottom) - static_cast<int>(hm.top) - 8) / gy);
+    for (int j = 0; j < gy; ++j) {
+      for (int i = 0; i < gx; ++i) {
+        const float n = (gMax > 1e-5f) ? std::clamp(grid[j * gx + i] / gMax, 0.0f, 1.0f) : 0.0f;
+        const int r = static_cast<int>(22 + 220 * n);
+        const int g = static_cast<int>(42 + 180 * n);
+        const int b = static_cast<int>(34 + 64 * n);
+        RECT c = {hm.left + 4 + i * cw, hm.top + 4 + j * ch, hm.left + 4 + (i + 1) * cw - 1,
+                  hm.top + 4 + (j + 1) * ch - 1};
+        HBRUSH hb = CreateSolidBrush(RGB(r, g, b));
+        FillRect(hdc, &c, hb);
+        DeleteObject(hb);
+      }
+    }
+    RECT ht = {hm.left + 4, hm.top - 14, hm.right - 2, hm.top};
+    SetTextColor(hdc, RGB(170, 210, 230));
+    DrawTextW(hdc, L"Look-next", -1, &ht, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
   }
 
   if (app->waterfallZoomBoxActive) {
@@ -4368,6 +4658,7 @@ void InvalidateWaterfallCache(AppState* app) {
   app->waterfallDiffRgb.clear();
   app->waterfallRidgeMask.clear();
   app->waterfallRidgeStrength.clear();
+  app->waterfallCoherenceMask.clear();
   app->waterfallDbRender.clear();
   app->panInstantDb.clear();
   app->panAvgDb.clear();
