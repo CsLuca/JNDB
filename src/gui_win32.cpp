@@ -1052,6 +1052,19 @@ COLORREF SamplePalette(const std::vector<ColorStop>& stops, float x) {
   return RGB(stops.back().r, stops.back().g, stops.back().b);
 }
 
+std::wstring FormatFreqSmart(float fHz) {
+  if (fHz >= 1000.0f) {
+    std::wstringstream ss;
+    const float fk = fHz / 1000.0f;
+    const int decimals = fk < 10.0f ? 3 : (fk < 100.0f ? 2 : 1);
+    ss << std::fixed << std::setprecision(decimals) << fk << L" kHz";
+    return ss.str();
+  }
+  std::wstringstream ss;
+  ss << std::fixed << std::setprecision(0) << fHz << L" Hz";
+  return ss.str();
+}
+
 bool LoadCustomPaletteLut(const std::wstring& path, std::vector<ColorStop>* outStops,
                          std::string* error) {
   if (!outStops) {
@@ -2020,13 +2033,47 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
   SetTextColor(hdc, RGB(224, 236, 248));
   DrawTextW(hdc, rs.str().c_str(), -1, &rv, DT_LEFT | DT_TOP | DT_WORDBREAK);
 
+  RECT ps = {rp.left, rp.bottom + 8, rp.right, rp.bottom + 52};
+  HBRUSH pbg = CreateSolidBrush(RGB(10, 18, 28));
+  FillRect(hdc, &ps, pbg);
+  DeleteObject(pbg);
+  HPEN ppen = CreatePen(PS_SOLID, 1, RGB(74, 104, 134));
+  auto oldPp = reinterpret_cast<HPEN>(SelectObject(hdc, ppen));
+  MoveToEx(hdc, ps.left, ps.top, nullptr);
+  LineTo(hdc, ps.right - 1, ps.top);
+  LineTo(hdc, ps.right - 1, ps.bottom - 1);
+  LineTo(hdc, ps.left, ps.bottom - 1);
+  LineTo(hdc, ps.left, ps.top);
+  SelectObject(hdc, oldPp);
+  DeleteObject(ppen);
+
+  const auto pal = PaletteStopsByPreset(app);
+  RECT grad = {ps.left + 8, ps.top + 20, ps.right - 8, ps.bottom - 8};
+  for (int x = grad.left; x < grad.right; ++x) {
+    const float n = static_cast<float>(x - grad.left) /
+                    std::max<int>(1, static_cast<int>(grad.right - grad.left - 1));
+    HPEN px = CreatePen(PS_SOLID, 1, SamplePalette(pal, n));
+    auto oldPx = reinterpret_cast<HPEN>(SelectObject(hdc, px));
+    MoveToEx(hdc, x, grad.top, nullptr);
+    LineTo(hdc, x, grad.bottom);
+    SelectObject(hdc, oldPx);
+    DeleteObject(px);
+  }
+  std::wstring pname = L"Palette: HDSDR";
+  if (app->palettePreset == 1) pname = L"Palette: SDR#";
+  else if (app->palettePreset == 2) pname = L"Palette: CubicSDR";
+  else if (app->palettePreset == 3) pname = L"Palette: Custom LUT";
+  RECT pt = {ps.left + 8, ps.top + 2, ps.right - 8, ps.top + 18};
+  SetTextColor(hdc, RGB(184, 212, 236));
+  DrawTextW(hdc, pname.c_str(), -1, &pt, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+
   const float nyqTicks = app && app->previewWav.sampleRate > 0
                              ? 0.5f * static_cast<float>(app->previewWav.sampleRate)
                              : 4000.0f;
   const float fMinTicks = 80.0f;
   const float fMaxTicks = std::min(2200.0f, nyqTicks - 20.0f);
   const int tickCount = 5;
-  const int minorPerMajor = 4;
+  const int minorPerMajor = (srcW < std::max(1, app->waterfallW / 2)) ? 6 : 4;
   HPEN tickPen = CreatePen(PS_SOLID, 1, RGB(110, 140, 168));
   auto oldTickPen = reinterpret_cast<HPEN>(SelectObject(hdc, tickPen));
   SetTextColor(hdc, RGB(176, 202, 226));
@@ -2036,10 +2083,9 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
     MoveToEx(hdc, plot.left, y, nullptr);
     LineTo(hdc, plot.left + 6, y);
     const float fHz = fMinTicks + u * (fMaxTicks - fMinTicks);
-    std::wstringstream ss;
-    ss << std::fixed << std::setprecision(2) << (fHz / 1000.0f) << L" kHz";
-    RECT tr = {plot.left + 10, y - 9, plot.left + 92, y + 9};
-    DrawTextW(hdc, ss.str().c_str(), -1, &tr, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+    const std::wstring lbl = FormatFreqSmart(fHz);
+    RECT tr = {plot.left + 10, y - 9, plot.left + 122, y + 9};
+    DrawTextW(hdc, lbl.c_str(), -1, &tr, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
   }
 
   HPEN minorPen = CreatePen(PS_SOLID, 1, RGB(74, 102, 128));
