@@ -82,6 +82,8 @@ constexpr int kIdAutoMarkPresetWeak = 1047;
 constexpr int kIdResetUiSession = 1048;
 constexpr int kIdPalettePresetCombo = 1049;
 constexpr int kIdPaletteLoadLut = 1050;
+constexpr int kIdPanAvgAlphaSlider = 1051;
+constexpr int kIdPanPeakDecaySlider = 1052;
 
 constexpr UINT kMsgProgress = WM_APP + 1;
 constexpr UINT kMsgDone = WM_APP + 2;
@@ -141,6 +143,8 @@ struct AppState {
   HWND palettePresetCombo = nullptr;
   HWND paletteLoadButton = nullptr;
   HWND waterfallFpsCombo = nullptr;
+  HWND panAvgAlphaSlider = nullptr;
+  HWND panPeakDecaySlider = nullptr;
   HWND agcFloorSlider = nullptr;
   HWND agcSpanSlider = nullptr;
   HWND agcGainSlider = nullptr;
@@ -179,6 +183,8 @@ struct AppState {
   std::vector<float> panInstantDb;
   std::vector<float> panAvgDb;
   std::vector<float> panPeakDb;
+  float panAvgAlpha = 0.08f;
+  float panPeakDecay = 0.12f;
   float panMinDb = -120.0f;
   float panMaxDb = -20.0f;
   int panLastCol = -1;
@@ -1692,9 +1698,11 @@ void UpdatePanadapterPersistence(AppState* app) {
   for (int y = 0; y < app->waterfallH; ++y) {
     const float inst = app->waterfallDbRender[static_cast<std::size_t>(y * app->waterfallW + col)];
     app->panInstantDb[static_cast<std::size_t>(y)] = inst;
+    const float a = std::clamp(app->panAvgAlpha, 0.01f, 0.40f);
     app->panAvgDb[static_cast<std::size_t>(y)] =
-        0.92f * app->panAvgDb[static_cast<std::size_t>(y)] + 0.08f * inst;
-    const float decayed = app->panPeakDb[static_cast<std::size_t>(y)] - 0.12f;
+        (1.0f - a) * app->panAvgDb[static_cast<std::size_t>(y)] + a * inst;
+    const float decayed = app->panPeakDb[static_cast<std::size_t>(y)] -
+                          std::clamp(app->panPeakDecay, 0.01f, 1.20f);
     app->panPeakDb[static_cast<std::size_t>(y)] = std::max(decayed, inst);
   }
 }
@@ -3578,6 +3586,28 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     m + 1092, y, 156, 30, hwnd, (HMENU)kIdWaterfallDxPreset, nullptr, nullptr);
       y += 38;
 
+      CreateWindowW(L"STATIC", L"Pan Avg Alpha", WS_CHILD | WS_VISIBLE, m + 1092, y + 6, 92, 22,
+                    hwnd, nullptr, nullptr, nullptr);
+      app->panAvgAlphaSlider = CreateWindowW(TRACKBAR_CLASSW, L"",
+                                             WS_CHILD | WS_VISIBLE | TBS_AUTOTICKS, m + 1188, y,
+                                             170, 28, hwnd, (HMENU)kIdPanAvgAlphaSlider, nullptr,
+                                             nullptr);
+      SendMessageW(app->panAvgAlphaSlider, TBM_SETRANGEMIN, FALSE, 1);
+      SendMessageW(app->panAvgAlphaSlider, TBM_SETRANGEMAX, FALSE, 40);
+      SendMessageW(app->panAvgAlphaSlider, TBM_SETPOS, TRUE,
+                   static_cast<LPARAM>(std::round(app->panAvgAlpha * 100.0f)));
+      CreateWindowW(L"STATIC", L"Peak Decay", WS_CHILD | WS_VISIBLE, m + 1364, y + 6, 72, 22,
+                    hwnd, nullptr, nullptr, nullptr);
+      app->panPeakDecaySlider = CreateWindowW(TRACKBAR_CLASSW, L"",
+                                              WS_CHILD | WS_VISIBLE | TBS_AUTOTICKS, m + 1438, y,
+                                              170, 28, hwnd, (HMENU)kIdPanPeakDecaySlider, nullptr,
+                                              nullptr);
+      SendMessageW(app->panPeakDecaySlider, TBM_SETRANGEMIN, FALSE, 1);
+      SendMessageW(app->panPeakDecaySlider, TBM_SETRANGEMAX, FALSE, 120);
+      SendMessageW(app->panPeakDecaySlider, TBM_SETPOS, TRUE,
+                   static_cast<LPARAM>(std::round(app->panPeakDecay * 100.0f)));
+      y += 36;
+
       CreateWindowW(L"STATIC", L"AGC Floor", WS_CHILD | WS_VISIBLE, m, y + 6, 64, 22, hwnd,
                     nullptr, nullptr, nullptr);
       app->agcFloorSlider = CreateWindowW(TRACKBAR_CLASSW, L"",
@@ -3741,6 +3771,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                                app->palettePresetCombo, app->paletteLoadButton,
                                app->yawSlider, app->pitchSlider, app->shadingCheck,
                                app->colormapCombo, app->waterfallFpsCombo,
+                               app->panAvgAlphaSlider, app->panPeakDecaySlider,
                                app->agcFloorSlider, app->agcSpanSlider, app->agcGainSlider,
                                app->agcGammaSlider, app->agcAutoCheck,
                                app->peakLockButton, app->autoBookmarkCheck,
@@ -4176,6 +4207,24 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           InvalidateRect(app->chartPanel, nullptr, TRUE);
           return 0;
         }
+        if (src == app->panAvgAlphaSlider) {
+          const int v = static_cast<int>(SendMessageW(app->panAvgAlphaSlider, TBM_GETPOS, 0, 0));
+          app->panAvgAlpha = static_cast<float>(v) / 100.0f;
+          std::wstringstream ss;
+          ss << L"Pan Avg Alpha: " << std::fixed << std::setprecision(2) << app->panAvgAlpha;
+          SetStatus(app, ss.str());
+          InvalidateRect(app->chartPanel, nullptr, TRUE);
+          return 0;
+        }
+        if (src == app->panPeakDecaySlider) {
+          const int v = static_cast<int>(SendMessageW(app->panPeakDecaySlider, TBM_GETPOS, 0, 0));
+          app->panPeakDecay = static_cast<float>(v) / 100.0f;
+          std::wstringstream ss;
+          ss << L"Pan Peak Decay: " << std::fixed << std::setprecision(2) << app->panPeakDecay;
+          SetStatus(app, ss.str());
+          InvalidateRect(app->chartPanel, nullptr, TRUE);
+          return 0;
+        }
         if (src == app->autoBookmarkConfSlider) {
           const int v = static_cast<int>(SendMessageW(app->autoBookmarkConfSlider, TBM_GETPOS, 0, 0));
           app->autoBookmarkMinConfidence = static_cast<float>(v) / 100.0f;
@@ -4242,14 +4291,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_CTLCOLOREDIT: {
       HDC hdc = reinterpret_cast<HDC>(wParam);
       SetBkMode(hdc, TRANSPARENT);
-      SetTextColor(hdc, RGB(24, 24, 24));
-      static HBRUSH bg = CreateSolidBrush(RGB(248, 250, 252));
+      SetTextColor(hdc, RGB(216, 228, 240));
+      SetBkColor(hdc, RGB(18, 24, 32));
+      static HBRUSH bg = CreateSolidBrush(RGB(18, 24, 32));
       return reinterpret_cast<LRESULT>(bg);
     }
     case WM_ERASEBKGND: {
       RECT r;
       GetClientRect(hwnd, &r);
-      HBRUSH b = CreateSolidBrush(RGB(248, 250, 252));
+      HBRUSH b = CreateSolidBrush(RGB(14, 20, 28));
       FillRect(reinterpret_cast<HDC>(wParam), &r, b);
       DeleteObject(b);
       return 1;
