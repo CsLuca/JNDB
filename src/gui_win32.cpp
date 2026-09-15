@@ -88,6 +88,7 @@ constexpr int kIdManualNotchCheck = 1053;
 constexpr int kIdManualNotchClear = 1054;
 constexpr int kIdManualNotchExport = 1055;
 constexpr int kIdManualNotchImport = 1056;
+constexpr int kIdWaterfallPersistCombo = 1057;
 
 constexpr UINT kMsgProgress = WM_APP + 1;
 constexpr UINT kMsgDone = WM_APP + 2;
@@ -152,6 +153,7 @@ struct AppState {
   HWND palettePresetCombo = nullptr;
   HWND paletteLoadButton = nullptr;
   HWND waterfallFpsCombo = nullptr;
+  HWND waterfallPersistCombo = nullptr;
   HWND panAvgAlphaSlider = nullptr;
   HWND panPeakDecaySlider = nullptr;
   HWND agcFloorSlider = nullptr;
@@ -187,6 +189,7 @@ struct AppState {
   std::vector<HistoryEntry> historyCompare;
   ndb::WavData previewWav;
   std::vector<std::uint8_t> waterfallRgb;
+  std::vector<std::uint8_t> waterfallRidgeMask;
   std::vector<float> waterfallDbRender;
   int waterfallW = 0;
   int waterfallH = 0;
@@ -212,6 +215,7 @@ struct AppState {
   std::vector<ColorStop> customPalette;
   std::wstring customPalettePath;
   int waterfallFps = 30;
+  int waterfallPersistenceMode = 1;  // 0 Fast, 1 Medium, 2 Long
   float agcFloorOffsetDb = -3.0f;
   float agcSpanDb = 22.0f;
   float agcGain = 1.35f;
@@ -806,6 +810,7 @@ void SaveUiState(AppState* app) {
   WritePrivateProfileStringW(L"view", L"yaw", std::to_wstring(app->yawDeg).c_str(), s);
   WritePrivateProfileStringW(L"view", L"pitch", std::to_wstring(app->pitchDeg).c_str(), s);
   WritePrivateProfileStringW(L"view", L"fps", std::to_wstring(app->waterfallFps).c_str(), s);
+  WritePrivateProfileStringW(L"view", L"persist_mode", std::to_wstring(app->waterfallPersistenceMode).c_str(), s);
   WritePrivateProfileStringW(L"view", L"zoom", std::to_wstring(app->waterfallZoom).c_str(), s);
   WritePrivateProfileStringW(L"view", L"pan", std::to_wstring(app->waterfallPanPx).c_str(), s);
   WritePrivateProfileStringW(L"view", L"shading", app->shadingEnabled ? L"1" : L"0", s);
@@ -863,6 +868,7 @@ void LoadUiState(AppState* app) {
   app->yawDeg = std::clamp(IniReadInt(app->uiStatePath, L"view", L"yaw", app->yawDeg), 10, 75);
   app->pitchDeg = std::clamp(IniReadInt(app->uiStatePath, L"view", L"pitch", app->pitchDeg), 8, 60);
   app->waterfallFps = std::clamp(IniReadInt(app->uiStatePath, L"view", L"fps", app->waterfallFps), 10, 120);
+  app->waterfallPersistenceMode = std::clamp(IniReadInt(app->uiStatePath, L"view", L"persist_mode", app->waterfallPersistenceMode), 0, 2);
   app->waterfallZoom = std::clamp(static_cast<double>(IniReadFloat(app->uiStatePath, L"view", L"zoom", static_cast<float>(app->waterfallZoom))), 1.0, 8.0);
   app->waterfallPanPx = std::max(0, IniReadInt(app->uiStatePath, L"view", L"pan", app->waterfallPanPx));
   app->shadingEnabled = IniReadBool(app->uiStatePath, L"view", L"shading", app->shadingEnabled);
@@ -929,6 +935,9 @@ void LoadUiState(AppState* app) {
   }
   if (app->waterfallFpsCombo) {
     SendMessageW(app->waterfallFpsCombo, CB_SETCURSEL, app->waterfallFps >= 60 ? 1 : 0, 0);
+  }
+  if (app->waterfallPersistCombo) {
+    SendMessageW(app->waterfallPersistCombo, CB_SETCURSEL, app->waterfallPersistenceMode, 0);
   }
   if (app->shadingCheck) {
     SendMessageW(app->shadingCheck, BM_SETCHECK,
@@ -1058,6 +1067,7 @@ void ResetUiSessionState(AppState* app) {
   app->colormap3d = 0;
   app->palettePreset = 0;
   app->waterfallFps = 30;
+  app->waterfallPersistenceMode = 1;
   app->waterfallZoom = 1.0;
   app->waterfallPanPx = 0;
   app->chartZoom = 1.0;
@@ -1089,6 +1099,7 @@ void ResetUiSessionState(AppState* app) {
   if (app->colormapCombo) SendMessageW(app->colormapCombo, CB_SETCURSEL, app->colormap3d, 0);
   if (app->palettePresetCombo) SendMessageW(app->palettePresetCombo, CB_SETCURSEL, app->palettePreset, 0);
   if (app->waterfallFpsCombo) SendMessageW(app->waterfallFpsCombo, CB_SETCURSEL, 0, 0);
+  if (app->waterfallPersistCombo) SendMessageW(app->waterfallPersistCombo, CB_SETCURSEL, app->waterfallPersistenceMode, 0);
   if (app->agcFloorSlider) SendMessageW(app->agcFloorSlider, TBM_SETPOS, TRUE, static_cast<LPARAM>(app->agcFloorOffsetDb));
   if (app->agcSpanSlider) SendMessageW(app->agcSpanSlider, TBM_SETPOS, TRUE, static_cast<LPARAM>(app->agcSpanDb));
   if (app->agcGainSlider) SendMessageW(app->agcGainSlider, TBM_SETPOS, TRUE, static_cast<LPARAM>(std::round(app->agcGain * 100.0f)));
@@ -1348,6 +1359,7 @@ void EnsureWaterfallPreview(AppState* app) {
   app->waterfallW = std::max(1, spec.frameCount);
   app->waterfallH = std::max(1, spec.binCount - 1);
   app->waterfallRgb.assign(static_cast<std::size_t>(app->waterfallW * app->waterfallH * 3), 0);
+  app->waterfallRidgeMask.assign(static_cast<std::size_t>(app->waterfallW * app->waterfallH), 0);
   app->waterfallDbRender.assign(static_cast<std::size_t>(app->waterfallW * app->waterfallH), -120.0f);
   app->panInstantDb.assign(static_cast<std::size_t>(app->waterfallH), -120.0f);
   app->panAvgDb.assign(static_cast<std::size_t>(app->waterfallH), -120.0f);
@@ -1421,12 +1433,18 @@ void EnsureWaterfallPreview(AppState* app) {
   }
 
   // HDSDR-like persistence: fast attack, slow decay for thin CW/NDB traces.
+  float persistenceDecay = 0.975f;
+  if (app && app->waterfallPersistenceMode == 0) {
+    persistenceDecay = 0.955f;
+  } else if (app && app->waterfallPersistenceMode == 2) {
+    persistenceDecay = 0.988f;
+  }
   for (int b = 1; b < spec.binCount; ++b) {
     float prev = 0.0f;
     for (int t = 0; t < spec.frameCount; ++t) {
       const std::size_t idx = static_cast<std::size_t>(t * spec.binCount + b);
       const float cur = norm[idx];
-      prev = std::max(cur, prev * 0.975f);
+      prev = std::max(cur, prev * persistenceDecay);
       norm[idx] = prev;
     }
   }
@@ -1535,11 +1553,30 @@ void EnsureWaterfallPreview(AppState* app) {
       const int b = app->waterfallH - y;
       const float v = lv[static_cast<std::size_t>(t * spec.binCount + b)];
       float n = norm[static_cast<std::size_t>(t * spec.binCount + b)];
+
+      std::uint8_t ridge = 0;
+      if (t > 1 && t + 2 < app->waterfallW && b > 2 && b + 2 < spec.binCount) {
+        const float tL = norm[static_cast<std::size_t>((t - 1) * spec.binCount + b)];
+        const float tR = norm[static_cast<std::size_t>((t + 1) * spec.binCount + b)];
+        const float fD = norm[static_cast<std::size_t>(t * spec.binCount + (b - 1))];
+        const float fU = norm[static_cast<std::size_t>(t * spec.binCount + (b + 1))];
+        const float gradT = std::fabs(tR - tL);
+        const float gradF = std::fabs(fU - fD);
+        const float curvF = std::fabs((fU + fD) - 2.0f * n);
+        const float persist = 0.5f *
+                              (norm[static_cast<std::size_t>((t - 2) * spec.binCount + b)] +
+                               norm[static_cast<std::size_t>((t + 2) * spec.binCount + b)]);
+        if (n > 0.26f && gradF > 1.20f * gradT && curvF > 0.030f && persist > 0.20f) {
+          ridge = 255;
+        }
+      }
+
       const COLORREF c = SamplePalette(palette, n);
       const std::size_t idx = static_cast<std::size_t>((y * app->waterfallW + t) * 3);
       app->waterfallRgb[idx + 0] = GetBValue(c);
       app->waterfallRgb[idx + 1] = GetGValue(c);
       app->waterfallRgb[idx + 2] = GetRValue(c);
+      app->waterfallRidgeMask[static_cast<std::size_t>(y * app->waterfallW + t)] = ridge;
       app->waterfallDbRender[static_cast<std::size_t>(y * app->waterfallW + t)] = v;
     }
   }
@@ -2369,6 +2406,74 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
   StretchDIBits(hdc, plot.left, plot.top, plot.right - plot.left, plot.bottom - plot.top,
                 srcX, 0, srcW, app->waterfallH, app->waterfallRgb.data(), &bmi, DIB_RGB_COLORS,
                 SRCCOPY);
+
+  // Ridge overlay: highlight thin CW-like tonal lines.
+  if (!app->waterfallRidgeMask.empty()) {
+    HPEN ridgePen = CreatePen(PS_SOLID, 1, RGB(160, 255, 186));
+    auto oldRp = reinterpret_cast<HPEN>(SelectObject(hdc, ridgePen));
+    for (int x = plot.left; x < plot.right; x += 2) {
+      const float xn = static_cast<float>(x - plot.left) /
+                       std::max<int>(1, static_cast<int>(plot.right - plot.left - 1));
+      const int sx = std::clamp(srcX + static_cast<int>(xn * std::max(1, srcW - 1)), 0,
+                                app->waterfallW - 1);
+      bool run = false;
+      int yStart = plot.top;
+      for (int y = plot.top; y < plot.bottom; ++y) {
+        const float yn = static_cast<float>(y - plot.top) /
+                         std::max<int>(1, static_cast<int>(plot.bottom - plot.top - 1));
+        const int sy = std::clamp(static_cast<int>(yn * std::max(1, app->waterfallH - 1)), 0,
+                                  app->waterfallH - 1);
+        const std::uint8_t m = app->waterfallRidgeMask[static_cast<std::size_t>(sy * app->waterfallW + sx)];
+        if (m != 0 && !run) {
+          run = true;
+          yStart = y;
+        } else if (m == 0 && run) {
+          if ((y - yStart) >= 2) {
+            MoveToEx(hdc, x, yStart, nullptr);
+            LineTo(hdc, x, y);
+          }
+          run = false;
+        }
+      }
+      if (run) {
+        MoveToEx(hdc, x, yStart, nullptr);
+        LineTo(hdc, x, plot.bottom);
+      }
+    }
+    SelectObject(hdc, oldRp);
+    DeleteObject(ridgePen);
+  }
+
+  // Dual waterfall view: wide context strip with current zoom window marker.
+  RECT wide = {plot.left + 8, plot.top + 8, std::min(plot.right - 8, plot.left + 208),
+               std::min(plot.bottom - 8, plot.top + 74)};
+  if ((wide.right - wide.left) > 80 && (wide.bottom - wide.top) > 24) {
+    StretchDIBits(hdc, wide.left, wide.top, wide.right - wide.left, wide.bottom - wide.top,
+                  0, 0, app->waterfallW, app->waterfallH, app->waterfallRgb.data(), &bmi,
+                  DIB_RGB_COLORS, SRCCOPY);
+    HPEN wb = CreatePen(PS_SOLID, 1, RGB(120, 160, 194));
+    auto oldWb = reinterpret_cast<HPEN>(SelectObject(hdc, wb));
+    MoveToEx(hdc, wide.left, wide.top, nullptr);
+    LineTo(hdc, wide.right - 1, wide.top);
+    LineTo(hdc, wide.right - 1, wide.bottom - 1);
+    LineTo(hdc, wide.left, wide.bottom - 1);
+    LineTo(hdc, wide.left, wide.top);
+    const int wx0 = wide.left + (srcX * (wide.right - wide.left)) / std::max(1, app->waterfallW);
+    const int wx1 = wide.left + ((srcX + srcW) * (wide.right - wide.left)) / std::max(1, app->waterfallW);
+    HPEN wv = CreatePen(PS_SOLID, 2, RGB(255, 224, 146));
+    auto oldWv = reinterpret_cast<HPEN>(SelectObject(hdc, wv));
+    MoveToEx(hdc, wx0, wide.top + 1, nullptr);
+    LineTo(hdc, wx0, wide.bottom - 1);
+    MoveToEx(hdc, wx1, wide.top + 1, nullptr);
+    LineTo(hdc, wx1, wide.bottom - 1);
+    SelectObject(hdc, oldWv);
+    DeleteObject(wv);
+    SelectObject(hdc, oldWb);
+    DeleteObject(wb);
+    RECT wt = {wide.left + 4, wide.top + 2, wide.right - 4, wide.top + 16};
+    SetTextColor(hdc, RGB(220, 236, 250));
+    DrawTextW(hdc, L"Wide view", -1, &wt, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+  }
 
   if (app && app->running) {
     const int p = std::clamp(static_cast<int>(std::round(app->decodeProgressVisualPct)), 0, 100);
@@ -3452,6 +3557,7 @@ void InvalidateWaterfallCache(AppState* app) {
     return;
   }
   app->waterfallRgb.clear();
+  app->waterfallRidgeMask.clear();
   app->waterfallDbRender.clear();
   app->panInstantDb.clear();
   app->panAvgDb.clear();
@@ -4123,8 +4229,17 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       SendMessageW(app->waterfallFpsCombo, CB_ADDSTRING, 0, (LPARAM)L"30 FPS");
       SendMessageW(app->waterfallFpsCombo, CB_ADDSTRING, 0, (LPARAM)L"60 FPS");
       SendMessageW(app->waterfallFpsCombo, CB_SETCURSEL, 0, 0);
+      CreateWindowW(L"STATIC", L"Persist", WS_CHILD | WS_VISIBLE, m + 1092, y + 6, 52, 22,
+                    hwnd, nullptr, nullptr, nullptr);
+      app->waterfallPersistCombo = CreateWindowW(
+          L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | WS_VSCROLL | CBS_DROPDOWNLIST,
+          m + 1148, y, 92, 120, hwnd, (HMENU)kIdWaterfallPersistCombo, nullptr, nullptr);
+      SendMessageW(app->waterfallPersistCombo, CB_ADDSTRING, 0, (LPARAM)L"Fast");
+      SendMessageW(app->waterfallPersistCombo, CB_ADDSTRING, 0, (LPARAM)L"Medium");
+      SendMessageW(app->waterfallPersistCombo, CB_ADDSTRING, 0, (LPARAM)L"Long");
+      SendMessageW(app->waterfallPersistCombo, CB_SETCURSEL, app->waterfallPersistenceMode, 0);
       CreateWindowW(L"BUTTON", L"3D DX Weak Preset", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                    m + 1092, y, 156, 30, hwnd, (HMENU)kIdWaterfallDxPreset, nullptr, nullptr);
+                    m + 1246, y, 156, 30, hwnd, (HMENU)kIdWaterfallDxPreset, nullptr, nullptr);
       y += 38;
 
       CreateWindowW(L"STATIC", L"Pan Avg Alpha", WS_CHILD | WS_VISIBLE, m + 1092, y + 6, 92, 22,
@@ -4327,6 +4442,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                                app->palettePresetCombo, app->paletteLoadButton,
                                app->yawSlider, app->pitchSlider, app->shadingCheck,
                                app->colormapCombo, app->waterfallFpsCombo,
+                               app->waterfallPersistCombo,
                                app->panAvgAlphaSlider, app->panPeakDecaySlider,
                                app->agcFloorSlider, app->agcSpanSlider, app->agcGainSlider,
                                app->agcGammaSlider, app->agcAutoCheck,
@@ -4523,6 +4639,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           app->shadingEnabled = true;
           app->colormap3d = 1;
           app->waterfallFps = 60;
+          app->waterfallPersistenceMode = 2;
           app->agcFloorOffsetDb = -6.0f;
           app->agcSpanDb = 20.0f;
           app->agcGain = 1.50f;
@@ -4546,6 +4663,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           }
           if (app->waterfallFpsCombo) {
             SendMessageW(app->waterfallFpsCombo, CB_SETCURSEL, 1, 0);
+          }
+          if (app->waterfallPersistCombo) {
+            SendMessageW(app->waterfallPersistCombo, CB_SETCURSEL, app->waterfallPersistenceMode, 0);
           }
           if (app->agcFloorSlider) {
             SendMessageW(app->agcFloorSlider, TBM_SETPOS, TRUE, static_cast<LPARAM>(app->agcFloorOffsetDb));
@@ -4580,6 +4700,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
               SetTimer(app->hwnd, kWaterfallTimerId, WaterfallTimerMs(app), nullptr);
             }
             SaveUiState(app);
+            InvalidateRect(app->chartPanel, nullptr, TRUE);
+          }
+          return 0;
+        case kIdWaterfallPersistCombo:
+          if (HIWORD(wParam) == CBN_SELCHANGE && app->waterfallPersistCombo) {
+            const int sel = static_cast<int>(SendMessageW(app->waterfallPersistCombo, CB_GETCURSEL, 0, 0));
+            app->waterfallPersistenceMode = std::clamp(sel, 0, 2);
+            SaveUiState(app);
+            InvalidateWaterfallCache(app);
             InvalidateRect(app->chartPanel, nullptr, TRUE);
           }
           return 0;
