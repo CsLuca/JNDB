@@ -106,6 +106,11 @@ constexpr int kIdQrmPresetHeavy = 1071;
 constexpr int kIdDiffWaterfallCheck = 1072;
 constexpr int kIdDotDashAssistCheck = 1073;
 constexpr int kIdFftPreviewCombo = 1074;
+constexpr int kIdCoherenceOverlayCheck = 1075;
+constexpr int kIdUncertaintyHalosCheck = 1076;
+constexpr int kIdCadenceStripCheck = 1077;
+constexpr int kIdLookNextHeatmapCheck = 1078;
+constexpr int kIdTrackZoomLanesCheck = 1079;
 
 constexpr UINT kMsgProgress = WM_APP + 1;
 constexpr UINT kMsgDone = WM_APP + 2;
@@ -191,6 +196,11 @@ struct AppState {
   HWND freezeButton = nullptr;
   HWND diffWaterfallCheck = nullptr;
   HWND dotDashAssistCheck = nullptr;
+  HWND coherenceOverlayCheck = nullptr;
+  HWND uncertaintyHalosCheck = nullptr;
+  HWND cadenceStripCheck = nullptr;
+  HWND lookNextHeatmapCheck = nullptr;
+  HWND trackZoomLanesCheck = nullptr;
   HWND fftPreviewCombo = nullptr;
   HWND autoBookmarkCheck = nullptr;
   HWND autoBookmarkConfSlider = nullptr;
@@ -258,6 +268,11 @@ struct AppState {
   bool showRidgeOverlay = true;
   bool differenceWaterfallEnabled = false;
   bool dotDashAssistEnabled = true;
+  bool showCoherenceOverlay = true;
+  bool showUncertaintyHalos = true;
+  bool showCadenceStrip = true;
+  bool showLookNextHeatmap = true;
+  bool showTrackZoomLanes = true;
   bool autoFocusEnabled = true;
   float autoFocusStrength = 0.28f;
   float agcFloorOffsetDb = -3.0f;
@@ -919,6 +934,11 @@ void SaveUiState(AppState* app) {
   WritePrivateProfileStringW(L"view", L"show_ridge", app->showRidgeOverlay ? L"1" : L"0", s);
   WritePrivateProfileStringW(L"view", L"diff_waterfall", app->differenceWaterfallEnabled ? L"1" : L"0", s);
   WritePrivateProfileStringW(L"view", L"dotdash_assist", app->dotDashAssistEnabled ? L"1" : L"0", s);
+  WritePrivateProfileStringW(L"view", L"coherence_overlay", app->showCoherenceOverlay ? L"1" : L"0", s);
+  WritePrivateProfileStringW(L"view", L"uncertainty_halos", app->showUncertaintyHalos ? L"1" : L"0", s);
+  WritePrivateProfileStringW(L"view", L"cadence_strip", app->showCadenceStrip ? L"1" : L"0", s);
+  WritePrivateProfileStringW(L"view", L"looknext_heatmap", app->showLookNextHeatmap ? L"1" : L"0", s);
+  WritePrivateProfileStringW(L"view", L"track_zoom_lanes", app->showTrackZoomLanes ? L"1" : L"0", s);
   WritePrivateProfileStringW(L"view", L"frozen", app->waterfallFrozen ? L"1" : L"0", s);
   WritePrivateProfileStringW(L"view", L"freeze_col", std::to_wstring(app->waterfallFreezeCenterCol).c_str(), s);
   WritePrivateProfileStringW(L"view", L"zoom", std::to_wstring(app->waterfallZoom).c_str(), s);
@@ -990,6 +1010,11 @@ void LoadUiState(AppState* app) {
   app->showRidgeOverlay = IniReadBool(app->uiStatePath, L"view", L"show_ridge", app->showRidgeOverlay);
   app->differenceWaterfallEnabled = IniReadBool(app->uiStatePath, L"view", L"diff_waterfall", app->differenceWaterfallEnabled);
   app->dotDashAssistEnabled = IniReadBool(app->uiStatePath, L"view", L"dotdash_assist", app->dotDashAssistEnabled);
+  app->showCoherenceOverlay = IniReadBool(app->uiStatePath, L"view", L"coherence_overlay", app->showCoherenceOverlay);
+  app->showUncertaintyHalos = IniReadBool(app->uiStatePath, L"view", L"uncertainty_halos", app->showUncertaintyHalos);
+  app->showCadenceStrip = IniReadBool(app->uiStatePath, L"view", L"cadence_strip", app->showCadenceStrip);
+  app->showLookNextHeatmap = IniReadBool(app->uiStatePath, L"view", L"looknext_heatmap", app->showLookNextHeatmap);
+  app->showTrackZoomLanes = IniReadBool(app->uiStatePath, L"view", L"track_zoom_lanes", app->showTrackZoomLanes);
   app->waterfallFrozen = IniReadBool(app->uiStatePath, L"view", L"frozen", app->waterfallFrozen);
   app->waterfallFreezeCenterCol = IniReadInt(app->uiStatePath, L"view", L"freeze_col", app->waterfallFreezeCenterCol);
   app->waterfallZoom = std::clamp(static_cast<double>(IniReadFloat(app->uiStatePath, L"view", L"zoom", static_cast<float>(app->waterfallZoom))), 1.0, 8.0);
@@ -1086,6 +1111,26 @@ void LoadUiState(AppState* app) {
   if (app->dotDashAssistCheck) {
     SendMessageW(app->dotDashAssistCheck, BM_SETCHECK,
                  app->dotDashAssistEnabled ? BST_CHECKED : BST_UNCHECKED, 0);
+  }
+  if (app->coherenceOverlayCheck) {
+    SendMessageW(app->coherenceOverlayCheck, BM_SETCHECK,
+                 app->showCoherenceOverlay ? BST_CHECKED : BST_UNCHECKED, 0);
+  }
+  if (app->uncertaintyHalosCheck) {
+    SendMessageW(app->uncertaintyHalosCheck, BM_SETCHECK,
+                 app->showUncertaintyHalos ? BST_CHECKED : BST_UNCHECKED, 0);
+  }
+  if (app->cadenceStripCheck) {
+    SendMessageW(app->cadenceStripCheck, BM_SETCHECK,
+                 app->showCadenceStrip ? BST_CHECKED : BST_UNCHECKED, 0);
+  }
+  if (app->lookNextHeatmapCheck) {
+    SendMessageW(app->lookNextHeatmapCheck, BM_SETCHECK,
+                 app->showLookNextHeatmap ? BST_CHECKED : BST_UNCHECKED, 0);
+  }
+  if (app->trackZoomLanesCheck) {
+    SendMessageW(app->trackZoomLanesCheck, BM_SETCHECK,
+                 app->showTrackZoomLanes ? BST_CHECKED : BST_UNCHECKED, 0);
   }
   UpdateWaterfallToggleButtons(app);
   UpdateFreezeButton(app);
@@ -1276,6 +1321,11 @@ void ResetUiSessionState(AppState* app) {
   app->showRidgeOverlay = true;
   app->differenceWaterfallEnabled = false;
   app->dotDashAssistEnabled = true;
+  app->showCoherenceOverlay = true;
+  app->showUncertaintyHalos = true;
+  app->showCadenceStrip = true;
+  app->showLookNextHeatmap = true;
+  app->showTrackZoomLanes = true;
   app->waterfallZoom = 1.0;
   app->waterfallPanPx = 0;
   app->waterfallFrozen = false;
@@ -1327,6 +1377,11 @@ void ResetUiSessionState(AppState* app) {
   if (app->ridgeOverlayCheck) SendMessageW(app->ridgeOverlayCheck, BM_SETCHECK, BST_CHECKED, 0);
   if (app->diffWaterfallCheck) SendMessageW(app->diffWaterfallCheck, BM_SETCHECK, BST_UNCHECKED, 0);
   if (app->dotDashAssistCheck) SendMessageW(app->dotDashAssistCheck, BM_SETCHECK, BST_CHECKED, 0);
+  if (app->coherenceOverlayCheck) SendMessageW(app->coherenceOverlayCheck, BM_SETCHECK, BST_CHECKED, 0);
+  if (app->uncertaintyHalosCheck) SendMessageW(app->uncertaintyHalosCheck, BM_SETCHECK, BST_CHECKED, 0);
+  if (app->cadenceStripCheck) SendMessageW(app->cadenceStripCheck, BM_SETCHECK, BST_CHECKED, 0);
+  if (app->lookNextHeatmapCheck) SendMessageW(app->lookNextHeatmapCheck, BM_SETCHECK, BST_CHECKED, 0);
+  if (app->trackZoomLanesCheck) SendMessageW(app->trackZoomLanesCheck, BM_SETCHECK, BST_CHECKED, 0);
   UpdateWaterfallToggleButtons(app);
   UpdateFreezeButton(app);
   if (app->agcFloorSlider) SendMessageW(app->agcFloorSlider, TBM_SETPOS, TRUE, static_cast<LPARAM>(app->agcFloorOffsetDb));
@@ -2922,7 +2977,7 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
   }
 
   // Coherence map overlay: highlights structures stable across time.
-  if (!app->waterfallCoherenceMask.empty()) {
+  if (app->showCoherenceOverlay && !app->waterfallCoherenceMask.empty()) {
     for (int x = plot.left; x < plot.right; x += 2) {
       const float xn = static_cast<float>(x - plot.left) /
                        std::max<int>(1, static_cast<int>(plot.right - plot.left - 1));
@@ -3555,7 +3610,7 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
   }
 
   // Track-centric multi zoom lanes (peak lock + top 2 candidate tracks).
-  if (srcW > 4 && !app->waterfallRgb.empty()) {
+  if (app->showTrackZoomLanes && srcW > 4 && !app->waterfallRgb.empty()) {
     std::vector<std::pair<int, std::wstring>> laneCenters;
     if (app->peakLockEnabled && app->peakLockBin >= 0) {
       std::wstringstream ls;
@@ -3881,7 +3936,7 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
       const float conf = std::clamp(r.confidence, 0.0f, 1.0f);
       const float uncertainty = std::clamp(1.0f - (0.60f * stab + 0.40f * conf), 0.0f, 1.0f);
       const int halo = std::max(0, static_cast<int>(std::round(5.0f * uncertainty)));
-      if (halo > 0) {
+      if (app->showUncertaintyHalos && halo > 0) {
         HPEN hp = CreatePen(PS_SOLID, 1, RGB(96, 140, 178));
         auto oldHp = reinterpret_cast<HPEN>(SelectObject(hdc, hp));
         MoveToEx(hdc, x0, y - halo, nullptr);
@@ -3999,7 +4054,7 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
   }
 
   // CW cadence strip for selected/best track in view.
-  if (app && !app->overlayRows.empty()) {
+  if (app && app->showCadenceStrip && !app->overlayRows.empty()) {
     const ndb::DecodeResult* focus = nullptr;
     float bestScore = -1.0f;
     for (const auto& r : app->overlayRows) {
@@ -4071,7 +4126,7 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
   }
 
   // Micro heatmap "where to look next".
-  if (app && !app->overlayRows.empty()) {
+  if (app && app->showLookNextHeatmap && !app->overlayRows.empty()) {
     RECT hm = {plot.right - 110, plot.bottom - 84, plot.right - 10, plot.bottom - 8};
     HBRUSH hbg = CreateSolidBrush(RGB(8, 14, 20));
     FillRect(hdc, &hm, hbg);
@@ -5621,12 +5676,42 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                                               WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                                               m + 1746, y, 72, 30, hwnd,
                                               (HMENU)kIdRidgeOverlayButton, nullptr, nullptr);
+      app->coherenceOverlayCheck = CreateWindowW(
+          L"BUTTON", L"Coh",
+          WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, m + 1360, y + 32, 52, 24, hwnd,
+          (HMENU)kIdCoherenceOverlayCheck, nullptr, nullptr);
+      SendMessageW(app->coherenceOverlayCheck, BM_SETCHECK,
+                   app->showCoherenceOverlay ? BST_CHECKED : BST_UNCHECKED, 0);
+      app->uncertaintyHalosCheck = CreateWindowW(
+          L"BUTTON", L"Halo",
+          WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, m + 1414, y + 32, 58, 24, hwnd,
+          (HMENU)kIdUncertaintyHalosCheck, nullptr, nullptr);
+      SendMessageW(app->uncertaintyHalosCheck, BM_SETCHECK,
+                   app->showUncertaintyHalos ? BST_CHECKED : BST_UNCHECKED, 0);
+      app->cadenceStripCheck = CreateWindowW(
+          L"BUTTON", L"Cad",
+          WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, m + 1474, y + 32, 52, 24, hwnd,
+          (HMENU)kIdCadenceStripCheck, nullptr, nullptr);
+      SendMessageW(app->cadenceStripCheck, BM_SETCHECK,
+                   app->showCadenceStrip ? BST_CHECKED : BST_UNCHECKED, 0);
+      app->lookNextHeatmapCheck = CreateWindowW(
+          L"BUTTON", L"Heat",
+          WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, m + 1528, y + 32, 58, 24, hwnd,
+          (HMENU)kIdLookNextHeatmapCheck, nullptr, nullptr);
+      SendMessageW(app->lookNextHeatmapCheck, BM_SETCHECK,
+                   app->showLookNextHeatmap ? BST_CHECKED : BST_UNCHECKED, 0);
+      app->trackZoomLanesCheck = CreateWindowW(
+          L"BUTTON", L"Lanes",
+          WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, m + 1588, y + 32, 62, 24, hwnd,
+          (HMENU)kIdTrackZoomLanesCheck, nullptr, nullptr);
+      SendMessageW(app->trackZoomLanesCheck, BM_SETCHECK,
+                   app->showTrackZoomLanes ? BST_CHECKED : BST_UNCHECKED, 0);
       app->freezeButton = CreateWindowW(L"BUTTON", L"FREEZE OFF",
                                         WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                        m + 1568, y + 32, 104, 26, hwnd,
+                                        m + 1654, y + 32, 104, 26, hwnd,
                                         (HMENU)kIdFreezeButton, nullptr, nullptr);
       CreateWindowW(L"BUTTON", L"3D DX Weak Preset", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                    m + 1676, y + 32, 132, 26, hwnd, (HMENU)kIdWaterfallDxPreset, nullptr, nullptr);
+                    m + 1762, y + 32, 132, 26, hwnd, (HMENU)kIdWaterfallDxPreset, nullptr, nullptr);
       UpdateWaterfallToggleButtons(app);
       UpdateFreezeButton(app);
       y += 62;
@@ -6193,6 +6278,36 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case kIdDotDashAssistCheck:
           app->dotDashAssistEnabled =
               (SendMessageW(app->dotDashAssistCheck, BM_GETCHECK, 0, 0) == BST_CHECKED);
+          SaveUiState(app);
+          InvalidateRect(app->chartPanel, nullptr, TRUE);
+          return 0;
+        case kIdCoherenceOverlayCheck:
+          app->showCoherenceOverlay =
+              (SendMessageW(app->coherenceOverlayCheck, BM_GETCHECK, 0, 0) == BST_CHECKED);
+          SaveUiState(app);
+          InvalidateRect(app->chartPanel, nullptr, TRUE);
+          return 0;
+        case kIdUncertaintyHalosCheck:
+          app->showUncertaintyHalos =
+              (SendMessageW(app->uncertaintyHalosCheck, BM_GETCHECK, 0, 0) == BST_CHECKED);
+          SaveUiState(app);
+          InvalidateRect(app->chartPanel, nullptr, TRUE);
+          return 0;
+        case kIdCadenceStripCheck:
+          app->showCadenceStrip =
+              (SendMessageW(app->cadenceStripCheck, BM_GETCHECK, 0, 0) == BST_CHECKED);
+          SaveUiState(app);
+          InvalidateRect(app->chartPanel, nullptr, TRUE);
+          return 0;
+        case kIdLookNextHeatmapCheck:
+          app->showLookNextHeatmap =
+              (SendMessageW(app->lookNextHeatmapCheck, BM_GETCHECK, 0, 0) == BST_CHECKED);
+          SaveUiState(app);
+          InvalidateRect(app->chartPanel, nullptr, TRUE);
+          return 0;
+        case kIdTrackZoomLanesCheck:
+          app->showTrackZoomLanes =
+              (SendMessageW(app->trackZoomLanesCheck, BM_GETCHECK, 0, 0) == BST_CHECKED);
           SaveUiState(app);
           InvalidateRect(app->chartPanel, nullptr, TRUE);
           return 0;
