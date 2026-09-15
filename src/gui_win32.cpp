@@ -9093,15 +9093,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_CTLCOLOREDIT: {
       HDC hdc = reinterpret_cast<HDC>(wParam);
       SetBkMode(hdc, TRANSPARENT);
-      SetTextColor(hdc, RGB(216, 228, 240));
-      SetBkColor(hdc, RGB(18, 24, 32));
-      static HBRUSH bg = CreateSolidBrush(RGB(18, 24, 32));
+      SetTextColor(hdc, RGB(34, 44, 54));
+      SetBkColor(hdc, RGB(236, 240, 244));
+      static HBRUSH bg = CreateSolidBrush(RGB(236, 240, 244));
       return reinterpret_cast<LRESULT>(bg);
     }
     case WM_ERASEBKGND: {
       RECT r;
       GetClientRect(hwnd, &r);
-      HBRUSH b = CreateSolidBrush(RGB(14, 20, 28));
+      HBRUSH b = CreateSolidBrush(RGB(232, 236, 240));
       FillRect(reinterpret_cast<HDC>(wParam), &r, b);
       DeleteObject(b);
       return 1;
