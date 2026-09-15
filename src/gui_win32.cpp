@@ -2869,9 +2869,14 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
     if (bx + 72 >= badgeStopX) {
       return;
     }
+    const ULONGLONG ms = GetTickCount64();
+    const float phase = static_cast<float>((ms % 1800ULL) / 1800.0);
+    const float wave = 0.5f + 0.5f * std::sin(phase * 6.2831853f);
+    const float pulse = (intensity > 0.72f) ? (0.08f + 0.12f * wave * std::clamp((intensity - 0.72f) / 0.28f, 0.0f, 1.0f)) : 0.0f;
+    const float dynIntensity = std::clamp(intensity + pulse, 0.0f, 1.0f);
     RECT br = {bx, by, bx + 78, by + 18};
-    const COLORREF bgDyn = blendUp(bg, intensity);
-    const COLORREF fgDyn = blendUp(fg, intensity * 0.6f);
+    const COLORREF bgDyn = blendUp(bg, dynIntensity);
+    const COLORREF fgDyn = blendUp(fg, dynIntensity * 0.6f);
     HBRUSH bb = CreateSolidBrush(bgDyn);
     FillRect(hdc, &br, bb);
     DeleteObject(bb);
@@ -6924,7 +6929,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       }
       return 0;
     case WM_TIMER:
-      if (app && wParam == kWaterfallTimerId && app->running) {
+      if (app && wParam == kWaterfallTimerId) {
+        const bool pulseActive = (!app->previewWav.samples.empty()) &&
+                                 (app->showCoherenceOverlay || app->showUncertaintyHalos ||
+                                  app->showCadenceStrip || app->showLookNextHeatmap ||
+                                  app->showTrackZoomLanes);
+        if (!app->running && !pulseActive) {
+          return 0;
+        }
         const ULONGLONG now = GetTickCount64();
         const double elapsedMs = static_cast<double>(now - app->decodeStartTickMs);
         double rtPct = 0.0;
@@ -6935,14 +6947,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             rtPct = (elapsedMs / (durSec * 1000.0)) * 100.0;
           }
         }
-        const double target = std::clamp(std::max(static_cast<double>(app->decodeProgressPct), rtPct),
-                                         0.0, 100.0);
-        app->decodeProgressVisualPct += (target - app->decodeProgressVisualPct) * 0.24;
-        if (target - app->decodeProgressVisualPct > 2.5) {
-          app->decodeProgressVisualPct += 0.45;
+        if (app->running) {
+          const double target = std::clamp(std::max(static_cast<double>(app->decodeProgressPct), rtPct),
+                                           0.0, 100.0);
+          app->decodeProgressVisualPct += (target - app->decodeProgressVisualPct) * 0.24;
+          if (target - app->decodeProgressVisualPct > 2.5) {
+            app->decodeProgressVisualPct += 0.45;
+          }
+          app->decodeProgressVisualPct = std::clamp(app->decodeProgressVisualPct, 0.0, 100.0);
+          UpdatePanadapterPersistence(app);
         }
-        app->decodeProgressVisualPct = std::clamp(app->decodeProgressVisualPct, 0.0, 100.0);
-        UpdatePanadapterPersistence(app);
         InvalidateRect(app->chartPanel, nullptr, TRUE);
       }
       return 0;
