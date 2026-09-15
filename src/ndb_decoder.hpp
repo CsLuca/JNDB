@@ -40,6 +40,10 @@ struct DecoderConfig {
   int minTrackFrames = 15;
   float sustainPenalty = 0.02f;
   bool useAmtcFull = false;
+  bool useMhtLite = false;
+  int mhtBeamWidth = 6;
+  int mhtPerTrackCandidates = 3;
+  int mhtMaxNewTracksPerFrame = 4;
   int maxTrackGapFrames = 3;
   float envelopeAlpha = 0.05f;
   float thresholdK = 2.5f;
@@ -92,6 +96,9 @@ struct DecoderConfig {
   bool enableAutoNotch = false;
   int autoNotchMaxCount = 3;
   float autoNotchSnrDb = 8.0f;
+  bool enableManualNotch = false;
+  std::vector<float> manualNotchFreqHz;
+  std::vector<float> manualNotchWidthHz;
   bool enableImpulseBlanker = false;
   float impulseBlankerSigma = 6.0f;
   int impulseBlankerHalfWindow = 3;
@@ -101,6 +108,13 @@ struct DecoderConfig {
   int cfarTrainFreq = 6;
   int cfarGuardFreq = 1;
   float cfarScale = 2.8f;
+  bool enableGlrt = false;
+  float glrtPfa = 0.1f;
+  float glrtMinSnrDb = -3.0f;
+  float scoreFusionWGlrt = 0.35f;
+  float scoreFusionWCyclo = 0.35f;
+  float scoreFusionWDecoder = 0.30f;
+  float scoreFusionBias = 0.0f;
   std::string confidenceCalibration = "none";
   float plattA = 5.0f;
   float plattB = -2.5f;
@@ -108,6 +122,7 @@ struct DecoderConfig {
   std::string freqPriorFile;
   float freqPriorTolHz = 2.5f;
   bool requirePriorMatch = false;
+  bool forcePriorId = false;
   int decodeThreads = 1;
   unsigned int deterministicSeed = 1337U;
 };
@@ -136,11 +151,40 @@ struct DecodeStats {
   float qualityScore = 0.0f;
 };
 
+struct SymbolRunDebug {
+  int index = 0;
+  int value = 0;
+  int lengthSamples = 0;
+  float units = 0.0f;
+  std::string timingClass;
+};
+
+struct TrackDebugInfo {
+  int trackId = 0;
+  float freqHz = 0.0f;
+  float startSec = 0.0f;
+  float endSec = 0.0f;
+  int dotSamples = 0;
+  float threshold = 0.0f;
+  int runCount = 0;
+  int onRunCount = 0;
+  int offRunCount = 0;
+  std::string decoderModelRequested;
+  std::string decoderModelUsed;
+  std::string decodedText;
+  std::string plausibleId;
+  float plausibleIdScore = 0.0f;
+  bool kept = false;
+  std::string rejectReason;
+  std::vector<SymbolRunDebug> runPreview;
+};
+
 using ProgressCallback = std::function<void(int percent, const std::string& stage)>;
 
 std::vector<DecodeResult> DecodeNdbFromWav(const std::vector<float>& samples, int sampleRate,
                                            const DecoderConfig& cfg,
                                            DecodeStats* stats = nullptr,
-                                           ProgressCallback progress = {});
+                                           ProgressCallback progress = {},
+                                           std::vector<TrackDebugInfo>* debugTracks = nullptr);
 
 }  // namespace ndb

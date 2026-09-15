@@ -1428,26 +1428,64 @@ void EnsureWaterfallPreview(AppState* app) {
     }
   }
 
-  // Selective denoise: smooth granular noise but preserve narrow CW/NDB ridges.
+  // Selective smoothing v2: anisotropic kernel oriented for thin CW ridges
+  // (more smoothing along time, conservative across frequency).
   std::vector<float> den = norm;
+  auto at = [&](int tt, int bb) -> float {
+    return norm[static_cast<std::size_t>(tt * spec.binCount + bb)];
+  };
   for (int t = 1; t + 1 < spec.frameCount; ++t) {
     for (int b = 2; b + 2 < spec.binCount; ++b) {
       const std::size_t i = static_cast<std::size_t>(t * spec.binCount + b);
       const float c = norm[i];
-      const float lx = std::fabs(c - norm[static_cast<std::size_t>(t * spec.binCount + (b - 1))]);
-      const float rx = std::fabs(c - norm[static_cast<std::size_t>(t * spec.binCount + (b + 1))]);
-      const float ty = std::fabs(c - norm[static_cast<std::size_t>((t - 1) * spec.binCount + b)]);
-      const float by = std::fabs(c - norm[static_cast<std::size_t>((t + 1) * spec.binCount + b)]);
-      const float edge = std::max(std::max(lx, rx), std::max(ty, by));
-      if (edge < 0.08f && c < 0.72f) {
-        const float h = 0.5f * c + 0.25f *
-                                     (norm[static_cast<std::size_t>(t * spec.binCount + (b - 1))] +
-                                      norm[static_cast<std::size_t>(t * spec.binCount + (b + 1))]);
-        const float v = 0.5f * c + 0.25f *
-                                     (norm[static_cast<std::size_t>((t - 1) * spec.binCount + b)] +
-                                      norm[static_cast<std::size_t>((t + 1) * spec.binCount + b)]);
-        den[i] = 0.55f * h + 0.45f * v;
+
+      const float tm = at(t - 1, b);
+      const float tp = at(t + 1, b);
+      const float fm = at(t, b - 1);
+      const float fp = at(t, b + 1);
+      const float tmm = at(t - 2, b);
+      const float tpp = at(t + 2, b);
+      const float fmm = at(t, b - 2);
+      const float fpp = at(t, b + 2);
+
+      const float gradT = std::fabs(tp - tm);
+      const float gradF = std::fabs(fp - fm);
+      const float ridgeLike = (gradF > (1.25f * gradT) && c > 0.20f) ? 1.0f : 0.0f;
+
+      const float gateT0 = std::exp(-8.0f * std::fabs(tm - c));
+      const float gateT1 = std::exp(-8.0f * std::fabs(tp - c));
+      const float gateT2 = std::exp(-9.5f * std::fabs(tmm - c));
+      const float gateT3 = std::exp(-9.5f * std::fabs(tpp - c));
+      const float gateF0 = std::exp(-11.0f * std::fabs(fm - c));
+      const float gateF1 = std::exp(-11.0f * std::fabs(fp - c));
+      const float gateF2 = std::exp(-12.0f * std::fabs(fmm - c));
+      const float gateF3 = std::exp(-12.0f * std::fabs(fpp - c));
+
+      float wtC = 0.62f;
+      float wtT1 = 0.16f;
+      float wtT2 = 0.06f;
+      float wtF1 = 0.08f;
+      float wtF2 = 0.02f;
+      if (ridgeLike > 0.5f) {
+        wtC = 0.68f;
+        wtT1 = 0.19f;
+        wtT2 = 0.08f;
+        wtF1 = 0.035f;
+        wtF2 = 0.008f;
       }
+
+      const float sumW = wtC + wtT1 * (gateT0 + gateT1) + wtT2 * (gateT2 + gateT3) +
+                         wtF1 * (gateF0 + gateF1) + wtF2 * (gateF2 + gateF3);
+      const float smooth = (wtC * c + wtT1 * (gateT0 * tm + gateT1 * tp) +
+                            wtT2 * (gateT2 * tmm + gateT3 * tpp) +
+                            wtF1 * (gateF0 * fm + gateF1 * fp) +
+                            wtF2 * (gateF2 * fmm + gateF3 * fpp)) /
+                           std::max(1e-6f, sumW);
+
+      const float noiseLike = std::max(0.0f, 0.75f - c) *
+                              std::exp(-7.0f * std::min(0.35f, std::fabs(gradF - gradT)));
+      const float blend = std::clamp(0.15f + 0.55f * noiseLike, 0.10f, ridgeLike > 0.5f ? 0.38f : 0.62f);
+      den[i] = (1.0f - blend) * c + blend * smooth;
     }
   }
   norm.swap(den);
@@ -3401,6 +3439,15 @@ void StartDecode(AppState* app) {
   const std::string outputPath = ToUtf8(outW);
   const std::string metricsPath = ToUtf8(metW);
   const std::string priorPath = ToUtf8(GetText(app->priorEdit));
+  const bool manualNotchEnabled = app->manualNotchEnabled;
+  std::vector<float> manualNotchFreqHz;
+  std::vector<float> manualNotchWidthHz;
+  manualNotchFreqHz.reserve(app->manualNotches.size());
+  manualNotchWidthHz.reserve(app->manualNotches.size());
+  for (const auto& n : app->manualNotches) {
+    manualNotchFreqHz.push_back(n.freqHz);
+    manualNotchWidthHz.push_back(n.widthHz);
+  }
   int sel = 0;
   if (app->presetCombo) {
     sel = static_cast<int>(SendMessageW(app->presetCombo, CB_GETCURSEL, 0, 0));
@@ -3433,7 +3480,8 @@ void StartDecode(AppState* app) {
   }
 
   app->worker = std::thread([app, inputPath, outputPath, metricsPath, priorPath, mode, calibSel,
-                             requirePrior]() {
+                             requirePrior, manualNotchEnabled, manualNotchFreqHz,
+                             manualNotchWidthHz]() {
     auto* result = new DecodeThreadResult();
     result->outputPath = outputPath;
     result->metricsPath = metricsPath;
@@ -3461,6 +3509,9 @@ void StartDecode(AppState* app) {
       cfg.enableFreqPriors = false;
       cfg.requirePriorMatch = false;
     }
+    cfg.enableManualNotch = manualNotchEnabled;
+    cfg.manualNotchFreqHz = manualNotchFreqHz;
+    cfg.manualNotchWidthHz = manualNotchWidthHz;
     auto progress = [app](int percent, const std::string&) {
       PostMessageW(app->hwnd, kMsgProgress, static_cast<WPARAM>(percent), 0);
     };

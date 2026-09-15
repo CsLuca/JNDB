@@ -38,6 +38,9 @@ struct FrontEndConfig {
   bool enableAutoNotch = true;
   int autoNotchMaxCount = 3;
   float autoNotchSnrDb = 8.0f;
+  bool enableManualNotch = false;
+  std::vector<float> manualNotchFreqHz;
+  std::vector<float> manualNotchWidthHz;
   bool enableImpulseBlanker = true;
   float impulseBlankerSigma = 6.0f;
   int impulseBlankerHalfWindow = 3;
@@ -52,6 +55,9 @@ struct CandidateDetectorConfig {
   int cfarTrainFreq = 6;
   int cfarGuardFreq = 1;
   float cfarScale = 2.8f;
+  bool enableGlrt = false;
+  float glrtPfa = 0.1f;
+  float glrtMinSnrDb = -3.0f;
 };
 
 Spectrogram ComputeSpectrogram(const std::vector<float>& samples, int sampleRate, int fftSize,
@@ -66,12 +72,20 @@ std::vector<Track> TrackTonesAmtcLite(const Spectrogram& spec,
                                       const std::vector<std::vector<int>>& candidates,
                                       int maxStepBins, int minTrackLengthFrames,
                                       float sustainPenalty);
+std::vector<Track> TrackTonesMhtLite(const Spectrogram& spec,
+                                     const std::vector<std::vector<int>>& candidates,
+                                     int maxStepBins, int minTrackLengthFrames,
+                                     float sustainPenalty, int beamWidth,
+                                     int perTrackCandidates, int maxNewTracksPerFrame,
+                                     int maxTrackGapFrames);
 std::vector<Track> TrackTonesAmtcFull(const Spectrogram& spec,
                                       const std::vector<std::vector<int>>& candidates,
                                       int maxStepBins, int minTrackLengthFrames,
                                       float sustainPenalty, int maxGapFrames);
 std::vector<std::complex<float>> MixDown(const std::vector<float>& x, int sampleRate,
                                          float freqHz);
+std::vector<std::complex<float>> MixDownDynamic(const std::vector<float>& x, int sampleRate,
+                                                float freqHz, float driftHz, int windowSamples);
 std::vector<float> DecimateAverage(const std::vector<float>& x, int factor);
 std::vector<float> Envelope(const std::vector<std::complex<float>>& iq);
 std::vector<float> ExponentialSmoother(const std::vector<float>& x, float alpha);

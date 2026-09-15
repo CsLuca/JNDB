@@ -364,6 +364,15 @@ std::vector<float> ApplyFrontEndDenoise(const std::vector<float>& samples, int s
     y = OnePoleLowPass(y, sampleRate, std::max(cfg.bandLowHz + 20.0f, cfg.bandHighHz));
   }
   y = AutoNotch(y, sampleRate, cfg);
+  if (cfg.enableManualNotch && !cfg.manualNotchFreqHz.empty()) {
+    const std::size_t n = cfg.manualNotchFreqHz.size();
+    for (std::size_t i = 0; i < n; ++i) {
+      const float f0 = cfg.manualNotchFreqHz[i];
+      const float w = (i < cfg.manualNotchWidthHz.size()) ? cfg.manualNotchWidthHz[i] : 24.0f;
+      const float q = std::clamp(f0 / std::max(6.0f, w), 1.5f, 60.0f);
+      y = ApplyBiquadNotch(y, sampleRate, f0, q);
+    }
+  }
   y = ImpulseBlanker(y, cfg);
   return y;
 }
@@ -434,9 +443,12 @@ std::vector<std::vector<int>> DetectCandidateBinsMad(const Spectrogram& spec, fl
 std::vector<std::vector<int>> DetectCandidateBinsMadCfar2D(const Spectrogram& spec,
                                                             const CandidateDetectorConfig& cfg) {
   auto mad = DetectCandidateBinsMad(spec, cfg.madFactor, cfg.guardBins);
-  if (!cfg.enableCfar2d || spec.frameCount <= 0 || spec.binCount <= 0) {
+  if ((!cfg.enableCfar2d && !cfg.enableGlrt) || spec.frameCount <= 0 || spec.binCount <= 0) {
     return mad;
   }
+
+  const float pfa = std::clamp(cfg.glrtPfa, 1e-6f, 0.99f);
+  const float glrtEta = -std::log(pfa);
 
   std::vector<std::vector<int>> out(static_cast<std::size_t>(spec.frameCount));
   for (int f = 0; f < spec.frameCount; ++f) {
@@ -444,8 +456,22 @@ std::vector<std::vector<int>> DetectCandidateBinsMadCfar2D(const Spectrogram& sp
       const float v = spec.At(f, b);
       const float noise = CfarCellNoise(spec, f, b, cfg.cfarTrainTime, cfg.cfarGuardTime,
                                         cfg.cfarTrainFreq, cfg.cfarGuardFreq);
-      const float thr = noise * std::max(1.1f, cfg.cfarScale);
-      if (v > thr) {
+      const float n = std::max(1e-12f, noise);
+      const float ratio = v / n;
+
+      bool passCfar = true;
+      if (cfg.enableCfar2d) {
+        const float thr = n * std::max(1.1f, cfg.cfarScale);
+        passCfar = v > thr;
+      }
+
+      bool passGlrt = true;
+      if (cfg.enableGlrt) {
+        const float snrDb = 10.0f * std::log10(std::max(1e-6f, ratio));
+        passGlrt = ratio >= glrtEta && snrDb >= cfg.glrtMinSnrDb;
+      }
+
+      if (passCfar && passGlrt) {
         out[static_cast<std::size_t>(f)].push_back(b);
       }
     }
@@ -537,6 +563,171 @@ std::vector<Track> TrackTonesAmtcLite(const Spectrogram& spec,
       completed.push_back(std::move(tr.track));
     }
   }
+  return completed;
+}
+
+std::vector<Track> TrackTonesMhtLite(const Spectrogram& spec,
+                                     const std::vector<std::vector<int>>& candidates,
+                                     int maxStepBins, int minTrackLengthFrames,
+                                     float sustainPenalty, int beamWidth,
+                                     int perTrackCandidates, int maxNewTracksPerFrame,
+                                     int maxTrackGapFrames) {
+  struct ActiveTrack {
+    Track track;
+    int lastFrame = -1;
+    int lastBin = -1;
+    float score = 0.0f;
+  };
+  struct Hyp {
+    std::vector<ActiveTrack> active;
+    float score = 0.0f;
+  };
+
+  std::vector<Track> completed;
+  std::vector<Hyp> hyps(1);
+  int nextId = 1;
+
+  const int beam = std::max(2, beamWidth);
+  const int perTrCand = std::max(1, perTrackCandidates);
+  const int newTrackLim = std::max(0, maxNewTracksPerFrame);
+  const int maxGap = std::max(1, maxTrackGapFrames);
+
+  for (int f = 0; f < spec.frameCount; ++f) {
+    const auto& bins = candidates[static_cast<std::size_t>(f)];
+    std::vector<Hyp> expanded;
+    expanded.reserve(hyps.size() * 3);
+
+    for (const auto& h : hyps) {
+      Hyp base = h;
+
+      std::vector<ActiveTrack> stillActive;
+      stillActive.reserve(base.active.size());
+      for (auto& tr : base.active) {
+        if (f - tr.lastFrame > maxGap) {
+          if (static_cast<int>(tr.track.points.size()) >= minTrackLengthFrames) {
+            completed.push_back(std::move(tr.track));
+          }
+        } else {
+          stillActive.push_back(std::move(tr));
+        }
+      }
+      base.active = std::move(stillActive);
+
+      std::vector<bool> used(static_cast<std::size_t>(bins.size()), false);
+      std::vector<Hyp> partials(1, base);
+
+      for (std::size_t ti = 0; ti < base.active.size(); ++ti) {
+        std::vector<Hyp> nextPartials;
+        for (const auto& ph : partials) {
+          struct Cand {
+            int idx = -1;
+            float delta = -1e30f;
+            int step = 0;
+          };
+          std::vector<Cand> cands;
+          for (std::size_t bi = 0; bi < bins.size(); ++bi) {
+            if (used[bi]) {
+              continue;
+            }
+            const int step = std::abs(bins[bi] - ph.active[ti].lastBin);
+            if (step > maxStepBins) {
+              continue;
+            }
+            const float e = spec.At(f, bins[bi]);
+            const float delta = e * (1.0f + sustainPenalty) - 0.18f * static_cast<float>(step);
+            cands.push_back(Cand{static_cast<int>(bi), delta, step});
+          }
+          std::sort(cands.begin(), cands.end(), [](const Cand& a, const Cand& b) { return a.delta > b.delta; });
+
+          Hyp skip = ph;
+          skip.score -= 0.04f;
+          nextPartials.push_back(std::move(skip));
+
+          int keep = 0;
+          for (const auto& c : cands) {
+            if (keep >= perTrCand) {
+              break;
+            }
+            Hyp nh = ph;
+            const int b = bins[static_cast<std::size_t>(c.idx)];
+            const float freq = static_cast<float>(b) * static_cast<float>(spec.sampleRate) /
+                               static_cast<float>(spec.fftSize);
+            const float e = spec.At(f, b);
+            nh.active[ti].track.points.push_back(TrackPoint{f, freq, e});
+            nh.active[ti].lastFrame = f;
+            nh.active[ti].lastBin = b;
+            nh.active[ti].score += c.delta;
+            nh.score += c.delta;
+            nextPartials.push_back(std::move(nh));
+            ++keep;
+          }
+        }
+
+        std::sort(nextPartials.begin(), nextPartials.end(), [](const Hyp& a, const Hyp& b) {
+          return a.score > b.score;
+        });
+        if (static_cast<int>(nextPartials.size()) > beam) {
+          nextPartials.resize(static_cast<std::size_t>(beam));
+        }
+        partials = std::move(nextPartials);
+      }
+
+      for (auto& ph : partials) {
+        if (newTrackLim > 0 && !bins.empty()) {
+          std::vector<std::pair<float, int>> bestBins;
+          bestBins.reserve(bins.size());
+          for (std::size_t i = 0; i < bins.size(); ++i) {
+            bestBins.push_back({spec.At(f, bins[i]), static_cast<int>(i)});
+          }
+          std::sort(bestBins.begin(), bestBins.end(), [](const auto& a, const auto& b) {
+            return a.first > b.first;
+          });
+          int added = 0;
+          for (const auto& eb : bestBins) {
+            if (added >= newTrackLim) {
+              break;
+            }
+            const int bi = eb.second;
+            const int b = bins[static_cast<std::size_t>(bi)];
+            const float freq = static_cast<float>(b) * static_cast<float>(spec.sampleRate) /
+                               static_cast<float>(spec.fftSize);
+            ActiveTrack nt;
+            nt.track.id = nextId++;
+            nt.track.points.push_back(TrackPoint{f, freq, spec.At(f, b)});
+            nt.lastFrame = f;
+            nt.lastBin = b;
+            nt.score = spec.At(f, b) * 0.8f;
+            ph.active.push_back(std::move(nt));
+            ph.score += spec.At(f, b) * 0.05f;
+            ++added;
+          }
+        }
+        expanded.push_back(std::move(ph));
+      }
+    }
+
+    if (expanded.empty()) {
+      hyps = std::vector<Hyp>(1);
+      continue;
+    }
+    std::sort(expanded.begin(), expanded.end(), [](const Hyp& a, const Hyp& b) {
+      return a.score > b.score;
+    });
+    if (static_cast<int>(expanded.size()) > beam) {
+      expanded.resize(static_cast<std::size_t>(beam));
+    }
+    hyps = std::move(expanded);
+  }
+
+  if (!hyps.empty()) {
+    std::sort(hyps.begin(), hyps.end(), [](const Hyp& a, const Hyp& b) { return a.score > b.score; });
+    for (auto& tr : hyps.front().active) {
+      if (static_cast<int>(tr.track.points.size()) >= minTrackLengthFrames) {
+        completed.push_back(std::move(tr.track));
+      }
+    }
+  }
+
   return completed;
 }
 
@@ -650,6 +841,74 @@ std::vector<std::complex<float>> MixDown(const std::vector<float>& x, int sample
   for (std::size_t n = 0; n < x.size(); ++n) {
     const float ph = w * static_cast<float>(n);
     y[n] = std::complex<float>(x[n] * std::cos(ph), x[n] * std::sin(ph));
+  }
+  return y;
+}
+
+std::vector<std::complex<float>> MixDownDynamic(const std::vector<float>& x, int sampleRate,
+                                                float freqHz, float driftHz, int windowSamples) {
+  if (x.empty() || sampleRate <= 0) {
+    return {};
+  }
+  const int w = std::max(64, windowSamples);
+  const int hop = std::max(16, w / 4);
+  const float maxBinHz = static_cast<float>(sampleRate) / static_cast<float>(w);
+  const float drift = std::max(0.0f, std::min(std::fabs(driftHz), 3.5f * maxBinHz));
+
+  std::vector<float> estFreq((x.size() + static_cast<std::size_t>(hop) - 1U) /
+                                 static_cast<std::size_t>(hop),
+                             freqHz);
+
+  auto powerAt = [&](std::size_t i0, float testF) {
+    const std::size_t i1 = std::min(x.size(), i0 + static_cast<std::size_t>(w));
+    if (i1 <= i0 + 8U) {
+      return 0.0f;
+    }
+    const float wc = -2.0f * kPi * testF / static_cast<float>(sampleRate);
+    float re = 0.0f;
+    float im = 0.0f;
+    std::size_t n = 0;
+    for (std::size_t i = i0; i < i1; ++i, ++n) {
+      const float ph = wc * static_cast<float>(n);
+      re += x[i] * std::cos(ph);
+      im += x[i] * std::sin(ph);
+    }
+    return re * re + im * im;
+  };
+
+  for (std::size_t wi = 0; wi < estFreq.size(); ++wi) {
+    const std::size_t i0 = wi * static_cast<std::size_t>(hop);
+    const float f0 = freqHz;
+    const float f1 = freqHz - drift;
+    const float f2 = freqHz + drift;
+    const float p0 = powerAt(i0, f0);
+    const float p1 = powerAt(i0, f1);
+    const float p2 = powerAt(i0, f2);
+    float bestF = f0;
+    float bestP = p0;
+    if (p1 > bestP) {
+      bestP = p1;
+      bestF = f1;
+    }
+    if (p2 > bestP) {
+      bestP = p2;
+      bestF = f2;
+    }
+    estFreq[wi] = bestF;
+  }
+
+  for (std::size_t i = 1; i < estFreq.size(); ++i) {
+    estFreq[i] = 0.30f * estFreq[i] + 0.70f * estFreq[i - 1];
+  }
+
+  std::vector<std::complex<float>> y(x.size());
+  float phase = 0.0f;
+  for (std::size_t n = 0; n < x.size(); ++n) {
+    const std::size_t wi = std::min(estFreq.size() - 1U,
+                                    n / static_cast<std::size_t>(hop));
+    const float f = estFreq[wi];
+    phase += -2.0f * kPi * f / static_cast<float>(sampleRate);
+    y[n] = std::complex<float>(x[n] * std::cos(phase), x[n] * std::sin(phase));
   }
   return y;
 }
