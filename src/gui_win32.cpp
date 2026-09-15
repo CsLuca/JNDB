@@ -2726,6 +2726,46 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
   RECT titleRc = {rc.left + 10, rc.top + 6, rc.right - 10, rc.top + 28};
   DrawTextW(hdc, L"NDB Waterfall Preview", -1, &titleRc, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
 
+  // Active mode badges
+  int bx = rc.left + 220;
+  const int by = rc.top + 6;
+  auto drawBadge = [&](const wchar_t* txt, COLORREF fg, COLORREF bg) {
+    RECT br = {bx, by, bx + 78, by + 18};
+    HBRUSH bb = CreateSolidBrush(bg);
+    FillRect(hdc, &br, bb);
+    DeleteObject(bb);
+    HPEN bp = CreatePen(PS_SOLID, 1, RGB(64, 84, 104));
+    auto oldBp = reinterpret_cast<HPEN>(SelectObject(hdc, bp));
+    MoveToEx(hdc, br.left, br.top, nullptr);
+    LineTo(hdc, br.right - 1, br.top);
+    LineTo(hdc, br.right - 1, br.bottom - 1);
+    LineTo(hdc, br.left, br.bottom - 1);
+    LineTo(hdc, br.left, br.top);
+    SelectObject(hdc, oldBp);
+    DeleteObject(bp);
+    SetTextColor(hdc, fg);
+    DrawTextW(hdc, txt, -1, &br, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    bx += 84;
+  };
+  if (app && app->differenceWaterfallEnabled) {
+    drawBadge(L"DIFF", RGB(232, 238, 246), RGB(54, 68, 90));
+  }
+  if (app && app->dotDashAssistEnabled) {
+    drawBadge(L"DOTDASH", RGB(224, 248, 255), RGB(50, 80, 96));
+  }
+  if (app && app->waterfallFrozen) {
+    drawBadge(L"FREEZE", RGB(255, 238, 176), RGB(92, 76, 28));
+  }
+  if (app) {
+    const bool heavyQrm = (app->qrmBirdieSuppression > 1.15f || app->qrmRidgeAggressiveness > 1.15f);
+    const bool noQrm = (app->qrmBirdieSuppression < 0.90f && app->qrmRidgeAggressiveness < 0.95f);
+    if (heavyQrm) {
+      drawBadge(L"QRM HEAVY", RGB(255, 224, 202), RGB(112, 58, 44));
+    } else if (noQrm) {
+      drawBadge(L"QRM NO", RGB(212, 255, 220), RGB(44, 98, 66));
+    }
+  }
+
   const int panH = 112;
   RECT panRc = {rc.left + 14, rc.top + 30, rc.right - 14, rc.top + 30 + panH};
   DrawPanadapter(hdc, panRc, app);
