@@ -192,6 +192,7 @@ struct AppState {
   int waterfallH = 0;
   std::vector<float> panInstantDb;
   std::vector<float> panAvgDb;
+  std::vector<float> panSlowDb;
   std::vector<float> panPeakDb;
   float panAvgAlpha = 0.08f;
   float panPeakDecay = 0.12f;
@@ -1350,6 +1351,7 @@ void EnsureWaterfallPreview(AppState* app) {
   app->waterfallDbRender.assign(static_cast<std::size_t>(app->waterfallW * app->waterfallH), -120.0f);
   app->panInstantDb.assign(static_cast<std::size_t>(app->waterfallH), -120.0f);
   app->panAvgDb.assign(static_cast<std::size_t>(app->waterfallH), -120.0f);
+  app->panSlowDb.assign(static_cast<std::size_t>(app->waterfallH), -120.0f);
   app->panPeakDb.assign(static_cast<std::size_t>(app->waterfallH), -120.0f);
 
   std::vector<float> lv(static_cast<std::size_t>(spec.frameCount * spec.binCount), 0.0f);
@@ -1379,6 +1381,7 @@ void EnsureWaterfallPreview(AppState* app) {
     const float avg = (n > 0) ? static_cast<float>(acc / static_cast<double>(n)) : inst;
     app->panInstantDb[static_cast<std::size_t>(bi - 1)] = inst;
     app->panAvgDb[static_cast<std::size_t>(bi - 1)] = avg;
+    app->panSlowDb[static_cast<std::size_t>(bi - 1)] = avg;
     app->panPeakDb[static_cast<std::size_t>(bi - 1)] = std::max(inst, avg);
   }
 
@@ -1489,6 +1492,41 @@ void EnsureWaterfallPreview(AppState* app) {
     }
   }
   norm.swap(den);
+
+  // Adaptive local contrast (CLAHE-like lite): boosts weak traces while
+  // preserving strong ridges and avoiding global over-compression.
+  std::vector<float> local = norm;
+  for (int t = 2; t + 2 < spec.frameCount; ++t) {
+    for (int b = 2; b + 2 < spec.binCount; ++b) {
+      const std::size_t i = static_cast<std::size_t>(t * spec.binCount + b);
+      const float c = norm[i];
+      double sum = 0.0;
+      double sum2 = 0.0;
+      int cnt = 0;
+      for (int dt = -2; dt <= 2; ++dt) {
+        for (int db = -1; db <= 1; ++db) {
+          const float v = norm[static_cast<std::size_t>((t + dt) * spec.binCount + (b + db))];
+          sum += v;
+          sum2 += static_cast<double>(v) * static_cast<double>(v);
+          ++cnt;
+        }
+      }
+      const float mu = static_cast<float>(sum / std::max(1, cnt));
+      const float var = static_cast<float>(std::max(0.0, (sum2 / std::max(1, cnt)) -
+                                                             static_cast<double>(mu * mu)));
+      const float sigma = std::sqrt(var + 1e-6f);
+
+      const float z = (c - mu) / std::max(0.05f, 1.85f * sigma);
+      float ce = 0.5f + 0.5f * std::tanh(1.35f * z);
+      ce = std::clamp(ce, 0.0f, 1.0f);
+
+      const float lowContrast = std::clamp((0.16f - sigma) / 0.16f, 0.0f, 1.0f);
+      const float weakTone = std::clamp((0.68f - c) / 0.68f, 0.0f, 1.0f);
+      const float boost = std::clamp(0.10f + 0.55f * lowContrast * weakTone, 0.0f, 0.58f);
+      local[i] = (1.0f - boost) * c + boost * ce;
+    }
+  }
+  norm.swap(local);
 
   const auto palette = PaletteStopsByPreset(app);
 
@@ -1999,6 +2037,9 @@ void UpdatePanadapterPersistence(AppState* app) {
   if (app->panAvgDb.size() != static_cast<std::size_t>(app->waterfallH)) {
     app->panAvgDb.assign(static_cast<std::size_t>(app->waterfallH), app->panMinDb);
   }
+  if (app->panSlowDb.size() != static_cast<std::size_t>(app->waterfallH)) {
+    app->panSlowDb.assign(static_cast<std::size_t>(app->waterfallH), app->panMinDb);
+  }
   if (app->panPeakDb.size() != static_cast<std::size_t>(app->waterfallH)) {
     app->panPeakDb.assign(static_cast<std::size_t>(app->waterfallH), app->panMinDb);
   }
@@ -2016,8 +2057,11 @@ void UpdatePanadapterPersistence(AppState* app) {
     const float inst = app->waterfallDbRender[static_cast<std::size_t>(y * app->waterfallW + col)];
     app->panInstantDb[static_cast<std::size_t>(y)] = inst;
     const float a = std::clamp(app->panAvgAlpha, 0.01f, 0.40f);
+    const float aSlow = std::clamp(a * 0.25f, 0.005f, 0.12f);
     app->panAvgDb[static_cast<std::size_t>(y)] =
         (1.0f - a) * app->panAvgDb[static_cast<std::size_t>(y)] + a * inst;
+    app->panSlowDb[static_cast<std::size_t>(y)] =
+        (1.0f - aSlow) * app->panSlowDb[static_cast<std::size_t>(y)] + aSlow * inst;
     const float decayed = app->panPeakDb[static_cast<std::size_t>(y)] -
                           std::clamp(app->panPeakDecay, 0.01f, 1.20f);
     app->panPeakDb[static_cast<std::size_t>(y)] = std::max(decayed, inst);
@@ -2042,7 +2086,7 @@ void DrawPanadapter(HDC hdc, const RECT& rc, AppState* app) {
   SetBkMode(hdc, TRANSPARENT);
   SetTextColor(hdc, RGB(170, 198, 222));
   RECT tr = {rc.left + 8, rc.top + 2, rc.right - 8, rc.top + 18};
-  DrawTextW(hdc, L"Panadapter  Instant/Avg/Peak", -1, &tr, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+  DrawTextW(hdc, L"Panadapter  Fast/Slow/Max", -1, &tr, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
 
   if (!app || app->panInstantDb.empty()) {
     RECT m = {rc.left + 8, rc.top + 18, rc.right - 8, rc.bottom - 6};
@@ -2093,8 +2137,53 @@ void DrawPanadapter(HDC hdc, const RECT& rc, AppState* app) {
   };
 
   drawSeries(app->panPeakDb, RGB(255, 104, 94), 1);
-  drawSeries(app->panAvgDb, RGB(95, 190, 240), 1);
+  drawSeries(app->panSlowDb, RGB(122, 144, 255), 1);
+  drawSeries(app->panAvgDb, RGB(95, 190, 240), 2);
   drawSeries(app->panInstantDb, RGB(255, 226, 92), 2);
+
+  // Noise-floor and dynamic threshold overlays.
+  if (!app->panSlowDb.empty()) {
+    std::vector<float> tmp = app->panSlowDb;
+    const auto qAt = [&](float q) {
+      const std::size_t idx = static_cast<std::size_t>(std::clamp(q, 0.0f, 1.0f) *
+                                                       static_cast<float>(std::max<std::size_t>(1, tmp.size() - 1)));
+      std::nth_element(tmp.begin(), tmp.begin() + static_cast<std::ptrdiff_t>(idx), tmp.end());
+      return tmp[idx];
+    };
+    const float noiseFloorDb = qAt(0.22f);
+    const float thrDb = noiseFloorDb + 8.0f;
+    const auto yForDb = [&](float db) {
+      const float yn = std::clamp((db - minDb) / std::max(1.0f, (maxDb - minDb)), 0.0f, 1.0f);
+      return plot.bottom - static_cast<int>(yn * (plot.bottom - plot.top));
+    };
+    const int yNoise = yForDb(noiseFloorDb);
+    const int yThr = yForDb(thrDb);
+
+    HPEN pn = CreatePen(PS_DOT, 1, RGB(118, 172, 214));
+    auto oldPn = reinterpret_cast<HPEN>(SelectObject(hdc, pn));
+    MoveToEx(hdc, plot.left, yNoise, nullptr);
+    LineTo(hdc, plot.right, yNoise);
+    SelectObject(hdc, oldPn);
+    DeleteObject(pn);
+
+    HPEN pt = CreatePen(PS_DASH, 1, RGB(255, 168, 98));
+    auto oldPt = reinterpret_cast<HPEN>(SelectObject(hdc, pt));
+    MoveToEx(hdc, plot.left, yThr, nullptr);
+    LineTo(hdc, plot.right, yThr);
+    SelectObject(hdc, oldPt);
+    DeleteObject(pt);
+
+    RECT nr = {plot.left + 6, yNoise - 10, plot.left + 180, yNoise + 6};
+    RECT trr = {plot.left + 186, yThr - 10, plot.left + 360, yThr + 6};
+    std::wstringstream nss;
+    nss << L"NF " << std::fixed << std::setprecision(1) << noiseFloorDb << L" dB";
+    std::wstringstream tss;
+    tss << L"TH " << std::fixed << std::setprecision(1) << thrDb << L" dB";
+    SetTextColor(hdc, RGB(156, 206, 244));
+    DrawTextW(hdc, nss.str().c_str(), -1, &nr, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+    SetTextColor(hdc, RGB(255, 186, 120));
+    DrawTextW(hdc, tss.str().c_str(), -1, &trr, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+  }
 
   if (app->previewWav.sampleRate > 0) {
     const float nyq = 0.5f * static_cast<float>(app->previewWav.sampleRate);
@@ -3366,6 +3455,7 @@ void InvalidateWaterfallCache(AppState* app) {
   app->waterfallDbRender.clear();
   app->panInstantDb.clear();
   app->panAvgDb.clear();
+  app->panSlowDb.clear();
   app->panPeakDb.clear();
   app->panLastCol = -1;
   app->waterfallW = 0;
