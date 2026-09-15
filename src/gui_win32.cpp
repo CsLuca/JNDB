@@ -132,6 +132,9 @@ constexpr int kIdMacroSceneScout = 1097;
 constexpr int kIdMacroSceneVerify = 1098;
 constexpr int kIdMacroSceneDecode = 1099;
 constexpr int kIdMacroSceneQrmFight = 1100;
+constexpr int kIdSectionDiagToggle = 1101;
+constexpr int kIdSectionHudToggle = 1102;
+constexpr int kIdSectionAdvToggle = 1103;
 
 constexpr UINT kMsgProgress = WM_APP + 1;
 constexpr UINT kMsgDone = WM_APP + 2;
@@ -239,6 +242,9 @@ struct AppState {
   HWND macroSceneVerifyBtn = nullptr;
   HWND macroSceneDecodeBtn = nullptr;
   HWND macroSceneQrmFightBtn = nullptr;
+  HWND sectionDiagToggleBtn = nullptr;
+  HWND sectionHudToggleBtn = nullptr;
+  HWND sectionAdvToggleBtn = nullptr;
   HWND fftPreviewCombo = nullptr;
   HWND autoBookmarkCheck = nullptr;
   HWND autoBookmarkConfSlider = nullptr;
@@ -330,6 +336,9 @@ struct AppState {
   bool showDriftHistogram = true;
   bool showRegimeTimeline = true;
   int macroSceneMode = 0;  // 0 scout, 1 verify, 2 decode, 3 qrm
+  bool showDiagSection = true;
+  bool showHudSection = true;
+  bool showAdvSection = true;
   bool autoFocusEnabled = true;
   float autoFocusStrength = 0.28f;
   float agcFloorOffsetDb = -3.0f;
@@ -936,6 +945,40 @@ void UpdateFreezeButton(AppState* app) {
   SetWindowTextW(app->freezeButton, app->waterfallFrozen ? L"FREEZE ON" : L"FREEZE OFF");
 }
 
+void ApplySectionVisibility(AppState* app) {
+  if (!app) return;
+  auto vis = [](HWND h, bool v) {
+    if (h) ShowWindow(h, v ? SW_SHOW : SW_HIDE);
+  };
+
+  // Diagnostic section
+  vis(app->trustRankingCheck, app->showDiagSection);
+  vis(app->explainabilityCheck, app->showDiagSection);
+  vis(app->driftHistogramCheck, app->showDiagSection);
+  vis(app->regimeTimelineCheck, app->showDiagSection);
+
+  // HUD section
+  vis(app->hudPresetCombo, app->showHudSection);
+  vis(app->macroSceneScoutBtn, app->showHudSection);
+  vis(app->macroSceneVerifyBtn, app->showHudSection);
+  vis(app->macroSceneDecodeBtn, app->showHudSection);
+  vis(app->macroSceneQrmFightBtn, app->showHudSection);
+
+  // Advanced section
+  vis(app->beaconSplitCheck, app->showAdvSection);
+  vis(app->timeWarpLensCheck, app->showAdvSection);
+  vis(app->driftGhostCheck, app->showAdvSection);
+  vis(app->noiseRibbonCheck, app->showAdvSection);
+  vis(app->trackSparkbarsCheck, app->showAdvSection);
+  vis(app->autoClutterCheck, app->showAdvSection);
+  vis(app->phaseOverlayCheck, app->showAdvSection);
+  vis(app->snrIsolinesCheck, app->showAdvSection);
+
+  if (app->sectionDiagToggleBtn) SetWindowTextW(app->sectionDiagToggleBtn, app->showDiagSection ? L"Diag [-]" : L"Diag [+]");
+  if (app->sectionHudToggleBtn) SetWindowTextW(app->sectionHudToggleBtn, app->showHudSection ? L"HUD [-]" : L"HUD [+]");
+  if (app->sectionAdvToggleBtn) SetWindowTextW(app->sectionAdvToggleBtn, app->showAdvSection ? L"Adv [-]" : L"Adv [+]");
+}
+
 void ToggleWaterfallFreeze(AppState* app) {
   if (!app) {
     return;
@@ -1019,6 +1062,9 @@ void SaveUiState(AppState* app) {
   WritePrivateProfileStringW(L"view", L"drift_histogram", app->showDriftHistogram ? L"1" : L"0", s);
   WritePrivateProfileStringW(L"view", L"regime_timeline", app->showRegimeTimeline ? L"1" : L"0", s);
   WritePrivateProfileStringW(L"view", L"macro_scene_mode", std::to_wstring(app->macroSceneMode).c_str(), s);
+  WritePrivateProfileStringW(L"view", L"section_diag", app->showDiagSection ? L"1" : L"0", s);
+  WritePrivateProfileStringW(L"view", L"section_hud", app->showHudSection ? L"1" : L"0", s);
+  WritePrivateProfileStringW(L"view", L"section_adv", app->showAdvSection ? L"1" : L"0", s);
   WritePrivateProfileStringW(L"view", L"frozen", app->waterfallFrozen ? L"1" : L"0", s);
   WritePrivateProfileStringW(L"view", L"freeze_col", std::to_wstring(app->waterfallFreezeCenterCol).c_str(), s);
   WritePrivateProfileStringW(L"view", L"zoom", std::to_wstring(app->waterfallZoom).c_str(), s);
@@ -1109,6 +1155,9 @@ void LoadUiState(AppState* app) {
   app->showDriftHistogram = IniReadBool(app->uiStatePath, L"view", L"drift_histogram", app->showDriftHistogram);
   app->showRegimeTimeline = IniReadBool(app->uiStatePath, L"view", L"regime_timeline", app->showRegimeTimeline);
   app->macroSceneMode = std::clamp(IniReadInt(app->uiStatePath, L"view", L"macro_scene_mode", app->macroSceneMode), 0, 3);
+  app->showDiagSection = IniReadBool(app->uiStatePath, L"view", L"section_diag", app->showDiagSection);
+  app->showHudSection = IniReadBool(app->uiStatePath, L"view", L"section_hud", app->showHudSection);
+  app->showAdvSection = IniReadBool(app->uiStatePath, L"view", L"section_adv", app->showAdvSection);
   app->waterfallFrozen = IniReadBool(app->uiStatePath, L"view", L"frozen", app->waterfallFrozen);
   app->waterfallFreezeCenterCol = IniReadInt(app->uiStatePath, L"view", L"freeze_col", app->waterfallFreezeCenterCol);
   app->waterfallZoom = std::clamp(static_cast<double>(IniReadFloat(app->uiStatePath, L"view", L"zoom", static_cast<float>(app->waterfallZoom))), 1.0, 8.0);
@@ -1277,6 +1326,8 @@ void LoadUiState(AppState* app) {
     SendMessageW(app->regimeTimelineCheck, BM_SETCHECK,
                  app->showRegimeTimeline ? BST_CHECKED : BST_UNCHECKED, 0);
   }
+  ApplySectionVisibility(app);
+  ApplySectionVisibility(app);
   UpdateWaterfallToggleButtons(app);
   UpdateFreezeButton(app);
   if (app->shadingCheck) {
@@ -1639,6 +1690,9 @@ void ResetUiSessionState(AppState* app) {
   app->showDriftHistogram = true;
   app->showRegimeTimeline = true;
   app->macroSceneMode = 0;
+  app->showDiagSection = true;
+  app->showHudSection = true;
+  app->showAdvSection = true;
   app->waterfallZoom = 1.0;
   app->waterfallPanPx = 0;
   app->waterfallFrozen = false;
@@ -7877,6 +7931,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       app->macroSceneQrmFightBtn = CreateWindowW(L"BUTTON", L"QRM", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                                                   m + 1828, y + 146, 58, 22, hwnd,
                                                   (HMENU)kIdMacroSceneQrmFight, nullptr, nullptr);
+      app->sectionDiagToggleBtn = CreateWindowW(L"BUTTON", app->showDiagSection ? L"Diag [-]" : L"Diag [+]",
+                                                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                                 m + 1502, y + 146, 70, 22, hwnd,
+                                                 (HMENU)kIdSectionDiagToggle, nullptr, nullptr);
+      app->sectionHudToggleBtn = CreateWindowW(L"BUTTON", app->showHudSection ? L"HUD [-]" : L"HUD [+]",
+                                                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                                m + 1576, y + 146, 66, 22, hwnd,
+                                                (HMENU)kIdSectionHudToggle, nullptr, nullptr);
+      app->sectionAdvToggleBtn = CreateWindowW(L"BUTTON", app->showAdvSection ? L"Adv [-]" : L"Adv [+]",
+                                                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                                m + 1646, y + 146, 66, 22, hwnd,
+                                                (HMENU)kIdSectionAdvToggle, nullptr, nullptr);
       UpdateWaterfallToggleButtons(app);
       UpdateFreezeButton(app);
       y += 172;
@@ -8423,6 +8489,24 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           return 0;
         case kIdMacroSceneQrmFight:
           ApplyMacroScene(app, 3, L"QRM Fight");
+          return 0;
+        case kIdSectionDiagToggle:
+          app->showDiagSection = !app->showDiagSection;
+          ApplySectionVisibility(app);
+          SaveUiState(app);
+          InvalidateRect(app->chartPanel, nullptr, TRUE);
+          return 0;
+        case kIdSectionHudToggle:
+          app->showHudSection = !app->showHudSection;
+          ApplySectionVisibility(app);
+          SaveUiState(app);
+          InvalidateRect(app->chartPanel, nullptr, TRUE);
+          return 0;
+        case kIdSectionAdvToggle:
+          app->showAdvSection = !app->showAdvSection;
+          ApplySectionVisibility(app);
+          SaveUiState(app);
+          InvalidateRect(app->chartPanel, nullptr, TRUE);
           return 0;
         case kIdWaterfallFpsCombo:
           if (HIWORD(wParam) == CBN_SELCHANGE && app->waterfallFpsCombo) {
