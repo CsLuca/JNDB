@@ -97,6 +97,9 @@ constexpr int kIdLensStrengthSlider = 1062;
 constexpr int kIdBgRemovalSlider = 1063;
 constexpr int kIdSplitPointSlider = 1064;
 constexpr int kIdAutoFocusStrengthSlider = 1065;
+constexpr int kIdVisualPresetDxWeak = 1066;
+constexpr int kIdVisualPresetBalanced = 1067;
+constexpr int kIdVisualPresetClean = 1068;
 
 constexpr UINT kMsgProgress = WM_APP + 1;
 constexpr UINT kMsgDone = WM_APP + 2;
@@ -1126,6 +1129,43 @@ void ApplyAutoMarkPreset(AppState* app, float minConf, float midThr, float highT
   ss << L"AutoMark preset " << name << L": min/mid/high " << std::fixed << std::setprecision(2)
      << app->autoBookmarkMinConfidence << L"/" << app->autoBookmarkMidThreshold << L"/"
      << app->autoBookmarkHighThreshold;
+  SetStatus(app, ss.str());
+  InvalidateRect(app->chartPanel, nullptr, TRUE);
+}
+
+void ApplyVisualTuningPreset(AppState* app, float lens, float bg, float split,
+                             float autoFocus, const wchar_t* name) {
+  if (!app) {
+    return;
+  }
+  app->lensStrength = std::clamp(lens, 0.50f, 2.00f);
+  app->bgRemovalStrength = std::clamp(bg, 0.00f, 1.60f);
+  app->splitTonePoint = std::clamp(split, 0.35f, 0.80f);
+  app->autoFocusStrength = std::clamp(autoFocus, 0.0f, 1.0f);
+
+  if (app->lensStrengthSlider) {
+    SendMessageW(app->lensStrengthSlider, TBM_SETPOS, TRUE,
+                 static_cast<LPARAM>(std::round(app->lensStrength * 100.0f)));
+  }
+  if (app->bgRemovalSlider) {
+    SendMessageW(app->bgRemovalSlider, TBM_SETPOS, TRUE,
+                 static_cast<LPARAM>(std::round(app->bgRemovalStrength * 100.0f)));
+  }
+  if (app->splitPointSlider) {
+    SendMessageW(app->splitPointSlider, TBM_SETPOS, TRUE,
+                 static_cast<LPARAM>(std::round(app->splitTonePoint * 100.0f)));
+  }
+  if (app->autoFocusStrengthSlider) {
+    SendMessageW(app->autoFocusStrengthSlider, TBM_SETPOS, TRUE,
+                 static_cast<LPARAM>(std::round(app->autoFocusStrength * 100.0f)));
+  }
+
+  SaveUiState(app);
+  InvalidateWaterfallCache(app);
+  std::wstringstream ss;
+  ss << L"Visual preset " << name << L": lens/bg/split/AF " << std::fixed
+     << std::setprecision(2) << app->lensStrength << L"/" << app->bgRemovalStrength << L"/"
+     << app->splitTonePoint << L"/" << app->autoFocusStrength;
   SetStatus(app, ss.str());
   InvalidateRect(app->chartPanel, nullptr, TRUE);
 }
@@ -4633,6 +4673,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       SendMessageW(app->autoFocusStrengthSlider, TBM_SETRANGEMAX, FALSE, 100);
       SendMessageW(app->autoFocusStrengthSlider, TBM_SETPOS, TRUE,
                    static_cast<LPARAM>(std::round(app->autoFocusStrength * 100.0f)));
+      CreateWindowW(L"BUTTON", L"DX Weak", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                    m + 1570, y, 74, 28, hwnd, (HMENU)kIdVisualPresetDxWeak, nullptr, nullptr);
+      CreateWindowW(L"BUTTON", L"Balanced", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                    m + 1648, y, 78, 28, hwnd, (HMENU)kIdVisualPresetBalanced, nullptr,
+                    nullptr);
+      CreateWindowW(L"BUTTON", L"Clean", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                    m + 1730, y, 62, 28, hwnd, (HMENU)kIdVisualPresetClean, nullptr, nullptr);
       y += 34;
 
       CreateWindowW(L"STATIC", L"AGC Floor", WS_CHILD | WS_VISIBLE, m, y + 6, 64, 22, hwnd,
@@ -5199,6 +5246,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case kIdAutoMarkPresetWeak:
           ApplyAutoMarkPreset(app, 0.52f, 0.60f, 0.78f, L"Weak-Sig");
           SaveUiState(app);
+          return 0;
+        case kIdVisualPresetDxWeak:
+          ApplyVisualTuningPreset(app, 1.38f, 1.25f, 0.52f, 0.45f, L"DX Weak");
+          return 0;
+        case kIdVisualPresetBalanced:
+          ApplyVisualTuningPreset(app, 1.00f, 1.00f, 0.58f, 0.28f, L"Balanced");
+          return 0;
+        case kIdVisualPresetClean:
+          ApplyVisualTuningPreset(app, 0.76f, 0.45f, 0.64f, 0.16f, L"Clean");
           return 0;
         case kIdPeakLockButton:
           app->peakLockEnabled = !app->peakLockEnabled;
