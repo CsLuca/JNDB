@@ -2858,12 +2858,21 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
   int bx = rc.left + 220;
   const int badgeStopX = rc.right - 342;
   const int by = rc.top + 6;
-  auto drawBadge = [&](const wchar_t* txt, COLORREF fg, COLORREF bg) {
+  auto blendUp = [](COLORREF c, float k) -> COLORREF {
+    const float t = std::clamp(k, 0.0f, 1.0f);
+    const int r = static_cast<int>(std::round(GetRValue(c) + t * (255.0f - GetRValue(c)) * 0.55f));
+    const int g = static_cast<int>(std::round(GetGValue(c) + t * (255.0f - GetGValue(c)) * 0.55f));
+    const int b = static_cast<int>(std::round(GetBValue(c) + t * (255.0f - GetBValue(c)) * 0.55f));
+    return RGB(std::clamp(r, 0, 255), std::clamp(g, 0, 255), std::clamp(b, 0, 255));
+  };
+  auto drawBadge = [&](const wchar_t* txt, COLORREF fg, COLORREF bg, float intensity = 0.35f) {
     if (bx + 72 >= badgeStopX) {
       return;
     }
     RECT br = {bx, by, bx + 78, by + 18};
-    HBRUSH bb = CreateSolidBrush(bg);
+    const COLORREF bgDyn = blendUp(bg, intensity);
+    const COLORREF fgDyn = blendUp(fg, intensity * 0.6f);
+    HBRUSH bb = CreateSolidBrush(bgDyn);
     FillRect(hdc, &br, bb);
     DeleteObject(bb);
     HPEN bp = CreatePen(PS_SOLID, 1, RGB(64, 84, 104));
@@ -2875,10 +2884,58 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
     LineTo(hdc, br.left, br.top);
     SelectObject(hdc, oldBp);
     DeleteObject(bp);
-    SetTextColor(hdc, fg);
+    SetTextColor(hdc, fgDyn);
     DrawTextW(hdc, txt, -1, &br, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     bx += 84;
   };
+  float cohBadgeIntensity = 0.35f;
+  float haloBadgeIntensity = 0.35f;
+  float cadBadgeIntensity = 0.35f;
+  float heatBadgeIntensity = 0.35f;
+  float lanesBadgeIntensity = 0.35f;
+  if (app) {
+    if (!app->waterfallCoherenceMask.empty()) {
+      int hi = 0;
+      int cnt = 0;
+      const int step = std::max(1, app->waterfallW / 120);
+      for (int y = 0; y < app->waterfallH; y += 3) {
+        for (int x = 0; x < app->waterfallW; x += step) {
+          const std::uint8_t v = app->waterfallCoherenceMask[static_cast<std::size_t>(y * app->waterfallW + x)];
+          if (v >= 150) {
+            ++hi;
+          }
+          ++cnt;
+        }
+      }
+      cohBadgeIntensity = std::clamp(0.20f + 1.35f * (static_cast<float>(hi) / std::max(1.0f, static_cast<float>(cnt))),
+                                     0.0f, 1.0f);
+    }
+    if (!app->overlayRows.empty()) {
+      float maxHeat = 0.0f;
+      float maxCad = 0.0f;
+      float uncertSum = 0.0f;
+      int uncertCnt = 0;
+      std::vector<int> uniq;
+      for (const auto& r : app->overlayRows) {
+        const float c = std::clamp(r.confidence, 0.0f, 1.0f);
+        const float s = std::clamp(r.freqStabilityScore, 0.0f, 1.0f);
+        const float k = std::clamp(r.keyingPeriodicityScore, 0.0f, 1.0f);
+        maxHeat = std::max(maxHeat, 0.55f * c + 0.45f * s);
+        maxCad = std::max(maxCad, k);
+        uncertSum += (1.0f - (0.60f * s + 0.40f * c));
+        ++uncertCnt;
+        if (std::find(uniq.begin(), uniq.end(), r.trackId) == uniq.end()) {
+          uniq.push_back(r.trackId);
+        }
+      }
+      heatBadgeIntensity = std::clamp(0.10f + 0.95f * maxHeat, 0.0f, 1.0f);
+      cadBadgeIntensity = std::clamp(0.12f + 0.95f * maxCad, 0.0f, 1.0f);
+      const float meanU = uncertCnt > 0 ? (uncertSum / static_cast<float>(uncertCnt)) : 0.0f;
+      haloBadgeIntensity = std::clamp(0.12f + 0.95f * meanU, 0.0f, 1.0f);
+      lanesBadgeIntensity = std::clamp(0.18f + 0.30f * static_cast<float>(std::min(3, static_cast<int>(uniq.size()))),
+                                       0.0f, 1.0f);
+    }
+  }
   if (app && app->differenceWaterfallEnabled) {
     drawBadge(L"DIFF", RGB(232, 238, 246), RGB(54, 68, 90));
   }
@@ -2898,19 +2955,19 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
     }
   }
   if (app && app->showCoherenceOverlay) {
-    drawBadge(L"COH", RGB(208, 244, 252), RGB(42, 84, 102));
+    drawBadge(L"COH", RGB(208, 244, 252), RGB(42, 84, 102), cohBadgeIntensity);
   }
   if (app && app->showUncertaintyHalos) {
-    drawBadge(L"HALO", RGB(214, 232, 255), RGB(52, 72, 100));
+    drawBadge(L"HALO", RGB(214, 232, 255), RGB(52, 72, 100), haloBadgeIntensity);
   }
   if (app && app->showCadenceStrip) {
-    drawBadge(L"CAD", RGB(202, 238, 255), RGB(34, 76, 104));
+    drawBadge(L"CAD", RGB(202, 238, 255), RGB(34, 76, 104), cadBadgeIntensity);
   }
   if (app && app->showLookNextHeatmap) {
-    drawBadge(L"HEAT", RGB(244, 236, 212), RGB(96, 84, 34));
+    drawBadge(L"HEAT", RGB(244, 236, 212), RGB(96, 84, 34), heatBadgeIntensity);
   }
   if (app && app->showTrackZoomLanes) {
-    drawBadge(L"LANES", RGB(210, 246, 224), RGB(36, 92, 64));
+    drawBadge(L"LANES", RGB(210, 246, 224), RGB(36, 92, 64), lanesBadgeIntensity);
   }
 
   // Quick legend for advanced visual controls.
