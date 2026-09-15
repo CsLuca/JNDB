@@ -9218,13 +9218,15 @@ int RunGuiApplication(HINSTANCE instance, int nCmdShow) {
   const int workH = std::max(600, static_cast<int>(workArea.bottom - workArea.top));
   const int windowW = std::min(kDefaultWindowW, std::max(1100, workW - 24));
   const int windowH = std::min(kDefaultWindowH, std::max(700, workH - 24));
+  const int windowX = workArea.left + std::max(0, (workW - windowW) / 2);
+  const int windowY = workArea.top + std::max(0, (workH - windowH) / 2);
 
   HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"JNDB - Professional NDB Decoder", WS_OVERLAPPED |
                                                                                               WS_CAPTION |
                                                                                               WS_SYSMENU |
                                                                                               WS_MINIMIZEBOX,
-                              CW_USEDEFAULT, CW_USEDEFAULT, windowW, windowH, nullptr, nullptr,
-                              instance, &app);
+                              windowX, windowY, windowW, windowH, nullptr, nullptr, instance,
+                              &app);
   if (!hwnd) {
     return 1;
   }
