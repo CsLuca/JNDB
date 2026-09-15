@@ -3039,7 +3039,7 @@ void DrawWaterfallCard(AppState* app, HDC hdc, const RECT& rc) {
     }
     RECT hk = {map.left, map.top - 16, map.right, map.top - 1};
     SetTextColor(hdc, RGB(178, 206, 228));
-    DrawTextW(hdc, L"Hotkeys: A show auto, B/C add-clear, D del, L lock readout, M manual notch, O ridge, V wide, N/P nav, 1..9 jump, E/I exp-imp, Shift+Drag zoom box, Ctrl+R reset (Shift=skip prompt)",
+    DrawTextW(hdc, L"Hotkeys: A show auto, B/C add-clear, D del, L lock readout, M manual notch, O ridge, V wide, F6/F7/F8 visual presets, N/P nav, 1..9 jump, E/I exp-imp, Shift+Drag zoom box, Ctrl+R reset (Shift=skip prompt)",
               -1, &hk,
               DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
   }
@@ -4158,6 +4158,18 @@ LRESULT CALLBACK ChartProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_KEYDOWN:
       if (app) {
         const UINT vk = static_cast<UINT>(wParam);
+        if (vk == VK_F6) {
+          ApplyVisualTuningPreset(app, 1.38f, 1.25f, 0.52f, 0.45f, L"DX Weak");
+          return 0;
+        }
+        if (vk == VK_F7) {
+          ApplyVisualTuningPreset(app, 1.00f, 1.00f, 0.58f, 0.28f, L"Balanced");
+          return 0;
+        }
+        if (vk == VK_F8) {
+          ApplyVisualTuningPreset(app, 0.76f, 0.45f, 0.64f, 0.16f, L"Clean");
+          return 0;
+        }
         if (vk == VK_DELETE && app->activeManualNotch >= 0) {
           RemoveManualNotchByIndex(app, app->activeManualNotch);
           SaveUiState(app);
