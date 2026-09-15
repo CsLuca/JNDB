@@ -1456,27 +1456,27 @@ void ApplyResponsiveLayout(AppState* app) {
     return a.rc.left < b.rc.left;
   });
 
-  const int stripPad = 8;
+  const int stripPad = 6;
   int stripBottom = stripPad;
   if (app->runButton && IsWindow(app->runButton)) {
-    MoveWindow(app->runButton, stripPad, stripPad, 152, 32, TRUE);
-    stripBottom = std::max(stripBottom, stripPad + 32);
+    MoveWindow(app->runButton, stripPad, stripPad, 180, 40, TRUE);
+    stripBottom = std::max(stripBottom, stripPad + 40);
   }
   if (app->progressBar && IsWindow(app->progressBar)) {
-    const int px = stripPad + 160;
+    const int px = stripPad + 188;
     const int pw = std::max(220, cw - px - stripPad);
-    MoveWindow(app->progressBar, px, stripPad + 2, pw, 16, TRUE);
-    stripBottom = std::max(stripBottom, stripPad + 18);
+    MoveWindow(app->progressBar, px, stripPad + 4, pw, 20, TRUE);
+    stripBottom = std::max(stripBottom, stripPad + 24);
   }
   if (app->statusText && IsWindow(app->statusText)) {
-    const int sxTxt = stripPad + 160;
+    const int sxTxt = stripPad + 188;
     const int swTxt = std::max(220, cw - sxTxt - stripPad);
-    MoveWindow(app->statusText, sxTxt, stripPad + 20, swTxt, 20, TRUE);
-    stripBottom = std::max(stripBottom, stripPad + 40);
+    MoveWindow(app->statusText, sxTxt, stripPad + 28, swTxt, 24, TRUE);
+    stripBottom = std::max(stripBottom, stripPad + 52);
   }
 
   int curX = 8;
-  int curY = stripBottom + 8;
+  int curY = stripBottom + 10;
   int rowH = 0;
   int lastTop = std::numeric_limits<int>::min();
   int topBottom = stripBottom;
@@ -1504,18 +1504,18 @@ void ApplyResponsiveLayout(AppState* app) {
 
   int summaryY = ch - 8;
   if (app->summaryText && IsWindow(app->summaryText)) {
-    const int summaryX = 8;
-    const int summaryW = std::max(260, cw - 16);
-    const int summaryH = std::clamp(ch / 5, 96, 170);
-    summaryY = std::max(topBottom + 12, ch - summaryH - 8);
+    const int summaryX = 4;
+    const int summaryW = std::max(300, cw - 8);
+    const int summaryH = std::clamp(ch / 7, 72, 120);
+    summaryY = std::max(topBottom + 10, ch - summaryH - 6);
     MoveWindow(app->summaryText, summaryX, summaryY, summaryW, summaryH, TRUE);
   }
 
   if (app->chartPanel && IsWindow(app->chartPanel)) {
-    const int panelX = 8;
-    const int panelY = std::clamp(topBottom + 8, 80, std::max(80, summaryY - 200));
-    const int panelW = std::max(260, cw - 16);
-    const int panelH = std::max(170, summaryY - panelY - 8);
+    const int panelX = 4;
+    const int panelY = std::clamp(topBottom + 6, 86, std::max(86, summaryY - 240));
+    const int panelW = std::max(300, cw - 8);
+    const int panelH = std::max(220, summaryY - panelY - 6);
     MoveWindow(app->chartPanel, panelX, panelY, panelW, panelH, TRUE);
     SetWindowPos(app->chartPanel, HWND_BOTTOM, 0, 0, 0, 0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
@@ -8250,6 +8250,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
       for (HWND c : controls) {
         SendMessageW(c, WM_SETFONT, reinterpret_cast<WPARAM>(app->font), TRUE);
       }
+      SendMessageW(app->runButton, WM_SETFONT, reinterpret_cast<WPARAM>(app->fontBig), TRUE);
+      SendMessageW(app->statusText, WM_SETFONT, reinterpret_cast<WPARAM>(app->fontBig), TRUE);
 
       app->tooltipWnd = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr,
                                         WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX, CW_USEDEFAULT,
