@@ -91,6 +91,8 @@ constexpr int kIdManualNotchImport = 1056;
 constexpr int kIdWaterfallPersistCombo = 1057;
 constexpr int kIdWideViewCheck = 1058;
 constexpr int kIdRidgeOverlayCheck = 1059;
+constexpr int kIdWideViewButton = 1060;
+constexpr int kIdRidgeOverlayButton = 1061;
 
 constexpr UINT kMsgProgress = WM_APP + 1;
 constexpr UINT kMsgDone = WM_APP + 2;
@@ -167,6 +169,8 @@ struct AppState {
   HWND manualNotchCheck = nullptr;
   HWND wideViewCheck = nullptr;
   HWND ridgeOverlayCheck = nullptr;
+  HWND wideViewButton = nullptr;
+  HWND ridgeOverlayButton = nullptr;
   HWND autoBookmarkCheck = nullptr;
   HWND autoBookmarkConfSlider = nullptr;
   HWND autoBookmarkMidSlider = nullptr;
@@ -775,6 +779,19 @@ void SetSummary(AppState* app, const std::wstring& s) {
   SetText(app->summaryText, s);
 }
 
+void UpdateWaterfallToggleButtons(AppState* app) {
+  if (!app) {
+    return;
+  }
+  if (app->wideViewButton) {
+    SetWindowTextW(app->wideViewButton, app->showWideView ? L"WIDE ON" : L"WIDE OFF");
+  }
+  if (app->ridgeOverlayButton) {
+    SetWindowTextW(app->ridgeOverlayButton,
+                   app->showRidgeOverlay ? L"RIDGE ON" : L"RIDGE OFF");
+  }
+}
+
 float IniReadFloat(const std::wstring& path, const wchar_t* section, const wchar_t* key, float defVal) {
   wchar_t buf[64] = {};
   GetPrivateProfileStringW(section, key, L"", buf, 64, path.c_str());
@@ -956,6 +973,7 @@ void LoadUiState(AppState* app) {
     SendMessageW(app->ridgeOverlayCheck, BM_SETCHECK,
                  app->showRidgeOverlay ? BST_CHECKED : BST_UNCHECKED, 0);
   }
+  UpdateWaterfallToggleButtons(app);
   if (app->shadingCheck) {
     SendMessageW(app->shadingCheck, BM_SETCHECK,
                  app->shadingEnabled ? BST_CHECKED : BST_UNCHECKED, 0);
@@ -1121,6 +1139,7 @@ void ResetUiSessionState(AppState* app) {
   if (app->waterfallPersistCombo) SendMessageW(app->waterfallPersistCombo, CB_SETCURSEL, app->waterfallPersistenceMode, 0);
   if (app->wideViewCheck) SendMessageW(app->wideViewCheck, BM_SETCHECK, BST_CHECKED, 0);
   if (app->ridgeOverlayCheck) SendMessageW(app->ridgeOverlayCheck, BM_SETCHECK, BST_CHECKED, 0);
+  UpdateWaterfallToggleButtons(app);
   if (app->agcFloorSlider) SendMessageW(app->agcFloorSlider, TBM_SETPOS, TRUE, static_cast<LPARAM>(app->agcFloorOffsetDb));
   if (app->agcSpanSlider) SendMessageW(app->agcSpanSlider, TBM_SETPOS, TRUE, static_cast<LPARAM>(app->agcSpanDb));
   if (app->agcGainSlider) SendMessageW(app->agcGainSlider, TBM_SETPOS, TRUE, static_cast<LPARAM>(std::round(app->agcGain * 100.0f)));
@@ -3878,6 +3897,7 @@ LRESULT CALLBACK ChartProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             SendMessageW(app->wideViewCheck, BM_SETCHECK,
                          app->showWideView ? BST_CHECKED : BST_UNCHECKED, 0);
           }
+          UpdateWaterfallToggleButtons(app);
           SaveUiState(app);
           SetStatus(app, app->showWideView ? L"Wide view ON [V]" : L"Wide view OFF [V]");
           InvalidateRect(hwnd, nullptr, TRUE);
@@ -3889,6 +3909,7 @@ LRESULT CALLBACK ChartProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             SendMessageW(app->ridgeOverlayCheck, BM_SETCHECK,
                          app->showRidgeOverlay ? BST_CHECKED : BST_UNCHECKED, 0);
           }
+          UpdateWaterfallToggleButtons(app);
           SaveUiState(app);
           SetStatus(app, app->showRidgeOverlay ? L"Ridge overlay ON [O]"
                                                : L"Ridge overlay OFF [O]");
@@ -4293,8 +4314,17 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
           (HMENU)kIdRidgeOverlayCheck, nullptr, nullptr);
       SendMessageW(app->ridgeOverlayCheck, BM_SETCHECK,
                    app->showRidgeOverlay ? BST_CHECKED : BST_UNCHECKED, 0);
+      app->wideViewButton = CreateWindowW(L"BUTTON", L"WIDE ON",
+                                          WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                          m + 1418, y, 86, 30, hwnd,
+                                          (HMENU)kIdWideViewButton, nullptr, nullptr);
+      app->ridgeOverlayButton = CreateWindowW(L"BUTTON", L"RIDGE ON",
+                                              WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                              m + 1508, y, 86, 30, hwnd,
+                                              (HMENU)kIdRidgeOverlayButton, nullptr, nullptr);
       CreateWindowW(L"BUTTON", L"3D DX Weak Preset", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                    m + 1418, y, 156, 30, hwnd, (HMENU)kIdWaterfallDxPreset, nullptr, nullptr);
+                    m + 1598, y, 156, 30, hwnd, (HMENU)kIdWaterfallDxPreset, nullptr, nullptr);
+      UpdateWaterfallToggleButtons(app);
       y += 38;
 
       CreateWindowW(L"STATIC", L"Pan Avg Alpha", WS_CHILD | WS_VISIBLE, m + 1092, y + 6, 92, 22,
@@ -4498,7 +4528,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                                app->yawSlider, app->pitchSlider, app->shadingCheck,
                                app->colormapCombo, app->waterfallFpsCombo,
                                app->waterfallPersistCombo, app->wideViewCheck,
-                               app->ridgeOverlayCheck,
+                               app->ridgeOverlayCheck, app->wideViewButton,
+                               app->ridgeOverlayButton,
                                app->panAvgAlphaSlider, app->panPeakDecaySlider,
                                app->agcFloorSlider, app->agcSpanSlider, app->agcGainSlider,
                                app->agcGammaSlider, app->agcAutoCheck,
@@ -4771,13 +4802,37 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case kIdWideViewCheck:
           app->showWideView =
               (SendMessageW(app->wideViewCheck, BM_GETCHECK, 0, 0) == BST_CHECKED);
+          UpdateWaterfallToggleButtons(app);
           SaveUiState(app);
           InvalidateRect(app->chartPanel, nullptr, TRUE);
           return 0;
         case kIdRidgeOverlayCheck:
           app->showRidgeOverlay =
               (SendMessageW(app->ridgeOverlayCheck, BM_GETCHECK, 0, 0) == BST_CHECKED);
+          UpdateWaterfallToggleButtons(app);
           SaveUiState(app);
+          InvalidateRect(app->chartPanel, nullptr, TRUE);
+          return 0;
+        case kIdWideViewButton:
+          app->showWideView = !app->showWideView;
+          if (app->wideViewCheck) {
+            SendMessageW(app->wideViewCheck, BM_SETCHECK,
+                         app->showWideView ? BST_CHECKED : BST_UNCHECKED, 0);
+          }
+          UpdateWaterfallToggleButtons(app);
+          SaveUiState(app);
+          SetStatus(app, app->showWideView ? L"Wide view ON" : L"Wide view OFF");
+          InvalidateRect(app->chartPanel, nullptr, TRUE);
+          return 0;
+        case kIdRidgeOverlayButton:
+          app->showRidgeOverlay = !app->showRidgeOverlay;
+          if (app->ridgeOverlayCheck) {
+            SendMessageW(app->ridgeOverlayCheck, BM_SETCHECK,
+                         app->showRidgeOverlay ? BST_CHECKED : BST_UNCHECKED, 0);
+          }
+          UpdateWaterfallToggleButtons(app);
+          SaveUiState(app);
+          SetStatus(app, app->showRidgeOverlay ? L"Ridge overlay ON" : L"Ridge overlay OFF");
           InvalidateRect(app->chartPanel, nullptr, TRUE);
           return 0;
         case kIdAgcAutoCheck:
