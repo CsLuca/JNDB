@@ -1375,13 +1375,69 @@ void ApplyResponsiveLayout(AppState* app) {
   const double sx = static_cast<double>(cw) / static_cast<double>(app->baseClientW);
   const double sy = static_cast<double>(ch) / static_cast<double>(app->baseClientH);
 
+  struct CompactItem {
+    HWND hwnd = nullptr;
+    RECT rc = {0, 0, 0, 0};
+    int w = 0;
+    int h = 0;
+  };
+  std::vector<CompactItem> topControls;
+  topControls.reserve(app->childLayouts.size());
+
   for (const auto& c : app->childLayouts) {
     if (!IsWindow(c.hwnd)) continue;
+    if (c.hwnd == app->chartPanel) continue;
     const int x = static_cast<int>(std::round(c.rc.left * sx));
     const int y = static_cast<int>(std::round(c.rc.top * sy));
     const int w = std::max(24, static_cast<int>(std::round((c.rc.right - c.rc.left) * sx)));
     const int h = std::max(20, static_cast<int>(std::round((c.rc.bottom - c.rc.top) * sy)));
-    MoveWindow(c.hwnd, x, y, w, h, TRUE);
+
+    // Compact wrap zone for top control clusters to keep all buttons visible.
+    if (c.rc.top < 920) {
+      topControls.push_back(CompactItem{c.hwnd, c.rc, w, h});
+    } else {
+      MoveWindow(c.hwnd, x, y, w, h, TRUE);
+    }
+  }
+
+  std::sort(topControls.begin(), topControls.end(), [](const CompactItem& a, const CompactItem& b) {
+    if (a.rc.top != b.rc.top) return a.rc.top < b.rc.top;
+    return a.rc.left < b.rc.left;
+  });
+
+  int curX = 8;
+  int curY = 8;
+  int rowH = 0;
+  int lastTop = std::numeric_limits<int>::min();
+  int topBottom = 0;
+  for (const auto& it : topControls) {
+    if (std::abs(static_cast<int>(it.rc.top) - lastTop) > 18) {
+      if (rowH > 0) {
+        curY += rowH + 6;
+      }
+      curX = 8;
+      rowH = 0;
+      lastTop = static_cast<int>(it.rc.top);
+    }
+    const int w = std::min(std::max(24, it.w), std::max(40, cw - 16));
+    const int h = std::max(20, it.h);
+    if (curX + w > cw - 8) {
+      curX = 8;
+      curY += rowH + 4;
+      rowH = 0;
+    }
+    MoveWindow(it.hwnd, curX, curY, w, h, TRUE);
+    curX += w + 6;
+    rowH = std::max(rowH, h);
+    topBottom = std::max(topBottom, curY + h);
+  }
+
+  if (app->chartPanel && IsWindow(app->chartPanel)) {
+    const int panelX = 8;
+    const int panelY = std::clamp(topBottom + 8, 80, std::max(80, ch - 220));
+    const int panelW = std::max(260, cw - 16);
+    const int panelH = std::max(180, ch - panelY - 8);
+    MoveWindow(app->chartPanel, panelX, panelY, panelW, panelH, TRUE);
   }
 }
 
